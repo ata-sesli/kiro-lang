@@ -1,0 +1,22 @@
+// Chapter 8: Pointers
+
+var val = 100
+var p = ref val
+
+// Reading
+var v = deref p
+print "Value via ptr: " + v
+
+// Writing
+// deref p = 200 // Interpreter limitation: Mutation via deref not supported yet
+// print "New Value: " + val
+
+// Struct Pointers
+struct Point { x: num y: num }
+var pt = Point { x: 10, y: 20 }
+var pt_ref = ref pt
+
+// Auto-deref access
+print "Point X: " + pt_ref.x
+// pt_ref.y = 30 // Interpreter limitation
+// print "New Y: " + pt.y

@@ -1,0 +1,28 @@
+// Chapter 5: Error Handling
+
+error TooSmall = "Number is too small"
+error TooBig = "Number is too big"
+
+fn analyze(n: num) -> str! {
+    on (n < 10) { return TooSmall }
+    on (n > 100) { return TooBig }
+    return "Just Right"
+}
+
+// Test cases
+var inputs = list num { 5, 50, 150 }
+
+loop val in inputs {
+    var res = analyze(val)
+    print "Analyzing " + val + "..."
+    
+    on (res == TooSmall) {
+        print " -> Error: Too Small!"
+    } off {
+        on (res == TooBig) {
+            print " -> Error: Too Big!"
+        } off {
+            print " -> Result: " + res
+        }
+    }
+}

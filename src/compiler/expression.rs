@@ -30,18 +30,13 @@ impl Compiler {
                 format!("std::mem::take(&mut {})", name)
             }
 
-            Expression::Variable(v) => {
-                // Check if this is an error type (starts with uppercase)
-                if v.value
-                    .chars()
-                    .next()
-                    .map(|c| c.is_uppercase())
-                    .unwrap_or(false)
-                {
-                    // Assume it's an error type - generate Err(kiro_error_Name())
-                    return format!("Err(kiro_error_{}())", v.value);
-                }
+            Expression::ErrorRef(name_val) => {
+                let name = name_val.value;
+                // Generate Err(kiro_error_Name())
+                format!("Err(kiro_error_{}())", name)
+            }
 
+            Expression::Variable(v) => {
                 // Strict Purity: Ban capturing external variables
                 if self.in_pure_context && !self.pure_scope_params.contains(&v.value) {
                     panic!(

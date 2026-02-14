@@ -1,0 +1,13 @@
+error Fail = "Fail"
+
+fn test() -> num! {
+    return 1
+}
+
+fn main() {
+    var x = test()
+    on (x) {
+        print "Success"
+    }
+}
+main()

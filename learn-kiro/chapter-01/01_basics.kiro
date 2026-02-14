@@ -1,0 +1,35 @@
+// Chapter 1: The Basics
+
+/// A greeting function.
+/// Takes a name and prints hello.
+fn greet(name: str) {
+    print "Hello, " + name + "!"
+}
+
+// 1. Basic Printing
+print "--- Hello ---"
+greet("Learner")
+
+// 2. Variables
+print "\n--- Variables ---"
+pi = 3.14 // Immutable (constant)
+print "Pi is: " + pi
+
+var count = 0 // Mutable
+print "Count: " + count
+count = count + 1
+print "Count: " + count
+
+// 3. Types
+print "\n--- Types ---"
+is_fun = true // bool
+message = "Coding: " + is_fun // str + bool
+print message
+
+/// A documented struct.
+struct User {
+    name: str
+    active: bool
+}
+var u = User { name: "Kiro", active: true }
+print "User: " + u.name

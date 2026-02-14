@@ -1,0 +1,44 @@
+// Chapter 6: Advanced Concepts - Example Script
+
+// 1. Pointers
+print "--- Pointers ---"
+var value = 100
+var ptr = ref value
+
+// Dereference into a variable first
+var val_from_ptr = deref ptr
+print "Value via ptr: " + val_from_ptr
+
+// Mutating via pointer
+deref ptr = 200
+print "New Value: " + value
+
+// 2. Concurrency with Pipes
+print "\n--- Concurrency ---"
+
+// Create a pipe for strings
+var message_pipe = pipe str
+
+// Define worker function
+fn worker(out: pipe str) {
+    // Simulate work
+    // (In a real app, maybe sleep or compute heavy task)
+    
+    // Send message back
+    give out "Task Complete!"
+}
+
+// Spawn the worker
+run worker(message_pipe)
+
+print "Main thread waiting..."
+
+// Main thread waits for message
+var result = take message_pipe
+print "Received from worker: " + result
+
+// 3. Simple Host Function Simulation
+// (Note: This requires specific Rust runtime support to work properly)
+
+// rust fn read_file(path: str) -> str!
+// var file_content = read_file("test.txt")

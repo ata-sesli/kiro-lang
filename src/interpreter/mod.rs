@@ -23,6 +23,7 @@ pub struct Interpreter {
     pub in_pure_mode: bool,
     pub error_types: HashMap<String, String>, // name -> description
     pub pure_scope_params: HashSet<String>,   // Allowed params in pure scope
+    pub module_cache: HashMap<String, RuntimeVal>, // Loaded modules
 }
 
 impl Interpreter {
@@ -33,6 +34,7 @@ impl Interpreter {
             in_pure_mode: false,
             error_types: HashMap::new(),
             pure_scope_params: HashSet::new(),
+            module_cache: HashMap::new(),
         }
     }
     pub fn run(&mut self, program: grammar::Program) -> Result<(), String> {

@@ -1,0 +1,16 @@
+// Chapter 6: Async Execution
+
+fn task(id: num) {
+    // Simulate some work generally happens here
+    print "Task " + id + " started."
+}
+
+print "Starting tasks..."
+
+// Spawn multiple tasks
+loop i in 1..4 {
+    run task(i)
+}
+
+print "All tasks spawned. Main exiting."
+// Note: In a real app, you'd likely wait for them or use pipes (Chapter 7).

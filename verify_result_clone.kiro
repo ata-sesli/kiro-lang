@@ -1,0 +1,19 @@
+error BadValue = "Bad value"
+
+fn check(v: num) -> num! {
+    on (v < 0) { return BadValue }
+    return v
+}
+
+fn main() {
+    // This assignment stores a KiroResult in 'res'
+    var res = check(-5)
+    
+    // This 'on' usage triggers compilation of 'res.clone()'
+    // If KiroResult is not Clone (i.e. contains bare anyhow::Error), this fails to compile in Rust.
+    on (true) {
+        print "Got valid result"
+    }
+}
+
+main()

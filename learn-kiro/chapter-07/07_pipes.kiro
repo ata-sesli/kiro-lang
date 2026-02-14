@@ -1,0 +1,28 @@
+// Chapter 7: Pipes
+
+// Create a pipe for numbers
+var nums = pipe num
+
+// Spawn a producer
+fn producer(out: pipe num) {
+    loop i in 1..4 {
+        print "Sending " + i
+        give out i
+    }
+    // close out // (Optional, if supported language feature)
+    print "Producer done."
+}
+
+run producer(nums)
+
+// Consume in main
+print "Waiting for numbers..."
+
+var total = 0
+loop on (total < 6) { // Sum of 1+2+3 = 6
+    var n = take nums
+    print "Received: " + n
+    total = total + n
+}
+
+print "Total: " + total

@@ -1,0 +1,29 @@
+// Chapter 2: Control Flow
+
+// 1. Conditionals
+print "--- Conditionals ---"
+temp = 25
+on (temp > 20) {
+    print "It's warm."
+} off {
+    print "It's cold."
+}
+
+// 2. Loops
+print "\n--- While Loop ---"
+var i = 0
+loop on (i < 3) {
+    print "i = " + i
+    i = i + 1
+}
+
+print "\n--- Range Loop ---"
+loop x in 1..4 {
+    print "x = " + x
+}
+
+print "\n--- Filter Loop (Odds) ---"
+// loop n in 0..10 on (n % 2 != 0) { // Modulo not supported yet
+loop n in 1..10 per 2 {
+    print "Odd: " + n
+}

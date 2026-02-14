@@ -172,7 +172,7 @@ impl Interpreter {
                         for clause in clauses.iter() {
                             // If error_type is None, it's a catch-all
                             let matches = clause.error_type.is_none()
-                                || clause.error_type.as_ref() == Some(err_name);
+                                || clause.error_type.as_ref().map(|s| &s.value) == Some(err_name);
                             if matches {
                                 let result = self.execute_block(clause.body.clone())?;
                                 // If block returned normally with Void, implicitly return the error
@@ -352,7 +352,7 @@ impl Interpreter {
                     return Err("Pure Function Error: 'give' is forbidden.".to_string());
                 }
                 let chan = self.eval_expr(channel_expr)?;
-                let val = self.eval_expr(value_expr)?.as_float()?;
+                let val = self.eval_expr(value_expr)?;
 
                 if let RuntimeVal::Pipe(tx, _) = chan {
                     tx.send(val)
@@ -370,12 +370,23 @@ impl Interpreter {
             }
             // 7. Import Logic
             Statement::Import { module_name, .. } => {
-                // Resolve module path:
-                // 1. If starts with "std_", look in src/kiro_std/{module_name}/std_{module_name}.kiro
-                // 2. Otherwise, look in current directory as {name}.kiro
-                let (source, filename) = if module_name.starts_with("std_") {
-                    let module_suffix = &module_name[4..]; // Remove "std_" prefix
-                    let asset_path = format!("{}/{}.kiro", module_suffix, module_name);
+                if let Some(mod_val) = self.module_cache.get(&module_name) {
+                    println!("📦 Using cached module '{}'", module_name);
+                    // Inject into current env
+                    self.env.insert(
+                        module_name.clone(),
+                        crate::interpreter::values::Value {
+                            data: mod_val.clone(),
+                            is_mutable: false,
+                        },
+                    );
+                    return Ok(StatementResult::Normal(RuntimeVal::Void));
+                }
+
+                // 2. Resolve Source
+                let (src, _path) = if module_name.starts_with("std_") {
+                    let key = &module_name[4..];
+                    let asset_path = format!("{}/{}.kiro", key, module_name);
                     let content = crate::StdAssets::get(&asset_path)
                         .map(|f| std::str::from_utf8(f.data.as_ref()).unwrap().to_string())
                         .ok_or_else(|| {
@@ -392,16 +403,50 @@ impl Interpreter {
                     (content, filename)
                 };
 
-                println!("📦 Importing {}...", filename);
+                println!("📦 Importing {}...", module_name);
 
-                // We need to access the parse function.
-                // Since main.rs uses grammar::parse, and grammar is crate::grammar::grammar
-                // We cannot access it directly here easily without circular dependencies or exposing it.
-                // For now, simpler: Just support pure Kiro parsing if we had access to parser.
-                // But interpreter doesn't interpret imported modules yet in this snippet!
-                println!(
-                    "⚠️ [Interpreter] 'import' is not fully supported in pure interpreter mode."
+                // 3. Parse
+                let prog = crate::grammar::parse(&src)
+                    .map_err(|e| format!("Parse Error in module '{}': {:?}", module_name, e))?;
+
+                // 4. Run Sub-Interpreter
+                let mut sub_interp = Interpreter::new();
+                // Important: Share the module cache to handle diamonds?
+                // For valid strict trees, cloning is okay, but inefficient.
+                // ideally we pass a ref, but Interp structure owns it.
+                // Simple version: Clone existing cache in, run, then merge back new cache?
+                // Merging back is hard. Let's start with isolated load, knowing diamonds might double-load.
+                // Optimization: We can't easily share without refactoring Interpreter to hold context ref.
+                // ACCEPTABLE COMPROMISE: Modules re-evaluated if imported in sub-deps for now.
+                // BUT we must allow std_ modules to work.
+
+                sub_interp.run(prog)?;
+
+                // 5. Harvest Exports
+                // Everything in top-level env is exported
+                let mut exports_data = std::collections::HashMap::new();
+                for (k, v) in sub_interp.env {
+                    exports_data.insert(k, v.data);
+                }
+
+                let mut exports_funcs = std::collections::HashMap::new();
+                for (k, v) in sub_interp.functions {
+                    exports_funcs.insert(k, v);
+                }
+
+                let mod_val = RuntimeVal::Module(exports_data, exports_funcs);
+
+                // 6. Cache and Inject
+                self.module_cache
+                    .insert(module_name.clone(), mod_val.clone());
+                self.env.insert(
+                    module_name.clone(),
+                    crate::interpreter::values::Value {
+                        data: mod_val,
+                        is_mutable: false,
+                    },
                 );
+
                 Ok(StatementResult::Normal(RuntimeVal::Void))
             }
             Statement::Documented { item, .. } => {

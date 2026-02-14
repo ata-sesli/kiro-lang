@@ -10,7 +10,7 @@ pub enum RuntimeVal {
     Bool(bool),
     Range(i64, i64),
     Void,
-    Pipe(Sender<f64>, Arc<Mutex<Receiver<f64>>>),
+    Pipe(Sender<RuntimeVal>, Arc<Mutex<Receiver<RuntimeVal>>>),
     Struct(String, HashMap<String, RuntimeVal>),
     List(Vec<RuntimeVal>),
     Map(HashMap<String, RuntimeVal>),

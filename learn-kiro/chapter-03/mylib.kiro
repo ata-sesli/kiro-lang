@@ -1,0 +1,4 @@
+// Library Module
+pure fn get_msg() -> str {
+    return "Hello from Module!"
+}

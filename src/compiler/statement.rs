@@ -13,9 +13,9 @@ impl Compiler {
                 let desc = description
                     .map(|d| d.value.value.trim_matches('"').to_string())
                     .unwrap_or_else(|| name.clone());
-                // Generate a helper function that creates an anyhow error
+                // Generate a helper function that creates an Arc<anyhow error>
                 format!(
-                    "fn kiro_error_{name}() -> anyhow::Error {{ anyhow::anyhow!(\"{desc}\").context(\"{name}\") }}"
+                    "fn kiro_error_{name}() -> std::sync::Arc<anyhow::Error> {{ std::sync::Arc::new(anyhow::anyhow!(\"{desc}\").context(\"{name}\")) }}"
                 )
             }
             // 1. Compile Struct Definition
@@ -139,7 +139,7 @@ impl Compiler {
                         if let Some(ref err_type) = clause.error_type {
                             err_branches.push(format!(
                                 "if __kiro_err.to_string().contains(\"{}\") {{ {} }}",
-                                err_type, clause_body
+                                err_type.value, clause_body
                             ));
                         } else {
                             // Catch-all (must be last)
@@ -287,7 +287,7 @@ impl Compiler {
 
                 let (ret_type, final_body) = if can_error {
                     (
-                        format!("anyhow::Result<{}>", ret_def),
+                        format!("KiroResult<{}>", ret_def),
                         format!("{{ let __kiro_res = {}; Ok(__kiro_res) }}", body_str),
                     )
                 } else {
@@ -352,7 +352,7 @@ impl Compiler {
 
                 let final_body = if can_error {
                     format!(
-                        "{{ match header::{}({}).await {{ Ok(v) => Ok(v.try_into()?), Err(e) => Err(anyhow::anyhow!(e.name.clone()).context(e.name)) }} }}",
+                        "{{ match header::{}({}).await {{ Ok(v) => match v.try_into() {{ Ok(val) => Ok(val), Err(e) => Err(std::sync::Arc::new(anyhow::anyhow!(e))) }}, Err(e) => Err(std::sync::Arc::new(anyhow::anyhow!(e.name.clone()).context(e.name))) }} }}",
                         name, args_vec
                     )
                 } else {
@@ -363,7 +363,7 @@ impl Compiler {
                 };
 
                 let ret_type = if can_error {
-                    format!("anyhow::Result<{}>", ret_def)
+                    format!("KiroResult<{}>", ret_def)
                 } else {
                     ret_def
                 };

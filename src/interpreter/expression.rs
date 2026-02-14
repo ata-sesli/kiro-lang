@@ -35,6 +35,15 @@ impl Interpreter {
                 }
             }
 
+            Expression::ErrorRef(name_val) => {
+                let name = name_val.value;
+                if let Some(desc) = self.error_types.get(&name) {
+                    Ok(RuntimeVal::Error(name.clone(), desc.clone()))
+                } else {
+                    Err(format!("Interpreter Error: Unknown error type '{}'.", name))
+                }
+            }
+
             Expression::StructInit(name, _, fields, _) => {
                 // 1. Evaluate all fields
                 let mut data = HashMap::new();
@@ -142,7 +151,7 @@ impl Interpreter {
                     let val = rx
                         .recv()
                         .map_err(|_| "Pipe Error: Channel empty or closed".to_string())?;
-                    Ok(RuntimeVal::Float(val))
+                    Ok(val)
                 } else {
                     Err("Runtime Error: 'take' expects a pipe.".to_string())
                 }

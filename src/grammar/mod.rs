@@ -12,7 +12,7 @@ pub mod grammar {
     }
     #[derive(Debug, Clone)]
     pub struct VariableVal {
-        #[rust_sitter::leaf(pattern = r"[a-zA-Z_][a-zA-Z0-9_]*", transform = |s| s.to_string())]
+        #[rust_sitter::leaf(pattern = r"[a-z_][a-zA-Z0-9_]*", transform = |s| s.to_string())]
         pub value: String,
     }
 
@@ -118,7 +118,7 @@ pub mod grammar {
         ErrorDef {
             #[rust_sitter::leaf(text = "error")]
             _error: (),
-            #[rust_sitter::leaf(pattern = r"[A-Z][a-zA-Z0-9]*", transform = |s| s.to_string())]
+            #[rust_sitter::leaf(pattern = r"[A-Z][a-zA-Z0-9_]*", transform = |s| s.to_string())]
             name: String,
             description: Option<ErrorDesc>,
         },
@@ -310,6 +310,11 @@ pub mod grammar {
         #[rust_sitter::prec_right(10)]
         MoveExpr(#[rust_sitter::leaf(text = "move")] (), VariableVal),
 
+        // 7. Error Reference (Capitalized)
+        // Treated as a Value expression looking up an Error Type
+        #[rust_sitter::prec_left(1)]
+        ErrorRef(StructNameVal),
+
         #[rust_sitter::prec_left(1)]
         AdrInit(#[rust_sitter::leaf(text = "adr")] (), KiroType),
 
@@ -468,8 +473,7 @@ pub mod grammar {
         #[rust_sitter::leaf(text = "error")]
         _error: (),
         // Optional error type (e.g., NotFound). None = catch-all handler.
-        #[rust_sitter::leaf(pattern = r"[A-Z][a-zA-Z0-9]*", transform = |s| s.to_string())]
-        pub error_type: Option<String>,
+        pub error_type: Option<StructNameVal>,
         pub body: Block,
     }
     // Recursive linked-list pattern for multiple error clauses

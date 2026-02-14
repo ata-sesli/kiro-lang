@@ -57,7 +57,10 @@ impl Compiler {
                     pub tx: async_channel::Sender<T>,
                     pub rx: async_channel::Receiver<T>,
                 }
-    
+
+                // --- KIRO RESULT (Cloneable Error) ---
+                pub type KiroResult<T> = Result<T, std::sync::Arc<anyhow::Error>>;
+
                 // --- HELPER TRAIT FOR AUTO-DEREF ---
                 pub trait KiroGet {
                     type Inner;

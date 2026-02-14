@@ -1,0 +1,16 @@
+// Chapter 10: Host Modules
+// Note: This script requires 'read_file' to be implemented in Rust runtime.
+// It serves as a syntax demonstration.
+
+rust fn read_file(path: str) -> str!
+
+print "Trying to read file via Rust..."
+
+// Mock call (will fail or mock in simulator)
+var res = read_file("test.txt")
+
+on (res) {
+    print "Content: " + res
+} error {
+    print "Error reading file (Expected if not implemented in Rust)."
+}

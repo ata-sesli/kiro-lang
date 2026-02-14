@@ -1,0 +1,19 @@
+// Chapter 3: Functions
+// import mylib
+
+fn shout(msg: str) {
+    print msg + "!!!"
+}
+
+pure fn multiply(a: num, b: num) -> num {
+    return a * b
+}
+
+print "--- Functions ---"
+shout("Kiro")
+
+print "--- Pure Func ---"
+print "3 * 4 = " + multiply(3, 4)
+
+print "--- Modules ---"
+// print 03_lib.get_msg()
