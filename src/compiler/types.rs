@@ -10,6 +10,7 @@ pub fn compile_type(t: &KiroType) -> String {
         KiroType::Pipe(_, inner) => compile_pipe(inner),
         KiroType::List(_, inner) => compile_list(inner),
         KiroType::Map(_, k, v) => compile_map(k, v),
+        KiroType::FnType(_, _, params, _, _, ret) => compile_fn_type(params, ret),
         KiroType::Custom(s) => compile_custom(s),
     }
 }
@@ -31,9 +32,9 @@ pub fn compile_void() -> String {
 }
 
 pub fn compile_adr(inner: &KiroType) -> String {
-    // If it's Adr<Void>, we treat it as an opaque address (usize)
+    // Adr<void> is an opaque managed handle.
     if let KiroType::Void = inner {
-        "usize".to_string()
+        "KiroAdrVoid".to_string()
     } else {
         // Otherwise, it's a lazy pointer: Option<Arc<Mutex<T>>>
         format!(
@@ -61,4 +62,10 @@ pub fn compile_map(key: &KiroType, value: &KiroType) -> String {
         compile_type(key),
         compile_type(value)
     )
+}
+
+pub fn compile_fn_type(params: &[KiroType], ret: &KiroType) -> String {
+    let args = params.iter().map(compile_type).collect::<Vec<_>>().join(", ");
+    let ret_ty = compile_type(ret);
+    format!("fn({}) -> {}", args, ret_ty)
 }

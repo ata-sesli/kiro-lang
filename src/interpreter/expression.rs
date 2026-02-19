@@ -73,7 +73,36 @@ impl Interpreter {
                         .cloned()
                         .ok_or_else(|| format!("Export '{}' not found in module", field.value)),
 
-                    // Handle Pointer to Struct (Auto-Deref) could go here
+                    // Handle Pointer to Struct (Auto-Deref)
+                    RuntimeVal::Pointer(ptr) => {
+                        let guard = ptr.lock().unwrap();
+                        match &*guard {
+                            RuntimeVal::Struct(_, fields) => {
+                                fields.get(&field.value).cloned().ok_or_else(|| {
+                                    format!("Field '{}' not found in struct pointer", field.value)
+                                })
+                            }
+                            _ => Err(format!(
+                                "Cannot access field '{}' on pointer to non-struct",
+                                field.value
+                            )),
+                        }
+                    }
+                    RuntimeVal::AdrHandle(Some(ptr)) => {
+                        let guard = ptr.lock().unwrap();
+                        match &*guard {
+                            RuntimeVal::Struct(_, fields) => {
+                                fields.get(&field.value).cloned().ok_or_else(|| {
+                                    format!("Field '{}' not found in address handle", field.value)
+                                })
+                            }
+                            _ => Err(format!(
+                                "Cannot access field '{}' on handle to non-struct",
+                                field.value
+                            )),
+                        }
+                    }
+
                     _ => Err(format!(
                         "Cannot access field '{}' on this type {:?}",
                         field.value, val
@@ -89,7 +118,10 @@ impl Interpreter {
 
                 // Strict Purity: Ban capturing external variables
                 if self.in_pure_mode && !self.pure_scope_params.contains(&v.value) {
-                    // (Purity check logic from previous task)
+                    return Err(format!(
+                        "Compiler Error: Pure function cannot capture external variable '{}'. Only parameters and local variables are allowed.",
+                        v.value
+                    ));
                 }
 
                 // Otherwise look up as regular variable
@@ -124,18 +156,32 @@ impl Interpreter {
                 grammar::BoolVal::True(_) => Ok(RuntimeVal::Bool(true)),
                 grammar::BoolVal::False(_) => Ok(RuntimeVal::Bool(false)),
             },
-            // 3. Pipe Init
-            Expression::PipeInit(_, _) => {
-                let (tx, rx) = mpsc::channel();
-                Ok(RuntimeVal::Pipe(tx, Arc::new(Mutex::new(rx))))
+            // 3. Pipe Init (unbounded or bounded)
+            Expression::PipeInit(_, _, cap) => {
+                if let Some(cap) = cap {
+                    let cap: usize = cap.value.parse().map_err(|_| "Invalid pipe capacity")?;
+                    let (tx, rx) = mpsc::sync_channel(cap);
+                    Ok(RuntimeVal::Pipe(
+                        super::values::PipeSender::Bounded(tx),
+                        Arc::new(Mutex::new(rx)),
+                    ))
+                } else {
+                    let (tx, rx) = mpsc::channel();
+                    Ok(RuntimeVal::Pipe(
+                        super::values::PipeSender::Unbounded(tx),
+                        Arc::new(Mutex::new(rx)),
+                    ))
+                }
             }
 
             // Adr Init
-            Expression::AdrInit(_, _) => {
-                // For interpreter, we can treat lazy pointers as Void until assigned?
-                // Or implementing a special "None" value?
-                // Currently returning Void which matches Option::None behavior loosely in untyped interpreter.
-                Ok(RuntimeVal::Void)
+            Expression::AdrInit(_, inner) => {
+                if matches!(inner, crate::grammar::grammar::KiroType::Void) {
+                    Ok(RuntimeVal::AdrHandle(None))
+                } else {
+                    // Typed adr init remains a null-like placeholder in interpreter mode.
+                    Ok(RuntimeVal::Void)
+                }
             }
 
             // 4. Take (Sync Receive)
@@ -156,16 +202,45 @@ impl Interpreter {
                     Err("Runtime Error: 'take' expects a pipe.".to_string())
                 }
             }
-            // Pointer Logic (Interpreter Stub)
-            // Implementing true shared memory in a tree-walker is hard.
-            // For now, we just pass the value through (Copy semantics) to fix the build.
+            // 5. Ref (Create Pointer)
             Expression::Ref(_, target) => {
+                // Function reference mode: ref foo
+                if let Expression::Variable(v) = &*target {
+                    if let Some(stmt) = self.functions.get(&v.value) {
+                        if let Statement::FunctionDef(def) = stmt {
+                            if def.pure_kw.is_none() {
+                                return Err(format!(
+                                    "Function reference supports pure functions only: '{}'",
+                                    v.value
+                                ));
+                            }
+                            return Ok(RuntimeVal::FunctionRef(v.value.clone()));
+                        }
+                    }
+                }
+
                 let val = self.eval_expr(*target)?;
-                Ok(val) // "Fake" reference
+                // Create a shared pointer to this value
+                Ok(RuntimeVal::Pointer(Arc::new(Mutex::new(val))))
             }
+
+            // 6. Deref (Read Pointer)
             Expression::Deref(_, target) => {
                 let val = self.eval_expr(*target)?;
-                Ok(val) // "Fake" dereference
+                match val {
+                    RuntimeVal::Pointer(ptr) => {
+                        let guard = ptr.lock().unwrap();
+                        Ok(guard.clone())
+                    }
+                    RuntimeVal::AdrHandle(Some(ptr)) => {
+                        let guard = ptr.lock().unwrap();
+                        Ok(guard.clone())
+                    }
+                    RuntimeVal::AdrHandle(None) => {
+                        Err("Runtime Error: 'deref' on null address handle.".to_string())
+                    }
+                    _ => Err("Runtime Error: 'deref' expects a pointer.".to_string()),
+                }
             }
 
             // 2. List Init
@@ -296,8 +371,17 @@ impl Interpreter {
                 // We'll extract the FunctionDef statement
                 let (func_stmt, func_debug_name) = match *func_var {
                     Expression::Variable(v) => {
-                        let f = self.functions.get(&v.value).cloned();
-                        (f, v.value)
+                        let mut f = self.functions.get(&v.value).cloned();
+                        let mut debug_name = v.value.clone();
+                        if f.is_none() {
+                            if let Some(entry) = self.env.get(&v.value) {
+                                if let RuntimeVal::FunctionRef(name) = &entry.data {
+                                    f = self.functions.get(name).cloned();
+                                    debug_name = format!("{} -> {}", v.value, name);
+                                }
+                            }
+                        }
+                        (f, debug_name)
                     }
                     Expression::FieldAccess(target, _, field) => {
                         // Evaluate target to find the Module
@@ -319,6 +403,14 @@ impl Interpreter {
                     let params = def.params.clone();
                     let body = def.body.clone();
                     let pure_kw = def.pure_kw;
+                    let return_type = def.return_type.clone();
+                    let can_error = def.can_error.is_some();
+
+                    // SAVE STATE
+                    let old_mode = self.in_pure_mode;
+                    let old_params = self.pure_scope_params.clone();
+                    let old_failable = self.in_failable_fn;
+
                     // C. Purity Check (The "Sandbox")
                     if pure_kw.is_some() {
                         // Check Argument Safety (Must be Immutable)
@@ -368,7 +460,7 @@ impl Interpreter {
                         ));
                     }
 
-                    for (i, param) in params.into_iter().enumerate() {
+                    for (i, param) in params.clone().into_iter().enumerate() {
                         fn_env.insert(
                             param.name,
                             super::values::Value {
@@ -379,11 +471,15 @@ impl Interpreter {
                     }
 
                     // H. Run the Body
-                    let old_mode = self.in_pure_mode;
                     if pure_kw.is_some() {
                         self.in_pure_mode = true;
-                        // Args checked above before move
+                        // Initialize allowed params with function arguments
+                        self.pure_scope_params.clear();
+                        for p in &params {
+                            self.pure_scope_params.insert(p.name.clone());
+                        }
                     }
+                    self.in_failable_fn = can_error;
 
                     // G. Context Switch!
                     self.env = fn_env;
@@ -393,18 +489,41 @@ impl Interpreter {
                     // I. Restore the Old World
                     self.env = old_env;
                     self.in_pure_mode = old_mode;
+                    self.pure_scope_params = old_params;
+                    self.in_failable_fn = old_failable;
 
                     let result_sig = result_sig?; // Propagate error now
 
                     // Return the result of the function
-                    match result_sig {
+                    let out = match result_sig {
                         super::StatementResult::Normal(v) => Ok(v),
                         super::StatementResult::Return(v) => Ok(v),
                         super::StatementResult::Break | super::StatementResult::Continue => {
                             Err("Error: 'break' or 'continue' leaked from function body."
                                 .to_string())
                         }
+                    }?;
+
+                    // Enforce function return contracts in interpreter for parity with compiler.
+                    let expects_void = match return_type {
+                        None => true, // Omitted `->` defaults to void
+                        Some(crate::grammar::grammar::KiroType::Void) => true,
+                        Some(_) => false,
+                    };
+                    if expects_void && !matches!(out, RuntimeVal::Void) {
+                        return Err(format!(
+                            "Type Error: Function '{}' has void return type but returned a value. Add an explicit return type (e.g. -> num).",
+                            func_debug_name
+                        ));
                     }
+                    if !expects_void && matches!(out, RuntimeVal::Void) {
+                        return Err(format!(
+                            "Type Error: Function '{}' expects a return value but returned void.",
+                            func_debug_name
+                        ));
+                    }
+
+                    Ok(out)
                 } else if let Statement::RustFnDecl(def) = func_stmt {
                     let params = &def.params;
                     let return_type = &def.return_type;
@@ -440,6 +559,9 @@ impl Interpreter {
                         }
                         crate::grammar::grammar::KiroType::Map(_, _, _) => {
                             Ok(RuntimeVal::Map(std::collections::HashMap::new()))
+                        }
+                        crate::grammar::grammar::KiroType::FnType(_, _, _, _, _, _) => {
+                            Ok(RuntimeVal::Void)
                         }
                         crate::grammar::grammar::KiroType::Void => Ok(RuntimeVal::Void),
                         _ => {

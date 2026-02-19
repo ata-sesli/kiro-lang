@@ -25,6 +25,8 @@ pub struct Compiler {
     pub in_failable_fn: bool,
     pub pure_scope_params: HashSet<String>, // Parameters allowed in pure function scope
     pub moved_vars: HashSet<String>,        // Track moved variables to prevent use-after-move
+    pub fn_ref_vars: HashSet<String>,       // Vars holding pure function refs
+    pub fn_returning_fn: HashSet<String>,   // Function names returning fn(...) -> ...
 }
 
 impl Compiler {
@@ -37,6 +39,36 @@ impl Compiler {
             in_failable_fn: false,
             pure_scope_params: HashSet::new(),
             moved_vars: HashSet::new(),
+            fn_ref_vars: HashSet::new(),
+            fn_returning_fn: HashSet::new(),
+        }
+    }
+
+    pub fn pure_fn_ref_name_from_expr(&self, expr: &grammar::Expression) -> Option<String> {
+        if let grammar::Expression::Ref(_, target) = expr
+            && let grammar::Expression::Variable(v) = &**target
+            && let Some(info) = self.functions.get(&v.value)
+            && info.is_pure
+        {
+            return Some(v.value.clone());
+        }
+        None
+    }
+
+    pub fn expr_yields_fn_ref(&self, expr: &grammar::Expression) -> bool {
+        if self.pure_fn_ref_name_from_expr(expr).is_some() {
+            return true;
+        }
+        match expr {
+            grammar::Expression::Variable(v) => self.fn_ref_vars.contains(&v.value),
+            grammar::Expression::Call(func, _, _, _) => {
+                if let grammar::Expression::Variable(v) = &**func {
+                    self.fn_returning_fn.contains(&v.value)
+                } else {
+                    false
+                }
+            }
+            _ => false,
         }
     }
 
@@ -61,6 +93,25 @@ impl Compiler {
                 // --- KIRO RESULT (Cloneable Error) ---
                 pub type KiroResult<T> = Result<T, std::sync::Arc<anyhow::Error>>;
 
+                // --- KIRO ADR VOID (Opaque Managed Address Handle) ---
+                pub type KiroAdrErased = std::sync::Arc<dyn std::any::Any + Send + Sync>;
+                #[derive(Clone, Debug, Default)]
+                pub struct KiroAdrVoid(pub Option<KiroAdrErased>);
+                impl KiroAdrVoid {
+                    pub fn is_null(&self) -> bool { self.0.is_none() }
+                }
+                impl std::fmt::Display for KiroAdrVoid {
+                    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        match &self.0 {
+                            Some(p) => {
+                                let raw = std::sync::Arc::as_ptr(p) as *const ();
+                                write!(f, "<adr:void {:p}>", raw)
+                            }
+                            None => write!(f, "<adr:void null>"),
+                        }
+                    }
+                }
+
                 // --- HELPER TRAIT FOR AUTO-DEREF ---
                 pub trait KiroGet {
                     type Inner;
@@ -72,6 +123,16 @@ impl Compiler {
                     type Inner = T;
                     fn kiro_get<R>(&self, f: impl FnOnce(&T) -> R) -> R {
                         let guard = self.lock().unwrap();
+                        f(&*guard)
+                    }
+                }
+
+                // Lazy Pointer / Adr (Option<Arc<Mutex<T>>>)
+                impl<T> KiroGet for Option<std::sync::Arc<std::sync::Mutex<T>>> {
+                    type Inner = T;
+                    fn kiro_get<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+                        let arc = self.as_ref().expect("Runtime Error: Deferencing null/uninitialized pointer");
+                        let guard = arc.lock().unwrap();
                         f(&*guard)
                     }
                 }
@@ -98,6 +159,44 @@ impl Compiler {
                 pub trait KiroAdd<Rhs = Self> { type Output; fn kiro_add(self, rhs: Rhs) -> Self::Output; }
                 impl KiroAdd for f64 { type Output = f64; fn kiro_add(self, rhs: f64) -> f64 { self + rhs } }
                 impl KiroAdd for String { type Output = String; fn kiro_add(self, rhs: String) -> String { format!("{}{}", self, rhs) } }
+                // String + f64
+                impl KiroAdd<f64> for String { type Output = String; fn kiro_add(self, rhs: f64) -> String { format!("{}{:.1}", self, rhs) } }
+                // f64 + String
+                impl KiroAdd<String> for f64 { type Output = String; fn kiro_add(self, rhs: String) -> String { format!("{:.1}{}", self, rhs) } }
+                // String + bool
+                impl KiroAdd<bool> for String { type Output = String; fn kiro_add(self, rhs: bool) -> String { format!("{}{}", self, rhs) } }
+                // bool + String
+                impl KiroAdd<String> for bool { type Output = String; fn kiro_add(self, rhs: String) -> String { format!("{}{}", self, rhs) } }
+                // String + KiroResult<String>
+                impl KiroAdd<KiroResult<String>> for String {
+                    type Output = String;
+                    fn kiro_add(self, rhs: KiroResult<String>) -> String {
+                        match rhs {
+                            Ok(v) => format!("{}{}", self, v),
+                            Err(e) => format!("{}Error({})", self, e),
+                        }
+                    }
+                }
+                // String + KiroResult<f64>
+                impl KiroAdd<KiroResult<f64>> for String {
+                    type Output = String;
+                    fn kiro_add(self, rhs: KiroResult<f64>) -> String {
+                        match rhs {
+                            Ok(v) => format!("{}{:.1}", self, v),
+                            Err(e) => format!("{}Error({})", self, e),
+                        }
+                    }
+                }
+                // String + KiroResult<bool>
+                impl KiroAdd<KiroResult<bool>> for String {
+                    type Output = String;
+                    fn kiro_add(self, rhs: KiroResult<bool>) -> String {
+                        match rhs {
+                            Ok(v) => format!("{}{}", self, v),
+                            Err(e) => format!("{}Error({})", self, e),
+                        }
+                    }
+                }
     
                 // --- KIRO LEN ---
                 pub trait KiroLen { fn kiro_len(&self) -> f64; }
@@ -117,16 +216,84 @@ impl Compiler {
                 impl AsKiroLoopVar for f64 { type Out = f64; fn as_kiro(self) -> f64 { self } }
                 impl AsKiroLoopVar for char { type Out = String; fn as_kiro(self) -> String { self.to_string() } }
                 impl AsKiroLoopVar for String { type Out = String; fn as_kiro(self) -> String { self } }
+                impl AsKiroLoopVar for bool { type Out = bool; fn as_kiro(self) -> bool { self } }
 
                 // --- KIRO ASSIGN ---
                 pub trait KiroAssign<Rhs> { fn kiro_assign(&mut self, rhs: Rhs); }
                 // Default Assignment (Same Types)
                 impl<T> KiroAssign<T> for T { fn kiro_assign(&mut self, rhs: T) { *self = rhs; } }
-                // Special Assignment: adr void (usize) = adr T (Option<Arc<Mutex<T>>>)
-                impl<T> KiroAssign<Option<std::sync::Arc<std::sync::Mutex<T>>>> for usize {
+                // Special Assignment: adr void (opaque handle) = adr T (Option<Arc<Mutex<T>>>)
+                impl<T: 'static + Send + Sync> KiroAssign<Option<std::sync::Arc<std::sync::Mutex<T>>>> for KiroAdrVoid {
                     fn kiro_assign(&mut self, rhs: Option<std::sync::Arc<std::sync::Mutex<T>>>) {
-                        // We take the address of the Arc inner pointer if it exists
-                        *self = rhs.as_ref().map(|a| std::sync::Arc::as_ptr(a) as usize).unwrap_or(0);
+                        self.0 = rhs.map(|arc| arc as KiroAdrErased);
+                    }
+                }
+                // --- KIRO EQ (Deep Equality) ---
+                pub trait KiroEq { fn kiro_eq(&self, other: &Self) -> bool; }
+                
+                // Primitives
+                impl KiroEq for f64 { fn kiro_eq(&self, other: &Self) -> bool { self == other } }
+                impl KiroEq for bool { fn kiro_eq(&self, other: &Self) -> bool { self == other } }
+                impl KiroEq for String { fn kiro_eq(&self, other: &Self) -> bool { self == other } }
+                impl KiroEq for KiroAdrVoid {
+                    fn kiro_eq(&self, other: &Self) -> bool {
+                        match (&self.0, &other.0) {
+                            (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+                            (None, None) => true,
+                            _ => false,
+                        }
+                    }
+                }
+
+                // Collections
+                impl<T: KiroEq> KiroEq for Vec<T> {
+                    fn kiro_eq(&self, other: &Self) -> bool {
+                        if self.len() != other.len() { return false; }
+                        self.iter().zip(other.iter()).all(|(a, b)| a.kiro_eq(b))
+                    }
+                }
+                impl<K: Eq + std::hash::Hash, V: KiroEq> KiroEq for std::collections::HashMap<K, V> {
+                    fn kiro_eq(&self, other: &Self) -> bool {
+                        if self.len() != other.len() { return false; }
+                        self.iter().all(|(k, v)| other.get(k).map_or(false, |ov| v.kiro_eq(ov)))
+                    }
+                }
+
+                // Pointers (Arc<Mutex<T>>)
+                impl<T: KiroEq> KiroEq for std::sync::Arc<std::sync::Mutex<T>> {
+                    fn kiro_eq(&self, other: &Self) -> bool {
+                        if std::sync::Arc::ptr_eq(self, other) { return true; }
+                        let g1 = self.lock().unwrap();
+                        let g2 = other.lock().unwrap();
+                        g1.kiro_eq(&*g2)
+                    }
+                }
+
+                // Lazy Pointers (Option<Arc<Mutex<T>>>)
+                impl<T: KiroEq> KiroEq for Option<std::sync::Arc<std::sync::Mutex<T>>> {
+                    fn kiro_eq(&self, other: &Self) -> bool {
+                        match (self, other) {
+                            (Some(a), Some(b)) => a.kiro_eq(b),
+                            (None, None) => true,
+                            _ => false,
+                        }
+                    }
+                }
+
+                // Pipes are identity-based runtime channels; compare as non-equal by default.
+                impl<T> KiroEq for KiroPipe<T> {
+                    fn kiro_eq(&self, _other: &Self) -> bool { false }
+                }
+
+                // Result (Error Equality)
+                // We compare Errors by their Debug string representation for now, as anyhow::Error doesn't impl Eq
+                impl<T: KiroEq> KiroEq for KiroResult<T> {
+                    fn kiro_eq(&self, other: &Self) -> bool {
+                        match (self, other) {
+                            (Ok(a), Ok(b)) => a.kiro_eq(b),
+                            (Err(a), Err(b)) => format!("{:?}", a) == format!("{:?}", b),
+                            _ => false,
+                        }
                     }
                 }
 
@@ -167,6 +334,12 @@ impl Compiler {
                                 doc: doc_str,
                             },
                         );
+                        if matches!(
+                            def.return_type,
+                            Some(grammar::KiroType::FnType(_, _, _, _, _, _))
+                        ) {
+                            self.fn_returning_fn.insert(def.name.clone());
+                        }
                     }
                 }
                 grammar::Statement::FunctionDef(def) => {
@@ -180,6 +353,12 @@ impl Compiler {
                             doc: None,
                         },
                     );
+                    if matches!(
+                        def.return_type,
+                        Some(grammar::KiroType::FnType(_, _, _, _, _, _))
+                    ) {
+                        self.fn_returning_fn.insert(def.name.clone());
+                    }
                 }
                 _ => {}
             }

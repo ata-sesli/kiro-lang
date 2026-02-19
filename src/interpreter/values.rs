@@ -1,7 +1,13 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
+
+#[derive(Clone, Debug)]
+pub enum PipeSender {
+    Unbounded(Sender<RuntimeVal>),
+    Bounded(SyncSender<RuntimeVal>),
+}
 
 #[derive(Clone, Debug)]
 pub enum RuntimeVal {
@@ -10,7 +16,7 @@ pub enum RuntimeVal {
     Bool(bool),
     Range(i64, i64),
     Void,
-    Pipe(Sender<RuntimeVal>, Arc<Mutex<Receiver<RuntimeVal>>>),
+    Pipe(PipeSender, Arc<Mutex<Receiver<RuntimeVal>>>),
     Struct(String, HashMap<String, RuntimeVal>),
     List(Vec<RuntimeVal>),
     Map(HashMap<String, RuntimeVal>),
@@ -19,8 +25,13 @@ pub enum RuntimeVal {
         HashMap<String, RuntimeVal>,
         HashMap<String, crate::grammar::grammar::Statement>,
     ),
+    FunctionRef(String),
     // Error: (type_name, description)
     Error(String, String),
+    // Pointer: Arc<Mutex<RuntimeVal>>
+    Pointer(Arc<Mutex<RuntimeVal>>),
+    // Opaque address handle (adr void)
+    AdrHandle(Option<Arc<Mutex<RuntimeVal>>>),
     Moved,
 }
 
@@ -41,7 +52,14 @@ impl PartialEq for RuntimeVal {
             (RuntimeVal::List(l1), RuntimeVal::List(l2)) => l1 == l2,
             (RuntimeVal::Map(m1), RuntimeVal::Map(m2)) => m1 == m2,
             (RuntimeVal::Module(_m1, _f1), RuntimeVal::Module(_m2, _f2)) => false, // Modules identity is tough, assume false for now
+            (RuntimeVal::FunctionRef(a), RuntimeVal::FunctionRef(b)) => a == b,
             (RuntimeVal::Error(n1, _), RuntimeVal::Error(n2, _)) => n1 == n2,
+            (RuntimeVal::Pointer(p1), RuntimeVal::Pointer(p2)) => Arc::ptr_eq(p1, p2),
+            (RuntimeVal::AdrHandle(a1), RuntimeVal::AdrHandle(a2)) => match (a1, a2) {
+                (Some(p1), Some(p2)) => Arc::ptr_eq(p1, p2),
+                (None, None) => true,
+                _ => false,
+            },
             (RuntimeVal::Moved, RuntimeVal::Moved) => true,
             _ => false,
         }
@@ -92,7 +110,11 @@ impl fmt::Display for RuntimeVal {
             RuntimeVal::List(l) => write!(f, "<List len={}>", l.len()),
             RuntimeVal::Map(m) => write!(f, "<Map len={}>", m.len()),
             RuntimeVal::Module(_, _) => write!(f, "<Module>"),
+            RuntimeVal::FunctionRef(name) => write!(f, "<FnRef {}>", name),
             RuntimeVal::Error(name, desc) => write!(f, "Error({}): {}", name, desc),
+            RuntimeVal::Pointer(_) => write!(f, "<Pointer>"),
+            RuntimeVal::AdrHandle(Some(_)) => write!(f, "<adr:void handle>"),
+            RuntimeVal::AdrHandle(None) => write!(f, "<adr:void null>"),
             RuntimeVal::Moved => write!(f, "<Moved>"),
         }
     }

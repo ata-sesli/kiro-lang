@@ -5,8 +5,17 @@ error NotFound = "File or directory not found"
 error PermissionDenied = "Permission denied"
 error IoError = "I/O error"
 
+/// Reads a UTF-8 text file from `path`.
+/// Returns `NotFound`, `PermissionDenied`, or `IoError` on failure.
 rust fn read(path: str) -> str!
+/// Writes `content` to `path`, creating or truncating the file.
+/// Returns `PermissionDenied` or `IoError` on failure.
 rust fn write(path: str, content: str) -> void!
+/// Returns true if a file system entry exists at `path`, otherwise false.
 rust fn exists(path: str) -> bool
+/// Removes the file at `path`.
+/// Returns `NotFound`, `PermissionDenied`, or `IoError` on failure.
 rust fn remove(path: str) -> void!
+/// Lists entry names in a directory at `path`.
+/// Returns `NotFound`, `PermissionDenied`, or `IoError` on failure.
 rust fn list(path: str) -> list str!

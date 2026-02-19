@@ -1,3 +1,0 @@
-pure fn pi() -> num {
-    return 3.14159
-}

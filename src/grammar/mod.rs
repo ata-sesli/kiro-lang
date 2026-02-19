@@ -43,26 +43,43 @@ pub mod grammar {
     }
     #[derive(Debug, Clone)]
     pub enum KiroType {
+        /// Numeric type.
         #[rust_sitter::leaf(text = "num")]
         Num, // Replaces Int
+        /// String/text type.
         #[rust_sitter::leaf(text = "str")]
         Str, // New
+        /// Boolean type (`true` / `false`).
         #[rust_sitter::leaf(text = "bool")]
         Bool, // New
+        /// No-value type for procedures.
         #[rust_sitter::leaf(text = "void")]
         Void,
+        /// Pointer/address type: `adr <type>`.
         #[rust_sitter::leaf(text = "adr")]
         Adr(#[rust_sitter::leaf(text = "adr")] (), Box<KiroType>),
+        /// Channel/pipe type: `pipe <type>`.
         #[rust_sitter::leaf(text = "pipe")]
         Pipe(#[rust_sitter::leaf(text = "pipe")] (), Box<KiroType>),
 
         // 1. Recursive Types for Collections
         // list <type>
+        /// List type: `list <type>`.
         List(#[rust_sitter::leaf(text = "list")] (), Box<KiroType>),
         // map <key_type> <val_type>
+        /// Map type: `map <key_type> <value_type>`.
         Map(
             #[rust_sitter::leaf(text = "map")] (),
             Box<KiroType>,
+            Box<KiroType>,
+        ),
+        /// Function type: `fn(type, ...) -> type` (optional `!`).
+        FnType(
+            #[rust_sitter::leaf(text = "fn")] (),
+            #[rust_sitter::leaf(text = "(")] (),
+            #[rust_sitter::delimited(#[rust_sitter::leaf(text = ",")] ())] Vec<KiroType>,
+            #[rust_sitter::leaf(text = ")")] (),
+            #[rust_sitter::leaf(text = "->")] (),
             Box<KiroType>,
         ),
 
@@ -113,7 +130,9 @@ pub mod grammar {
         // struct User { name: str age: num }
         // 2. Struct Definition (No commas, whitespace separated)
         // struct User { name: str age: num }
+        /// Struct definition: `struct User { name: str age: num }`.
         StructDef(StructDef),
+        /// Error declaration: `error NotFound = "Description"`.
         // Error Definition: error NotFound = "Description"
         ErrorDef {
             #[rust_sitter::leaf(text = "error")]
@@ -122,6 +141,7 @@ pub mod grammar {
             name: String,
             description: Option<ErrorDesc>,
         },
+        /// Mutable variable declaration: `var x = expr`.
         // 1. Variable Declaration: var x = 10
         VarDecl {
             #[rust_sitter::leaf(text = "var")]
@@ -132,6 +152,7 @@ pub mod grammar {
             _eq: (),
             value: Expression,
         },
+        /// Assignment/mutation statement: `x = expr` or `obj.field = expr`.
         // 2. Assignment (Mutation): x = 10 OR x.y = 10
         AssignStmt {
             lhs: Expression,
@@ -139,6 +160,7 @@ pub mod grammar {
             _eq: (),
             rhs: Expression,
         },
+        /// Conditional statement: `on (cond) { ... } off { ... }`.
         #[rust_sitter::prec_right(1)]
         On {
             #[rust_sitter::leaf(text = "on")]
@@ -154,6 +176,7 @@ pub mod grammar {
             // Multiple error handlers
             error_clauses: Option<ErrorClauseList>,
         },
+        /// While-style loop: `loop on (cond) { ... }`.
         LoopOn {
             #[rust_sitter::leaf(text = "loop")]
             _loop: (),
@@ -167,6 +190,7 @@ pub mod grammar {
             body: Block,
         },
 
+        /// Iterator loop: `loop item in iterable [per n] [on (filter)] { ... }`.
         // 4. The "For" Loop: loop x in y [per z] [on (cond)] { } [off { }]
         LoopIter {
             #[rust_sitter::leaf(text = "loop")]
@@ -185,7 +209,9 @@ pub mod grammar {
             // Optional "off" block for the filter
             else_clause: Option<OffClause>,
         },
+        /// Function definition: `pure fn` or `fn`.
         FunctionDef(FunctionDef),
+        /// Rust host declaration: `rust fn name(...) -> type[!]`.
         // Rust-backed function declaration (no body)
         // Arrow and return type are REQUIRED to avoid grammar ambiguity
         // Use `rust fn foo() -> void` for functions with no return
@@ -193,6 +219,7 @@ pub mod grammar {
         // Arrow and return type are REQUIRED to avoid grammar ambiguity
         // Use `rust fn foo() -> void` for functions with no return
         RustFnDecl(RustFnDecl),
+        /// Send a value into a pipe: `give ch value`.
         // 1. Give: give <channel> <value>
         Give(
             #[rust_sitter::leaf(text = "give")] (),
@@ -200,19 +227,24 @@ pub mod grammar {
             Expression, // Value
         ),
 
+        /// Close a pipe sender: `close ch`.
         // 2. Close: close <channel>
         Close(
             #[rust_sitter::leaf(text = "close")] (),
             Expression, // Channel
         ),
+        /// Return from current function.
         // 3. Return Statement
         #[rust_sitter::prec_right(1)]
         Return(#[rust_sitter::leaf(text = "return")] (), Option<Expression>),
+        /// Break from current loop.
         // 4. Break Statement
         Break(#[rust_sitter::leaf(text = "break")] ()),
+        /// Continue to next loop iteration.
         // 5. Continue Statement
         Continue(#[rust_sitter::leaf(text = "continue")] ()),
 
+        /// Import module by name: `import math`.
         // 6. Import Statement
         Import {
             #[rust_sitter::leaf(text = "import")]
@@ -221,9 +253,12 @@ pub mod grammar {
             module_name: String,
         },
 
+        /// Expression as statement.
         ExprStmt(Expression),
+        /// Print statement: `print expr`.
         Print(#[rust_sitter::leaf(text = "print")] (), Expression),
 
+        /// Item preceded by one or more documentation comments (`///`).
         // Documented Item
         Documented {
             #[rust_sitter::repeat(non_empty = true)]
@@ -235,6 +270,7 @@ pub mod grammar {
     pub enum Expression {
         // 3. Struct Initialization
         // User { name: "Kiro", age: 10 }
+        /// Struct initialization: `User { name: "A", age: 1 }`.
         #[rust_sitter::prec_left(5)]
         StructInit(
             StructNameVal, // Struct Name
@@ -248,6 +284,7 @@ pub mod grammar {
 
         // 2. List Initialization
         // list num { 1, 2, 3 }
+        /// List initialization: `list num { ... }`.
         #[rust_sitter::prec_left(2)]
         ListInit(
             #[rust_sitter::leaf(text = "list")] (),
@@ -259,6 +296,7 @@ pub mod grammar {
 
         // 3. Map Initialization
         // map str num { "A" 1, "B" 2 }
+        /// Map initialization: `map str num { ... }`.
         #[rust_sitter::prec_left(2)]
         MapInit(
             #[rust_sitter::leaf(text = "map")] (),
@@ -271,12 +309,14 @@ pub mod grammar {
 
         // 4. Field Access (Dot Notation)
         // user.name OR ptr.name (Auto-Deref)
+        /// Field access: `obj.field`.
         #[rust_sitter::prec_left(6)] // High precedence
         FieldAccess(
             Box<Expression>,
             #[rust_sitter::leaf(text = ".")] (),
             FieldNameVal, // Field Name
         ),
+        /// Indexed/key access command: `collection at key`.
         // 4. Access Command: list at index
         #[rust_sitter::prec_left(5)] // High precedence
         At(
@@ -285,6 +325,7 @@ pub mod grammar {
             Box<Expression>, // The Index/Key
         ),
 
+        /// List append command: `list push value`.
         // 5. Modification Command: list push value
         #[rust_sitter::prec_left(5)]
         Push(
@@ -292,52 +333,65 @@ pub mod grammar {
             #[rust_sitter::leaf(text = "push")] (),
             Box<Expression>, // The Value
         ),
+        /// Boolean literal expression.
         // 2. New Literals
         #[rust_sitter::prec_left(1)]
         BoolLit(BoolVal),
 
+        /// Numeric literal expression.
         #[rust_sitter::prec_left(1)]
         Number(NumberVal),
 
+        /// String literal expression.
         #[rust_sitter::prec_left(1)]
         StringLit(StringVal),
 
+        /// Variable reference expression.
         #[rust_sitter::prec_left(1)]
         // 5. Variable Reference
         Variable(VariableVal),
 
+        /// Move expression: transfers ownership-like state from mutable variable.
         // 6. Move Expression: move x
         #[rust_sitter::prec_right(10)]
         MoveExpr(#[rust_sitter::leaf(text = "move")] (), VariableVal),
 
+        /// Error value reference (capitalized error type name).
         // 7. Error Reference (Capitalized)
         // Treated as a Value expression looking up an Error Type
         #[rust_sitter::prec_left(1)]
         ErrorRef(StructNameVal),
 
+        /// Pointer initializer expression: `adr <type>`.
         #[rust_sitter::prec_left(1)]
         AdrInit(#[rust_sitter::leaf(text = "adr")] (), KiroType),
 
+        /// Pipe initializer expression: `pipe <type>` or bounded `pipe <type> <capacity>`.
         #[rust_sitter::prec_left(1)]
-        PipeInit(#[rust_sitter::leaf(text = "pipe")] (), KiroType),
+        PipeInit(#[rust_sitter::leaf(text = "pipe")] (), KiroType, Option<NumberVal>),
 
+        /// Receive from pipe: `take ch`.
         // 4. Take: take <channel>
         // Example: var x = take p
         #[rust_sitter::prec_right(4)]
         Take(#[rust_sitter::leaf(text = "take")] (), Box<Expression>),
 
+        /// Length query: `len value`.
         // 5. Len: len <collection>
         #[rust_sitter::prec_right(4)]
         Len(#[rust_sitter::leaf(text = "len")] (), Box<Expression>),
 
+        /// Create pointer/reference: `ref value`.
         // 3. Pointer Logic
         // ref x
         #[rust_sitter::prec_right(4)] // Right-associative
         Ref(#[rust_sitter::leaf(text = "ref")] (), Box<Expression>),
 
+        /// Dereference pointer value: `deref ptr`.
         // deref x
         #[rust_sitter::prec_right(4)]
         Deref(#[rust_sitter::leaf(text = "deref")] (), Box<Expression>),
+        /// Function call expression.
         #[rust_sitter::prec_left(3)] // High precedence
         Call(
             Box<Expression>, // The function name (usually a Variable)
@@ -349,6 +403,7 @@ pub mod grammar {
             #[rust_sitter::leaf(text = ")")] (),
         ),
 
+        /// Async spawn call expression: `run fn_call(...)`.
         // 5. Async "Run" Call
         // Syntax: run foo(1, 2)
         #[rust_sitter::prec_left(2)]
@@ -583,3 +638,73 @@ pub mod grammar {
     }
 }
 pub use grammar::*;
+
+pub fn parse(input: &str) -> Result<Program, Vec<rust_sitter::errors::ParseError>> {
+    let program = grammar::parse(input)?;
+    Ok(normalize_pipe_capacity(program))
+}
+
+fn normalize_pipe_capacity(program: Program) -> Program {
+    let mut out: Vec<Statement> = Vec::new();
+    let mut i = 0usize;
+
+    while i < program.statements.len() {
+        let stmt = program.statements[i].clone();
+        let next_num = if i + 1 < program.statements.len() {
+            match &program.statements[i + 1] {
+                Statement::ExprStmt(Expression::Number(n)) => Some(n.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        if let Some(cap) = next_num {
+            match stmt {
+                Statement::VarDecl {
+                    _var,
+                    ident,
+                    _eq,
+                    value: Expression::PipeInit(pipe_kw, pipe_ty, None),
+                } => {
+                    out.push(Statement::VarDecl {
+                        _var,
+                        ident,
+                        _eq,
+                        value: Expression::PipeInit(pipe_kw, pipe_ty, Some(cap)),
+                    });
+                    i += 2;
+                    continue;
+                }
+                Statement::AssignStmt {
+                    lhs,
+                    _eq,
+                    rhs: Expression::PipeInit(pipe_kw, pipe_ty, None),
+                } => {
+                    out.push(Statement::AssignStmt {
+                        lhs,
+                        _eq,
+                        rhs: Expression::PipeInit(pipe_kw, pipe_ty, Some(cap)),
+                    });
+                    i += 2;
+                    continue;
+                }
+                Statement::ExprStmt(Expression::PipeInit(pipe_kw, pipe_ty, None)) => {
+                    out.push(Statement::ExprStmt(Expression::PipeInit(
+                        pipe_kw,
+                        pipe_ty,
+                        Some(cap),
+                    )));
+                    i += 2;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
+        out.push(stmt);
+        i += 1;
+    }
+
+    Program { statements: out }
+}

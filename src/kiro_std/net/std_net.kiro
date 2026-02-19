@@ -4,7 +4,14 @@
 error NetworkError = "Network request failed"
 error InvalidUrl = "Invalid URL"
 
+/// Sends an HTTP GET request to `url` and returns the response body as text.
+/// Returns `InvalidUrl` or `NetworkError` on failure.
 rust fn get(url: str) -> str!
+/// Sends an HTTP POST request to `url` with string `body`.
+/// Returns `InvalidUrl` or `NetworkError` on failure.
 rust fn post(url: str, body: str) -> str!
+/// Sends an HTTP request to `url` and returns status code as `num`.
+/// Returns `InvalidUrl` or `NetworkError` on failure.
 rust fn status(url: str) -> num!
+/// Extracts body text from a serialized response payload.
 rust fn body(response: str) -> str

@@ -1,0 +1,27 @@
+// Kiro Standard Library: IO
+// Terminal input/output helpers.
+
+error IoError = "I/O error"
+error ParseNumError = "Failed to parse number"
+error ParseBoolError = "Failed to parse boolean"
+
+/// Writes `msg` to stderr without a trailing newline.
+rust fn eprint(msg: str) -> void
+/// Writes `msg` to stderr with a trailing newline.
+rust fn eprintline(msg: str) -> void
+
+/// Reads one line from stdin and strips trailing newline characters.
+/// Returns `IoError` on read failure.
+rust fn read_line() -> str!
+/// Prints `prompt`, reads one line from stdin, and strips trailing newline characters.
+/// Returns `IoError` on write/read failure.
+rust fn input(prompt: str) -> str!
+/// Prompts user and parses the entered value as `num`.
+/// Returns `IoError` or `ParseNumError` on failure.
+rust fn input_num(prompt: str) -> num!
+/// Prompts user and parses boolean values like true/false, yes/no, y/n, 1/0.
+/// Returns `IoError` or `ParseBoolError` on failure.
+rust fn input_bool(prompt: str) -> bool!
+/// Parses numeric text into `num`.
+/// Returns `ParseNumError` when parsing fails.
+rust fn parse_num(s: str) -> num!

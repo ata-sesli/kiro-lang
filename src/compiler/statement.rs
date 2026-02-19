@@ -28,11 +28,22 @@ impl Compiler {
                     .map(|f| format!("pub {}: {}", f.name.value, compile_type(&f.field_type)))
                     .collect();
 
-                // We add #[derive(Clone, Debug, PartialEq)] and impl KiroGet
+                let eq_checks: Vec<String> = fields
+                    .iter()
+                    .map(|f| format!("self.{0}.kiro_eq(&other.{0})", f.name.value))
+                    .collect();
+                let eq_body = if eq_checks.is_empty() {
+                    "true".to_string()
+                } else {
+                    eq_checks.join(" && ")
+                };
+
+                // We add #[derive(Clone, Debug)] and impl KiroGet/KiroEq/AsKiroLoopVar
                 format!(
-                    "#[derive(Clone, Debug)]\npub struct {0} {{ {1} }}\nimpl KiroGet for {0} {{ type Inner = Self; fn kiro_get<R>(&self, f: impl FnOnce(&Self::Inner) -> R) -> R {{ f(self) }} }}",
+                    "#[derive(Clone, Debug)]\npub struct {0} {{ {1} }}\nimpl KiroGet for {0} {{ type Inner = Self; fn kiro_get<R>(&self, f: impl FnOnce(&Self::Inner) -> R) -> R {{ f(self) }} }}\nimpl KiroEq for {0} {{ fn kiro_eq(&self, other: &Self) -> bool {{ {2} }} }}\nimpl AsKiroLoopVar for {0} {{ type Out = {0}; fn as_kiro(self) -> Self::Out {{ self }} }}",
                     name.value,
-                    field_strs.join(", ")
+                    field_strs.join(", "),
+                    eq_body
                 )
             }
             // 6. Import Statement
@@ -42,6 +53,11 @@ impl Compiler {
             }
             // 1. Variable Declaration
             Statement::VarDecl { ident, value, .. } => {
+                if self.expr_yields_fn_ref(&value) {
+                    self.fn_ref_vars.insert(ident.clone());
+                } else {
+                    self.fn_ref_vars.remove(&ident);
+                }
                 let val_str = self.compile_expr(value);
                 self.known_vars
                     .insert(ident.clone(), super::VarInfo { is_mutable: true });
@@ -55,6 +71,13 @@ impl Compiler {
 
             // ... (Middle assignments kept same, just copying context) ...
             Statement::AssignStmt { lhs, rhs, .. } => {
+                if let grammar::Expression::Variable(v) = &lhs {
+                    if self.expr_yields_fn_ref(&rhs) {
+                        self.fn_ref_vars.insert(v.value.clone());
+                    } else {
+                        self.fn_ref_vars.remove(&v.value);
+                    }
+                }
                 let rhs_str = self.compile_expr(rhs);
 
                 match lhs {
@@ -81,6 +104,13 @@ impl Compiler {
                             }
                             format!("let {} = {};", name, rhs_str)
                         }
+                    }
+                    grammar::Expression::Deref(_, target) => {
+                        let ptr = self.compile_expr(*target);
+                        format!(
+                            "(*({}.as_ref().expect(\"Null Pointer\").lock().unwrap())).kiro_assign({});",
+                            ptr, rhs_str
+                        )
                     }
                     _ => {
                         // Complex LValue (e.g. x.y = 10)
@@ -246,15 +276,24 @@ impl Compiler {
                         doc: existing_doc,
                     },
                 );
+                if matches!(return_type, Some(crate::grammar::grammar::KiroType::FnType(_, _, _, _, _, _))) {
+                    self.fn_returning_fn.insert(name.clone());
+                }
 
                 let old_context = self.in_pure_context;
                 let old_pure_params = self.pure_scope_params.clone();
+                let old_fn_ref_vars = self.fn_ref_vars.clone();
                 if is_pure {
                     self.in_pure_context = true;
                     // Populate allowed params for pure scope
                     self.pure_scope_params.clear();
                     for p in &params {
                         self.pure_scope_params.insert(p.name.clone());
+                    }
+                }
+                for p in &params {
+                    if matches!(p.command_type, crate::grammar::grammar::KiroType::FnType(_, _, _, _, _, _)) {
+                        self.fn_ref_vars.insert(p.name.clone());
                     }
                 }
 
@@ -274,6 +313,7 @@ impl Compiler {
                 self.in_pure_context = old_context;
                 self.in_failable_fn = old_in_failable;
                 self.pure_scope_params = old_pure_params; // Restore
+                self.fn_ref_vars = old_fn_ref_vars;
 
                 let ret_def = if let Some(rt) = return_type {
                     if let crate::grammar::grammar::KiroType::Void = rt {
@@ -441,10 +481,20 @@ impl Compiler {
             // LOGIC: If this is the LAST statement...
             if i == len - 1 {
                 // Check if it's an ExprStmt (standalone expression)
-                if let grammar::Statement::ExprStmt(_) = stmt {
-                    // Remove the trailing semicolon if it exists
-                    if line.ends_with(';') {
-                        line.pop();
+                if let grammar::Statement::ExprStmt(expr) = stmt {
+                    // Special Case: RunCall returns JoinHandle, but blocks usually expect value or void.
+                    // If it's a RunCall at end of block, we PROBABLY want to discard the handle to return void,
+                    // unless the function is explicitly typed to return JoinHandle (which Kiro doesn't support yet).
+                    // So we force a semicolon for RunCall to return ().
+                    if let grammar::Expression::RunCall(_, _) = expr {
+                        if !line.trim().ends_with(';') {
+                            line.push(';');
+                        }
+                    } else {
+                        // For other expressions, strip trailing semicolon to return the value
+                        if line.ends_with(';') {
+                            line.pop();
+                        }
                     }
                 }
             }

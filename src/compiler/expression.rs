@@ -38,7 +38,13 @@ impl Compiler {
 
             Expression::Variable(v) => {
                 // Strict Purity: Ban capturing external variables
-                if self.in_pure_context && !self.pure_scope_params.contains(&v.value) {
+                // EXCEPTION: Allow calling other global functions (which are technically "captured" but are code, not data)
+                let is_known_fn = self.functions.contains_key(&v.value);
+
+                if self.in_pure_context
+                    && !self.pure_scope_params.contains(&v.value)
+                    && !is_known_fn
+                {
                     panic!(
                         "Compiler Error: Pure function cannot capture external variable '{}'. Only parameters and local variables are allowed.",
                         v.value
@@ -101,7 +107,7 @@ impl Compiler {
             // Adr Init (Lazy / Void)
             Expression::AdrInit(_, inner) => {
                 if let grammar::KiroType::Void = inner {
-                    "0usize".to_string()
+                    "KiroAdrVoid::default()".to_string()
                 } else {
                     let type_str = crate::compiler::types::compile_type(&inner);
                     format!(
@@ -111,16 +117,24 @@ impl Compiler {
                 }
             }
 
-            // Pipe Init
-            Expression::PipeInit(_, pipe_type) => {
+            // Pipe Init (unbounded or bounded)
+            Expression::PipeInit(_, pipe_type, cap) => {
                 let inner_type = crate::compiler::types::compile_type(&pipe_type);
+                let channel = if let Some(cap) = cap {
+                    let cap: usize = cap.value.parse().unwrap_or(0);
+                    format!("async_channel::bounded({})", cap)
+                } else {
+                    "async_channel::unbounded()".to_string()
+                };
                 if let grammar::KiroType::Void = pipe_type {
-                    "{ let (tx, rx) = async_channel::unbounded(); KiroPipe::<()> { tx, rx } }"
-                        .to_string()
+                    format!(
+                        "{{ let (tx, rx) = {}; KiroPipe::<()> {{ tx, rx }} }}",
+                        channel
+                    )
                 } else {
                     format!(
-                        "{{ let (tx, rx) = async_channel::unbounded(); KiroPipe::<{}> {{ tx, rx }} }}",
-                        inner_type
+                        "{{ let (tx, rx) = {}; KiroPipe::<{}> {{ tx, rx }} }}",
+                        channel, inner_type
                     )
                 }
             }
@@ -134,6 +148,17 @@ impl Compiler {
             }
 
             Expression::Ref(_, target) => {
+                if let Expression::Variable(v) = &*target
+                    && let Some(info) = self.functions.get(&v.value)
+                {
+                    if !info.is_pure {
+                        panic!(
+                            "Compiler Error: Function references currently support pure functions only: '{}'.",
+                            v.value
+                        );
+                    }
+                    return v.value.clone();
+                }
                 let val = self.compile_expr(*target);
                 format!("Some(std::sync::Arc::new(std::sync::Mutex::new({})))", val)
             }
@@ -202,12 +227,12 @@ impl Compiler {
                 self.compile_expr(*rhs)
             ),
             Expression::Eq(lhs, _, rhs) => format!(
-                "({} == {})",
+                "({}.kiro_eq(&{}))",
                 self.compile_expr(*lhs),
                 self.compile_expr(*rhs)
             ),
             Expression::Neq(lhs, _, rhs) => format!(
-                "({} != {})",
+                "(!{}.kiro_eq(&{}))",
                 self.compile_expr(*lhs),
                 self.compile_expr(*rhs)
             ),
@@ -239,7 +264,9 @@ impl Compiler {
             Expression::Call(func, _, args, _) => {
                 // Determine if we need .await (Access func by reference BEFORE move)
                 let needs_await = if let Expression::Variable(v) = &*func {
-                    if let Some(info) = self.functions.get(&v.value) {
+                    if self.fn_ref_vars.contains(&v.value) {
+                        false
+                    } else if let Some(info) = self.functions.get(&v.value) {
                         !info.is_pure
                     } else {
                         true
@@ -275,6 +302,11 @@ impl Compiler {
                                 }
                             }
                         }
+                    } else if self.in_pure_context && !self.fn_ref_vars.contains(&v.value) {
+                        panic!(
+                            "Compiler Error: Pure function cannot call unknown/impure function '{}'.",
+                            v.value
+                        );
                     }
                 }
 
@@ -300,10 +332,14 @@ impl Compiler {
                 if let Expression::Call(func, _, args, _) = *call_expr {
                     // Check if target is pure (Sync)
                     let is_pure_target = if let Expression::Variable(v) = &*func {
-                        self.functions
-                            .get(&v.value)
-                            .map(|i| i.is_pure)
-                            .unwrap_or(false)
+                        if self.fn_ref_vars.contains(&v.value) {
+                            true
+                        } else {
+                            self.functions
+                                .get(&v.value)
+                                .map(|i| i.is_pure)
+                                .unwrap_or(false)
+                        }
                     } else {
                         false
                     };

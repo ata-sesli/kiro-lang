@@ -1,7 +1,7 @@
-fn add(a: num, b: num) {
+fn add(a: num, b: num) -> num {
     return a + b
 }
 
-fn sub(a: num, b: num) {
+fn sub(a: num, b: num) -> num {
     return a - b
 }

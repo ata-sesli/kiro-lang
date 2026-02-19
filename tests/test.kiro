@@ -1,6 +1,6 @@
 // comment
 var x = 10
-fn add(a: num, b: num) {
+fn add(a: num, b: num) -> num {
     return a + b
 }
 

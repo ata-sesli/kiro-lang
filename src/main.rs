@@ -1,9 +1,11 @@
 mod build_manager;
 mod compiler;
+mod errors;
 mod grammar;
 mod interpreter;
 
 use crate::build_manager::BuildManager;
+use crate::errors::{KiroError, emit_error, panic_payload_to_string};
 
 use std::fs;
 
@@ -271,8 +273,12 @@ async fn main() {
             emit_rust,
             verbose,
         }) => {
-            if run_compiler(&file, *emit_rust, *verbose).is_err() {
-                std::process::exit(1);
+            match run_compiler(&file, *emit_rust, *verbose) {
+                Ok(_) => {}
+                Err(e) => {
+                    emit_error(&e);
+                    std::process::exit(1);
+                }
             }
         }
         Some(Commands::Create { project_name }) => {
@@ -339,7 +345,7 @@ fn execute_pipeline(
             }
         }
         Err(e) => {
-            eprintln!("Compiler Error: {}", e);
+            emit_error(&e);
             return false;
         }
     }
@@ -349,53 +355,77 @@ fn execute_pipeline(
 
 fn run_interpreter(filename: &str) -> bool {
     if !std::path::Path::new(filename).exists() {
-        eprintln!("❌ Error: '{}' not found.", filename);
+        emit_error(&KiroError::file_not_found(filename));
         return false;
     }
 
     let source = match fs::read_to_string(filename) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Read Error: {}", e);
+            emit_error(&KiroError::new(
+                errors::ErrorCode::FileNotFound,
+                errors::ErrorPhase::Cli,
+                format!("Read error: {}", e),
+            ));
             return false;
         }
     };
+    if let Some(line) = unsupported_let_line(&source) {
+        emit_error(&KiroError::unsupported_keyword(filename, line, "let"));
+        return false;
+    }
 
     let prog = match grammar::parse(&source) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("Parse Error in {}: {:?}", filename, e);
+            emit_error(&KiroError::parse_failed(filename, &format!("{:?}", e)));
             return false;
         }
     };
 
-    let mut i = interpreter::Interpreter::new();
+    let base_dir = std::path::Path::new(filename)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let mut i = interpreter::Interpreter::with_base_dir(base_dir);
     if let Err(e) = i.run(prog) {
-        eprintln!("Interpreter Error: {}", e);
+        emit_error(&KiroError::new(
+            errors::ErrorCode::ParseFailed,
+            errors::ErrorPhase::Runtime,
+            format!("Interpreter error: {}", e),
+        ));
         return false;
     }
     true
 }
 
-fn run_compiler(filename: &str, _emit_rust: bool, verbose: bool) -> Result<PathBuf, String> {
+fn run_compiler(filename: &str, _emit_rust: bool, verbose: bool) -> Result<PathBuf, KiroError> {
     if !std::path::Path::new(filename).exists() {
-        return Err(format!("'{}' not found.", filename));
+        return Err(KiroError::file_not_found(filename));
     }
 
     let pm = BuildManager::new("kiro_build_cache");
     if let Err(e) = pm.init() {
-        return Err(format!("Init Error: {}", e));
+        return Err(KiroError::new(
+            errors::ErrorCode::BuildGraphFailed,
+            errors::ErrorPhase::Compile,
+            format!("Init error: {}", e),
+        ));
     }
 
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let path = std::path::Path::new(filename);
     let name = path.file_stem().unwrap().to_str().unwrap();
     let dir = path.parent().map(|p| p.to_str().unwrap()).unwrap_or("");
-    build_recursive(name, dir, &mut seen, &pm, true);
+    build_recursive(name, dir, &mut seen, &pm, true)?;
 
     match pm.build(verbose) {
         Ok(output_path) => Ok(output_path),
-        Err(e) => Err(format!("Build Error: {}", e)),
+        Err(e) => Err(KiroError::new(
+            errors::ErrorCode::BuildGraphFailed,
+            errors::ErrorPhase::Compile,
+            format!("Build error: {}", e),
+        )),
     }
 }
 
@@ -423,15 +453,28 @@ pub struct StdAssets;
 #[folder = "kiro_runtime/"]
 pub struct RuntimeAssets;
 
+fn unsupported_let_line(source: &str) -> Option<usize> {
+    for (idx, line) in source.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        if trimmed.split_whitespace().next() == Some("let") {
+            return Some(idx + 1);
+        }
+    }
+    None
+}
+
 fn build_recursive(
     name: &str,
     base_dir: &str,
     seen: &mut std::collections::HashSet<String>,
     pm: &BuildManager,
     is_root: bool,
-) {
+) -> Result<(), KiroError> {
     if seen.contains(name) {
-        return;
+        return Ok(());
     }
     seen.insert(name.to_string());
 
@@ -458,16 +501,38 @@ fn build_recursive(
         match fs::read_to_string(&filename) {
             Ok(s) => s,
             Err(_) => {
-                eprintln!(
-                    "❌ Compiler Warning: File '{}' not found during build.",
-                    filename
-                );
-                return;
+                return Err(KiroError::file_not_found(&filename));
             }
         }
     };
 
-    let prog = grammar::parse(&src).expect("Parse error during build");
+    if let Some(line) = unsupported_let_line(&src) {
+        return Err(KiroError::unsupported_keyword(name, line, "let"));
+    }
+
+    let prog = match grammar::parse(&src) {
+        Ok(p) => p,
+        Err(e) => {
+            return Err(KiroError::parse_failed(name, &format!("{:?}", e)));
+        }
+    };
+
+    // Collect rust fn declarations in this module so we can generate fallbacks
+    // when no glue file is present.
+    let mut rust_decl_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for s in &prog.statements {
+        match s {
+            grammar::grammar::Statement::RustFnDecl(def) => {
+                rust_decl_names.insert(def.name.clone());
+            }
+            grammar::grammar::Statement::Documented { item, .. } => {
+                if let grammar::grammar::AnnotatableItem::RustFnDecl(def) = item {
+                    rust_decl_names.insert(def.name.clone());
+                }
+            }
+            _ => {}
+        }
+    }
 
     // Find imports to recurse
     for s in &prog.statements {
@@ -478,17 +543,26 @@ fn build_recursive(
             } else {
                 base_dir
             };
-            build_recursive(module_name, import_dir, seen, pm, false);
+            build_recursive(module_name, import_dir, seen, pm, false)?;
         }
     }
 
     // Compile
     let mut c = compiler::Compiler::new();
-    let code = c.compile(prog, is_root);
+    let code = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.compile(prog, is_root))) {
+        Ok(code) => code,
+        Err(payload) => {
+            return Err(KiroError::compiler_panic(name, &panic_payload_to_string(payload)));
+        }
+    };
 
     let save_name = if is_root { "main" } else { name };
     if let Err(e) = pm.save_file(save_name, code) {
-        eprintln!("Failed to save {}: {}", save_name, e);
+        return Err(KiroError::new(
+            errors::ErrorCode::BuildGraphFailed,
+            errors::ErrorPhase::Compile,
+            format!("Failed to save {}: {}", save_name, e),
+        ));
     } else {
         println!("  - Compiled {}", name);
     }
@@ -513,5 +587,43 @@ fn build_recursive(
                 eprintln!("Failed to append header for {}: {}", name, e);
             }
         }
+    } else {
+        // For user modules, check if there is a corresponding .rs file (Glue Code)
+        // e.g. for "mylib", check "mylib.rs" alongside "mylib.kiro"
+        let rs_path = if !base_dir.is_empty() {
+            format!("{}/{}.rs", base_dir, name)
+        } else {
+            format!("{}.rs", name)
+        };
+
+        if std::path::Path::new(&rs_path).exists() {
+            println!("  - Found Glue: {}", rs_path);
+            match std::fs::read_to_string(&rs_path) {
+                Ok(content) => {
+                    if let Err(e) = pm.append_header(&content) {
+                        eprintln!("Failed to append glue code for {}: {}", name, e);
+                    }
+                }
+                Err(e) => eprintln!("Failed to read glue file {}: {}", rs_path, e),
+            }
+        } else if !rust_decl_names.is_empty() {
+            let mut stub_lines: Vec<String> = Vec::new();
+            for fn_name in rust_decl_names {
+                stub_lines.push(format!(
+                    "pub async fn {0}(_args: Vec<kiro_runtime::RuntimeVal>) -> Result<kiro_runtime::RuntimeVal, kiro_runtime::KiroError> {{ panic!(\"Missing glue for rust fn '{0}'. Add '{1}' with an implementation.\") }}",
+                    fn_name, rs_path
+                ));
+            }
+            let stubs = format!("\n// Auto-generated missing glue stubs for module '{}'\n{}\n", name, stub_lines.join("\n"));
+            if let Err(e) = pm.append_header(&stubs) {
+                eprintln!("Failed to append generated glue stubs for {}: {}", name, e);
+            } else {
+                eprintln!(
+                    "⚠️ Generated fallback rust fn glue stubs for '{}'. Add '{}' to override.",
+                    name, rs_path
+                );
+            }
+        }
     }
+    Ok(())
 }

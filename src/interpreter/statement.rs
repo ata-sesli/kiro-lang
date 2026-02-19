@@ -2,6 +2,7 @@ use super::Interpreter;
 use super::StatementResult; // New Enum
 use super::values::{RuntimeVal, Value};
 use crate::grammar::grammar::{self, Statement};
+use std::path::PathBuf;
 
 // Helper for Deep Updates
 // Path is reversed: [z, y] means x.y.z
@@ -58,6 +59,11 @@ impl Interpreter {
                         is_mutable: true, // New vars are always mutable in Kiro 1.0 logic
                     },
                 );
+
+                // If in pure mode, whitelist this new local variable
+                if self.in_pure_mode {
+                    self.pure_scope_params.insert(ident.clone());
+                }
                 Ok(StatementResult::Normal(RuntimeVal::Void))
             }
 
@@ -73,7 +79,15 @@ impl Interpreter {
                             if !entry.is_mutable {
                                 return Err(format!("ERROR: '{}' is immutable.", name));
                             }
-                            entry.data = new_val;
+                            if matches!(entry.data, RuntimeVal::AdrHandle(_)) {
+                                entry.data = match new_val {
+                                    RuntimeVal::Pointer(ptr) => RuntimeVal::AdrHandle(Some(ptr)),
+                                    RuntimeVal::AdrHandle(h) => RuntimeVal::AdrHandle(h),
+                                    other => other,
+                                };
+                            } else {
+                                entry.data = new_val;
+                            }
                             Ok(StatementResult::Normal(RuntimeVal::Void))
                         } else {
                             // NEW: Immutable Declaration (First Assignment)
@@ -130,6 +144,25 @@ impl Interpreter {
 
                         Ok(StatementResult::Normal(RuntimeVal::Void))
                     }
+                    // Deref Assignment: deref p = 200
+                    crate::grammar::grammar::Expression::Deref(_, target) => {
+                        let ptr_val = self.eval_expr(*target)?;
+                        match ptr_val {
+                            RuntimeVal::Pointer(ptr) => {
+                                let mut guard = ptr.lock().unwrap();
+                                *guard = new_val;
+                                Ok(StatementResult::Normal(RuntimeVal::Void))
+                            }
+                            RuntimeVal::AdrHandle(Some(ptr)) => {
+                                let mut guard = ptr.lock().unwrap();
+                                *guard = new_val;
+                                Ok(StatementResult::Normal(RuntimeVal::Void))
+                            }
+                            _ => {
+                                Err("Runtime Error: Assignment target is not a pointer.".to_string())
+                            }
+                        }
+                    }
                     _ => Err("Invalid left-hand side for assignment.".to_string()),
                 }
             }
@@ -175,21 +208,28 @@ impl Interpreter {
                                 || clause.error_type.as_ref().map(|s| &s.value) == Some(err_name);
                             if matches {
                                 let result = self.execute_block(clause.body.clone())?;
-                                // If block returned normally with Void, implicitly return the error
+                                // If block returned normally with Void, implicitly propagate
+                                // only inside failable functions.
                                 match result {
                                     StatementResult::Normal(RuntimeVal::Void) => {
-                                        return Ok(StatementResult::Return(RuntimeVal::Error(
-                                            err_name.clone(),
-                                            err_desc.clone(),
-                                        )));
+                                        if self.in_failable_fn {
+                                            return Ok(StatementResult::Return(RuntimeVal::Error(
+                                                err_name.clone(),
+                                                err_desc.clone(),
+                                            )));
+                                        }
+                                        return Ok(StatementResult::Normal(RuntimeVal::Void));
                                     }
                                     other => return Ok(other),
                                 }
                             }
                         }
                     }
-                    // If no clause matched, return the error as-is (propagation)
-                    return Ok(StatementResult::Return(val));
+                    // If no clause matched, propagate in failable fn, otherwise error.
+                    if self.in_failable_fn {
+                        return Ok(StatementResult::Return(val));
+                    }
+                    return Err(format!("Unhandled error: {}", err_name));
                 }
 
                 // Standard truthy check for non-error values
@@ -355,8 +395,14 @@ impl Interpreter {
                 let val = self.eval_expr(value_expr)?;
 
                 if let RuntimeVal::Pipe(tx, _) = chan {
-                    tx.send(val)
-                        .map_err(|_| "Pipe Error: Receiver closed".to_string())?;
+                    match tx {
+                        super::values::PipeSender::Unbounded(tx) => tx
+                            .send(val)
+                            .map_err(|_| "Pipe Error: Receiver closed".to_string())?,
+                        super::values::PipeSender::Bounded(tx) => tx
+                            .send(val)
+                            .map_err(|_| "Pipe Error: Receiver closed".to_string())?,
+                    }
                 } else {
                     return Err("Runtime Error: 'give' expects a pipe.".to_string());
                 }
@@ -370,8 +416,19 @@ impl Interpreter {
             }
             // 7. Import Logic
             Statement::Import { module_name, .. } => {
-                if let Some(mod_val) = self.module_cache.get(&module_name) {
-                    println!("📦 Using cached module '{}'", module_name);
+                let cache_key = if module_name.starts_with("std_") {
+                    format!("std://{}", module_name)
+                } else {
+                    let filename = format!("{}.kiro", module_name);
+                    let full_path = self.current_dir.join(filename);
+                    std::fs::canonicalize(&full_path)
+                        .unwrap_or(full_path)
+                        .to_string_lossy()
+                        .to_string()
+                };
+
+                if let Some(mod_val) = self.module_cache.get(&cache_key) {
+                    println!("📦 Using cached module '{}'", cache_key);
                     // Inject into current env
                     self.env.insert(
                         module_name.clone(),
@@ -384,7 +441,7 @@ impl Interpreter {
                 }
 
                 // 2. Resolve Source
-                let (src, _path) = if module_name.starts_with("std_") {
+                let (src, import_base_dir) = if module_name.starts_with("std_") {
                     let key = &module_name[4..];
                     let asset_path = format!("{}/{}.kiro", key, module_name);
                     let content = crate::StdAssets::get(&asset_path)
@@ -395,12 +452,18 @@ impl Interpreter {
                                 module_name
                             )
                         })?;
-                    (content, asset_path)
+                    (content, self.current_dir.clone())
                 } else {
                     let filename = format!("{}.kiro", module_name);
-                    let content = std::fs::read_to_string(&filename)
-                        .map_err(|_| format!("Module '{}' not found", filename))?;
-                    (content, filename)
+                    let full_path = self.current_dir.join(&filename);
+                    let resolved = std::fs::canonicalize(&full_path).unwrap_or(full_path.clone());
+                    let content = std::fs::read_to_string(&resolved)
+                        .map_err(|_| format!("Module '{}' not found", resolved.display()))?;
+                    let parent = resolved
+                        .parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    (content, parent)
                 };
 
                 println!("📦 Importing {}...", module_name);
@@ -410,35 +473,28 @@ impl Interpreter {
                     .map_err(|e| format!("Parse Error in module '{}': {:?}", module_name, e))?;
 
                 // 4. Run Sub-Interpreter
-                let mut sub_interp = Interpreter::new();
-                // Important: Share the module cache to handle diamonds?
-                // For valid strict trees, cloning is okay, but inefficient.
-                // ideally we pass a ref, but Interp structure owns it.
-                // Simple version: Clone existing cache in, run, then merge back new cache?
-                // Merging back is hard. Let's start with isolated load, knowing diamonds might double-load.
-                // Optimization: We can't easily share without refactoring Interpreter to hold context ref.
-                // ACCEPTABLE COMPROMISE: Modules re-evaluated if imported in sub-deps for now.
-                // BUT we must allow std_ modules to work.
+                let mut sub_interp = Interpreter::with_base_dir(import_base_dir);
+                sub_interp.module_cache = self.module_cache.clone();
 
                 sub_interp.run(prog)?;
 
                 // 5. Harvest Exports
                 // Everything in top-level env is exported
                 let mut exports_data = std::collections::HashMap::new();
-                for (k, v) in sub_interp.env {
-                    exports_data.insert(k, v.data);
+                for (k, v) in &sub_interp.env {
+                    exports_data.insert(k.clone(), v.data.clone());
                 }
 
                 let mut exports_funcs = std::collections::HashMap::new();
-                for (k, v) in sub_interp.functions {
-                    exports_funcs.insert(k, v);
+                for (k, v) in &sub_interp.functions {
+                    exports_funcs.insert(k.clone(), v.clone());
                 }
 
                 let mod_val = RuntimeVal::Module(exports_data, exports_funcs);
 
                 // 6. Cache and Inject
-                self.module_cache
-                    .insert(module_name.clone(), mod_val.clone());
+                self.module_cache = sub_interp.module_cache;
+                self.module_cache.insert(cache_key, mod_val.clone());
                 self.env.insert(
                     module_name.clone(),
                     crate::interpreter::values::Value {

@@ -8,8 +8,14 @@ var v = deref p
 print "Value via ptr: " + v
 
 // Writing
-// deref p = 200 // Interpreter limitation: Mutation via deref not supported yet
-// print "New Value: " + val
+deref p = 200
+var updated = deref p
+print "Updated via p: " + updated
+
+// Opaque managed handle (adr void)
+var any_ptr = adr void
+any_ptr = p
+print any_ptr
 
 // Struct Pointers
 struct Point { x: num y: num }
@@ -18,5 +24,3 @@ var pt_ref = ref pt
 
 // Auto-deref access
 print "Point X: " + pt_ref.x
-// pt_ref.y = 30 // Interpreter limitation
-// print "New Y: " + pt.y

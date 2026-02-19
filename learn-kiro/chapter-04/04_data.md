@@ -1,10 +1,8 @@
 # Chapter 4: Data Structures
 
-Organizing complex data.
+Once logic is clear, data modeling becomes the next major design step. Kiro gives you three core tools: structs for shaped records, lists for ordered sequences, and maps for key-value lookup. Choosing the right structure makes code simpler before optimization is ever needed.
 
-## 1. Structs
-
-Named collections of fields. Capitalized names required.
+A struct represents one entity with named fields:
 
 ```kiro
 struct User {
@@ -12,32 +10,42 @@ struct User {
     age: num
 }
 
-var u = User { name: "Kiro", age: 10 }
-print u.name
+var user = User { name: "Kiro", age: 10 }
+print user.name
 ```
 
-## 2. Lists
+Use structs whenever fields belong together conceptually.
 
-Ordered collections of one type.
+A list stores ordered values of one type:
 
 ```kiro
 var nums = list num { 1, 2, 3 }
 nums push 4
 print (nums at 0)
+print nums
 ```
 
-## 3. Maps
-
-Key-value pairs.
+A map stores values by key, useful for lookups:
 
 ```kiro
 var scores = map str num {
     "Alice" 10,
     "Bob" 5
 }
+
 print (scores at "Alice")
 ```
 
+The practical rule is simple: choose `struct` for one thing with many fields, `list` for many items in order, and `map` for fast access by key.
+
+## Common Pitfalls
+
+A common data-modeling mistake is forcing everything into lists. The correct method is to promote related fields into a struct so field names communicate intent.
+
+Another issue is mixing value types inside typed collections. The correct method is to treat collection element types as strict contracts and convert data before insertion.
+
+Map lookups often fail because keys were never inserted or are inconsistent in format. The correct method is to normalize key creation (for example, casing and spacing) at insertion time and reuse that normalization at lookup time.
+
 ## Next Step
 
-[Chapter 5: Error Handling](../chapter-05/05_errors.md).
+Continue with [Chapter 5: Error Handling](../chapter-05/05_errors.md).

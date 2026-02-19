@@ -3,6 +3,10 @@
 
 error EnvNotFound = "Environment variable not found"
 
+/// Reads environment variable `key`.
+/// Returns `EnvNotFound` when the key does not exist.
 rust fn get(key: str) -> str!
+/// Sets environment variable `key` to `value` for the current process.
 rust fn set(key: str, value: str) -> void
+/// Returns process arguments as a list of strings.
 rust fn args() -> list str

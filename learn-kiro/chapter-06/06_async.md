@@ -1,10 +1,8 @@
-# Chapter 6: Async & Go (`run` keyword)
+# Chapter 6: Async & `run`
 
-Concurrency in Kiro is built-in. This chapter explores how to run tasks in the background.
+Concurrency in Kiro begins with one idea: start independent work without blocking the current flow. The `run` keyword gives you that capability with minimal syntax.
 
-## 1. The `run` Keyword
-
-Use `run` to execute a function asynchronously. This is similar to the `go` keyword in Go.
+A simple example shows the model:
 
 ```kiro
 fn worker() {
@@ -12,21 +10,31 @@ fn worker() {
 }
 
 run worker()
-print "Main thread continues..."
+print "Main flow continues"
 ```
 
-## 2. Passing Arguments
+`run worker()` starts background work and immediately returns control to the next statement. This means output order between worker and main flow is not guaranteed.
 
-You can pass arguments to async functions just like normal ones.
+Arguments are passed normally:
 
 ```kiro
 fn log(msg: str) {
     print "Log: " + msg
 }
 
-run log("Async Message")
+run log("Async message")
 ```
+
+As your programs grow, asynchronous execution should be paired with clear communication boundaries, which is exactly what pipes provide in the next chapter.
+
+## Common Pitfalls
+
+A frequent mistake is assuming statements after `run` wait for completion. The correct method is to treat `run` as non-blocking and design synchronization intentionally.
+
+Another issue is mixing shared mutable state into multiple concurrent tasks too early. The correct method is to prefer message passing and narrow ownership so task behavior stays understandable.
+
+Developers also spawn tasks without lifecycle planning. The correct method is to define when work starts, how results are collected, and when channels close.
 
 ## Next Step
 
-[Chapter 7: Pipes (Channels)](../chapter-07/07_pipes.md).
+Continue with [Chapter 7: Pipes](../chapter-07/07_pipes.md).

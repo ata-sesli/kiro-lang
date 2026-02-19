@@ -1,90 +1,45 @@
-# Chapter 6: Advanced Concepts
+# Chapter 6 (Optional): Advanced Concepts
 
-In this final chapter, we'll explore some of Kiro's most powerful features: **Pointers**, **Concurrency**, and **Host Modules**.
+This optional chapter connects features you already learned into one coherent design style. Instead of treating pointers, concurrency, and host functions as isolated tools, you can view them as complementary mechanisms for ownership, coordination, and capability extension.
 
-## 1. Pointers (`adr`, `ref`, `deref`)
-
-Kiro provides type-safe pointers (references) to manage memory and shared state.
-
-### Creating Pointers
-
-Use `ref` to create a reference to a variable. The type is `adr <T>`.
+Pointers (`adr`, `ref`, `deref`) give reference semantics when sharing or mutating existing values is necessary:
 
 ```kiro
 var x = 10
-var ptr = ref x // Type: adr num
+var p = ref x
+print (deref p)
+deref p = 20
+print x
 ```
 
-### Accessing Values (`deref`)
-
-Use `deref` to read or write the value at the pointer's address.
+Concurrency (`run`) helps independent work proceed without blocking, while pipes keep communication explicit:
 
 ```kiro
-deref ptr = 20
-print x // 20
-```
-
-### Auto-Deref for Structs
-
-For structs, you don't need explicit `deref` to access fields.
-
-```kiro
-struct User { name: str }
-var u = User { name: "Kiro" }
-var u_ptr = ref u
-print u_ptr.name // Works directly!
-```
-
-## 2. Concurrency (`run`, `pipe`)
-
-Kiro makes asynchronous programming easy with `run` and `pipe`.
-
-### Spawning Tasks
-
-Use `run` to execute a function call in the background.
-
-```kiro
-fn worker() {
-    print "Working..."
+fn worker(out: pipe str) {
+    give out "done"
 }
 
-run worker()
+var ch = pipe str
+run worker(ch)
+print (take ch)
 ```
 
-### Communication (Pipes)
-
-Pipes are typed channels for sending data between tasks.
+Host declarations (`rust fn`) extend Kiro with Rust implementations where system-level integration or specialized libraries are needed:
 
 ```kiro
-var p = pipe str
-
-// Sender
-run fn() {
-    give p "Message from worker"
-}()
-
-// Receiver
-var msg = take p
-print "Received: " + msg
-```
-
-## 3. Host Modules (Rust FFI)
-
-Kiro can call Rust code directly through **Host Modules**. This allows you to leverage the entire Rust ecosystem.
-
-### Declaring a Host Function
-
-Use `rust fn` to declare a function implemented in Rust.
-
-```kiro
-// In your .kiro file
 rust fn read_file(path: str) -> str!
 ```
 
-This requires a corresponding Rust implementation in the `header.rs` file of the Kiro runtime.
+In practice, robust systems usually combine these patterns: pure functions for logic, structs for data shape, pipes for concurrency boundaries, and host functions for external capabilities.
 
-## Conclusion
+## Common Pitfalls
 
-Congratulations! You've completed the Kiro Language Tour. You now have the knowledge to build powerful, efficient, and expressive applications with Kiro.
+A common advanced-level mistake is combining every feature at once during initial implementation. The correct method is to introduce one abstraction at a time and validate behavior incrementally.
 
-Go forth and code! 🌀
+Another issue is choosing shared pointer mutation where message passing would be simpler. The correct method is to default to pipes for cross-task coordination and reserve pointer mutation for tightly scoped cases.
+
+Host integration also fails when declarations and glue drift apart. The correct method is to keep Kiro signatures and Rust implementations synchronized as part of normal review.
+
+## Next Step
+
+Continue with [Chapter 7: Pipes](../chapter-07/07_pipes.md) if you have not completed it yet.

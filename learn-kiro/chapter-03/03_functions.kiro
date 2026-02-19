@@ -1,5 +1,4 @@
-// Chapter 3: Functions
-// import mylib
+// Chapter 3: Functions & Function References
 
 fn shout(msg: str) {
     print msg + "!!!"
@@ -9,11 +8,34 @@ pure fn multiply(a: num, b: num) -> num {
     return a * b
 }
 
+pure fn inc(x: num) -> num {
+    return x + 1
+}
+
+pure fn dec(x: num) -> num {
+    return x - 1
+}
+
+pure fn apply(x: num, f: fn(num) -> num) -> num {
+    return f(x)
+}
+
+pure fn pick(up: bool) -> fn(num) -> num {
+    on (up) {
+        return ref inc
+    } off {
+        return ref dec
+    }
+}
+
 print "--- Functions ---"
 shout("Kiro")
 
 print "--- Pure Func ---"
 print "3 * 4 = " + multiply(3, 4)
 
-print "--- Modules ---"
-// print 03_lib.get_msg()
+print "--- Function Refs ---"
+f = ref inc
+print apply(10, f)
+g = pick(false)
+print g(10)

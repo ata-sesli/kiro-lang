@@ -1,6 +1,9 @@
 // Kiro Standard Library: Time
 // Uses tokio::time for async sleep, std::time for timestamps
 
+/// Returns current UNIX time in milliseconds.
 rust fn now() -> num
+/// Suspends execution for `ms` milliseconds.
 rust fn sleep(ms: num) -> void
+/// Returns a monotonic timestamp value for elapsed-time measurements.
 rust fn monotonic() -> num
