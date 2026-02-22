@@ -109,7 +109,7 @@ When changing syntax or keywords in the compiler, update this extension in the s
 
 Main language repository:
 
-- https://github.com/dark-mesh/kiro-lang
+- https://github.com/ata-sesli/kiro-lang
 
 Tutorial docs in this repo:
 

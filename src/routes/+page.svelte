@@ -54,7 +54,7 @@
 				>
 			</a>
 			<a
-				href="https://github.com/dark-mesh/kiro-lang"
+				href="https://github.com/ata-sesli/kiro-lang"
 				target="_blank"
 				class="inline-flex items-center gap-2 rounded-lg border px-6 py-2.5 text-sm font-semibold text-neutral-300 transition-all hover:border-neutral-500 hover:text-white"
 				style="border-color:#262626; background:#111111;"
