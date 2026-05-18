@@ -4,30 +4,51 @@
 
 # Kiro Language Support for VS Code
 
-This is the official Visual Studio Code extension for **Kiro**, a modern experimental programming language.
+Official Visual Studio Code extension for **Kiro**, an experimental programming language focused on clear syntax, explicit control flow, and practical host integration.
 
-## ✨ Features
+## Features
 
-- **Syntax Highlighting**: Comprehensive coloring for Kiro's unique syntax, including:
-  - Keywords (`fn`, `var`, `struct`, `import`, `pure`, `run`, `error`)
-  - Control Flow (`if`, `loop`, `on/off`)
-  - Types (`num`, `str`, `bool`, `void`, `adr`, `pipe`)
-  - Operators (`ref`, `deref`, `!`, `push`, `at`)
-  - Comments and Strings
-- **Bracket Matching**: Automatic matching for `{ }`, `( )`, and `[ ]`.
-- **Comment Toggling**: Support for `//` line comments.
+### Syntax Highlighting
+The extension ships with a TextMate grammar for `.kiro` files and highlights:
 
-## 📦 Installation
+- Core declarations: `fn`, `var`, `struct`, `import`, `error`, `rust`, `pure`
+- Control flow: `on`, `off`, `loop`, `in`, `per`, `break`, `continue`, `return`, `check`, `run`, `rest`
+- Type keywords: `num`, `str`, `bool`, `void`, `adr`, `pipe`, `list`, `map`
+- Operators and commands: `ref`, `deref`, `move`, `give`, `take`, `close`, `at`, `push`, `len`
+- Strings, comments, punctuation, and grouping tokens
 
-This extension is currently part of the Kiro language repository. To use it locally:
+### Hover Documentation
+Built-in hover docs are provided for:
 
-1. Open the `kiro-vscode/kiro` folder in VS Code.
-2. Press `F5` to launch a new Extension Development Host window with Kiro support enabled.
-3. Open any `.kiro` file to see the syntax highlighting in action.
+- Language keywords and core constructs
+- Standard modules such as `std_fs`, `std_env`, `std_net`, `std_time`, and `std_io`
+- Qualified module calls like `std_fs.read` and `std_io.input`
 
-## 🚀 Usage
+### Language Configuration
+- Bracket pairing for `{}`, `()`, and `[]`
+- `//` line comment support
+- Proper language registration for `*.kiro`
 
-Create a file ending in `.kiro` (e.g., `main.kiro`). The extension will automatically activate and provide syntax highlighting.
+## Installation
+
+### Local Development (from this repository)
+
+1. Open `kiro-vscode/kiro` in VS Code.
+2. Run `npm install` if your environment requires dependencies for extension packaging workflows.
+3. Press `F5` to launch an **Extension Development Host**.
+4. Open a `.kiro` file in the new window.
+
+### VSIX Packaging (optional)
+
+If you want to distribute/test as a package:
+
+1. Install `vsce`.
+2. From `kiro-vscode/kiro`, run `vsce package`.
+3. Install the generated `.vsix` from VS Code extensions UI.
+
+## Usage
+
+Create any file with the `.kiro` extension:
 
 ```kiro
 fn main() -> void {
@@ -36,14 +57,61 @@ fn main() -> void {
     var x = 10
     on (x > 5) {
         print "Greater than 5"
+    } off {
+        print "5 or less"
     }
 }
 ```
 
-## 🔗 Kiro Language
+Hover over keywords (for example `loop`, `ref`, `pipe`) or standard module members (for example `std_io.input`) to view inline docs.
 
-To learn more about the Kiro language, visit the [main repository](https://github.com/dark-mesh/kiro-lang).
+## Project Layout
 
-## 📄 License
+- `package.json`: extension manifest and contributions
+- `extension.js`: hover provider registration and activation logic
+- `docs/hoverDocs.js`: keyword/module hover documentation source
+- `syntaxes/kiro.tmLanguage.json`: TextMate grammar
+- `language-configuration.json`: bracket and comment rules
+
+## Current Scope
+
+This extension currently focuses on **language-authoring essentials**:
+
+- Syntax highlighting
+- Hover help
+- Baseline language configuration
+
+It does **not** currently include full semantic tooling such as:
+
+- Diagnostics from compiler output
+- Go-to-definition
+- Rename symbol
+- Semantic tokens
+- Formatting
+
+Those are natural next steps when/if an LSP server is introduced.
+
+## Contributing
+
+Contributions are welcome. Good contributions include:
+
+- Improving grammar precision in `syntaxes/kiro.tmLanguage.json`
+- Expanding hover docs in `docs/hoverDocs.js`
+- Tightening language config behavior
+- Keeping docs aligned with language evolution
+
+When changing syntax or keywords in the compiler, update this extension in the same PR to avoid tooling drift.
+
+## Kiro Language
+
+Main language repository:
+
+- https://github.com/dark-mesh/kiro-lang
+
+Tutorial docs in this repo:
+
+- `learn-kiro/`
+
+## License
 
 MIT

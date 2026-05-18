@@ -14,13 +14,13 @@ fn worker(id: num, out: pipe TaskResult) {
         success: true,
         message: "Processed task " + id
     }
-    
+
     // Simulate failure for one task
     on (id == 3) {
         res.success = false
         res.message = "Failed task " + id
     }
-    
+
     give out res
 }
 
@@ -40,7 +40,7 @@ print "Waiting for results..."
 var successes = 0
 loop i in 1..6 {
     var r = take results_pipe
-    
+
     on (r.success) {
         print "[OK] " + r.message
         successes = successes + 1

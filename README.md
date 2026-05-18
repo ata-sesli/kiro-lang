@@ -50,12 +50,20 @@ kiro check main.kiro
 # Production Build: Compile ONLY
 kiro build main.kiro
 
+# Format source files in place
+kiro fmt main.kiro
+
+# Check formatting without writing changes
+kiro fmt --check
+
 # Skip interpreter validation (e.g. for CI or heavy host modules usage)
 kiro main.kiro --no-interpret
 
 # Show compiler logs
 kiro main.kiro --verbose
 ```
+
+Kiro reports common language errors before Rust codegen when possible: wrong argument counts, unknown names, pure-function violations, immutable mutation, bad imported calls, bad pipe/list/map use, and failed `check` guards.
 
 ---
 
@@ -189,6 +197,14 @@ Kiro supports standard control flow signals within functions and loops:
 - `break`: Exit the innermost loop.
 - `continue`: Skip to the next iteration of the loop.
 
+#### Runtime Checks
+
+Use `check` when a condition must be true for the program to continue. A failed check stops the program with a Kiro diagnostic.
+
+```kiro
+check user.age > 0, "age must be positive"
+```
+
 ### 6. Pointers & Memory (`ref` / `deref`)
 
 Kiro abstractly manages memory while giving you pointer-like behavior. References are thread-safe (`Arc<Mutex<T>>`).
@@ -224,10 +240,16 @@ print raw   // Prints the raw address (e.g. 5829058176)
 
 #### Async Execution
 
-Use `run` to spawn a background task.
+Use `run` to spawn a fire-and-forget background task. The task starts independently and may be cancelled when the program exits unless you synchronize explicitly.
 
 ```kiro
 run worker(id)
+```
+
+Use `rest` inside long-running tasks to give other tasks a chance to continue.
+
+```kiro
+rest
 ```
 
 #### Pipes (Channels)
@@ -244,6 +266,14 @@ var x = take p
 - `take p`: Receive value (awaits).
 - `close p`: Close the channel.
 - `pipe void`: A signal-only channel.
+
+Use pipes to wait for fire-and-forget tasks when completion matters:
+
+```kiro
+var done = pipe void
+run worker(done)
+take done
+```
 
 ### 8. Functions
 
@@ -354,28 +384,35 @@ error NotFound = "File not found"
 rust fn read_file(path: str) -> str!
 ```
 
-#### 2. Rust Glue Layer (`header.rs`)
+#### 2. Rust Glue Layer (`mylib.rs`)
 
-The logic lives in a centralized Rust "glue" file. Kiro scripts and the Rust host communicate via a shared runtime contract.
+The logic lives in an adjacent Rust glue file. A user module `mylib.kiro` uses `mylib.rs`; standard modules keep embedded headers. Kiro scripts and Rust glue communicate through the `kiro_runtime` ABI.
 
 - **Glue implementation**: Use the `kiro_runtime` crate to convert types between Kiro and Rust.
-- **Centralized Layer**: All host functions are consolidated in a single, auditable `header.rs` file.
+- **ABI v1**: Host functions are async and return `kiro_runtime::HostResult`.
+- **Missing Glue**: If a module declares `rust fn` but the matching `.rs` file is absent, Kiro reports a compile diagnostic before Rust build.
 
 ```rust
 // Example Glue Implementation
-use kiro_runtime::{RuntimeVal, KiroError};
+use kiro_runtime::{HostResult, KiroError, RuntimeVal};
 
-pub fn read_file(args: Vec<RuntimeVal>) -> Result<RuntimeVal, KiroError> {
-    let path = args[0].as_str()?; // Explicit conversion
-    match std::fs::read_to_string(path) {
+pub async fn read_file(args: Vec<RuntimeVal>) -> HostResult {
+    RuntimeVal::expect_arity(&args, 1, "read_file")?;
+    let path = RuntimeVal::expect_arg(&args, 0, "read_file")?.as_str()?;
+
+    match tokio::fs::read_to_string(path).await {
         Ok(c) => Ok(RuntimeVal::from(c)),
-        Err(_) => Err(KiroError::new("NotFound")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(KiroError::message("NotFound", path.to_string()))
+        }
+        Err(e) => Err(KiroError::message("IoError", e.to_string())),
     }
 }
 ```
 
 - **Interpreter Behavior**: The interpreter includes a **Simulator**. It does not execute Rust glue, but it validates the call (argument count/types) and returns a mock value (e.g., an empty string or `0.0`) so the script can proceed with logical validation without crashing.
 - **Compiler parity**: Results from Rust are strictly type-checked and integrated into Kiro's error handling (`on/error`).
+- **Error Matching**: Kiro matches host errors by name (`NotFound`). Optional host error messages are kept for diagnostics.
 
 ---
 

@@ -65,7 +65,11 @@ pub fn compile_map(key: &KiroType, value: &KiroType) -> String {
 }
 
 pub fn compile_fn_type(params: &[KiroType], ret: &KiroType) -> String {
-    let args = params.iter().map(compile_type).collect::<Vec<_>>().join(", ");
+    let args = params
+        .iter()
+        .map(compile_type)
+        .collect::<Vec<_>>()
+        .join(", ");
     let ret_ty = compile_type(ret);
     format!("fn({}) -> {}", args, ret_ty)
 }

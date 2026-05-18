@@ -5,18 +5,25 @@ Kiro is designed to be extensible through host functions implemented in Rust. Th
 When Kiro declares a `rust fn`, the runtime expects a matching Rust implementation. The Rust function typically receives runtime values, validates/converts them, performs work, and returns either a runtime value or a structured error.
 
 ```rust
-use kiro_runtime::{RuntimeVal, KiroError};
+use kiro_runtime::{HostResult, KiroError, RuntimeVal};
 
-pub async fn read_file(args: Vec<RuntimeVal>) -> Result<RuntimeVal, KiroError> {
-    let path = args[0].as_str()?;
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| KiroError::new(&format!("read_file failed: {}", e)))?;
+pub async fn read_file(args: Vec<RuntimeVal>) -> HostResult {
+    RuntimeVal::expect_arity(&args, 1, "read_file")?;
+    let path = RuntimeVal::expect_arg(&args, 0, "read_file")?.as_str()?;
 
-    Ok(RuntimeVal::Str(content))
+    match tokio::fs::read_to_string(path).await {
+        Ok(content) => Ok(RuntimeVal::from(content)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Err(KiroError::message("NotFound", path.to_string()))
+        }
+        Err(err) => Err(KiroError::message("IoError", err.to_string())),
+    }
 }
 ```
 
 The practical workflow is consistent: decode arguments, execute Rust logic, map success to `RuntimeVal`, map failures to `KiroError`.
+
+Host error matching in Kiro uses the error name. The optional message is kept for diagnostics.
 
 Keep host functions narrow in scope. Small host surfaces are easier to test, easier to review, and safer to evolve as language features grow.
 

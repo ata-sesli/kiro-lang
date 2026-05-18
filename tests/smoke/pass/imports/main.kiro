@@ -1,0 +1,14 @@
+import math
+
+fn main() {
+    print "Testing Imports..."
+    var sum = math.add(10, 20)
+    print sum
+
+    var diff = math.sub(sum, 5)
+    print diff
+    loop num in 0..100 per 2.5 {
+    }
+}
+
+main()

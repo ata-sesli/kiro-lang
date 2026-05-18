@@ -144,7 +144,10 @@ impl Compiler {
                     panic!("Pure Function Error: 'take' is forbidden.");
                 }
                 let ch = self.compile_expr(*channel);
-                format!("{}.rx.recv().await.unwrap()", ch)
+                format!(
+                    "match {}.rx.recv().await {{ Ok(__kiro_val) => __kiro_val, Err(_) => kiro_runtime_error(\"KIRO3002\", \"Pipe is closed; cannot take a value.\") }}",
+                    ch
+                )
             }
 
             Expression::Ref(_, target) => {
@@ -165,10 +168,7 @@ impl Compiler {
 
             Expression::Deref(_, target) => {
                 let ptr = self.compile_expr(*target);
-                format!(
-                    "*({}.as_ref().expect(\"Dereferencing Void/Null Pointer\").lock().unwrap())",
-                    ptr
-                )
+                format!("(*kiro_adr_or_fail(&{}).lock().unwrap())", ptr)
             }
 
             Expression::ListInit(_, _, _, items, _) => {
@@ -262,52 +262,61 @@ impl Compiler {
                 format!("(({} as i64)..({} as i64))", start_str, end_str)
             }
             Expression::Call(func, _, args, _) => {
+                let call_info = self.call_function_info(&func);
+                let call_name = self.call_name(&func);
                 // Determine if we need .await (Access func by reference BEFORE move)
                 let needs_await = if let Expression::Variable(v) = &*func {
                     if self.fn_ref_vars.contains(&v.value) {
                         false
-                    } else if let Some(info) = self.functions.get(&v.value) {
+                    } else if let Some(info) = &call_info {
                         !info.is_pure
                     } else {
                         true
                     }
+                } else if let Some(info) = &call_info {
+                    !info.is_pure
                 } else {
                     true
                 };
 
-                if let Expression::Variable(v) = &*func {
-                    if let Some(info) = self.functions.get(&v.value) {
-                        if self.in_pure_context && !info.is_pure {
-                            panic!(
-                                "Compiler Error: Pure function cannot call impure/async function '{}' inside a pure function.",
-                                v.value
-                            );
-                        }
+                if let Some(info) = &call_info {
+                    if self.in_pure_context && !info.is_pure {
+                        panic!(
+                            "Compiler Error: Pure function cannot call impure/async function '{}' inside a pure function.",
+                            call_name
+                        );
+                    }
 
-                        if info.is_pure {
-                            for arg in &args {
-                                let mut current = arg;
-                                while let Expression::FieldAccess(target, _, _) = current {
-                                    current = target;
-                                }
-                                if let Expression::Variable(arg_v) = current {
-                                    if let Some(var_info) = self.known_vars.get(&arg_v.value) {
-                                        if var_info.is_mutable {
-                                            panic!(
-                                                "Compiler Error: Cannot pass mutable variable '{}' to pure function '{}'.",
-                                                arg_v.value, v.value
-                                            );
-                                        }
+                    if info.is_pure {
+                        for arg in &args {
+                            let mut current = arg;
+                            while let Expression::FieldAccess(target, _, _) = current {
+                                current = target;
+                            }
+                            if let Expression::Variable(arg_v) = current {
+                                if let Some(var_info) = self.known_vars.get(&arg_v.value) {
+                                    if var_info.is_mutable {
+                                        panic!(
+                                            "Compiler Error: Cannot pass mutable variable '{}' to pure function '{}'.",
+                                            arg_v.value, call_name
+                                        );
                                     }
                                 }
                             }
                         }
-                    } else if self.in_pure_context && !self.fn_ref_vars.contains(&v.value) {
+                    }
+                } else if let Expression::Variable(v) = &*func {
+                    if self.in_pure_context && !self.fn_ref_vars.contains(&v.value) {
                         panic!(
                             "Compiler Error: Pure function cannot call unknown/impure function '{}'.",
                             v.value
                         );
                     }
+                } else if self.in_pure_context {
+                    panic!(
+                        "Compiler Error: Pure function cannot call unknown/impure function '{}'.",
+                        call_name
+                    );
                 }
 
                 let func_name = self.compile_expr(*func);
@@ -330,16 +339,18 @@ impl Compiler {
                 // This is a bit tricky. Let's handle it manually:
 
                 if let Expression::Call(func, _, args, _) = *call_expr {
+                    let call_info = self.call_function_info(&func);
                     // Check if target is pure (Sync)
                     let is_pure_target = if let Expression::Variable(v) = &*func {
                         if self.fn_ref_vars.contains(&v.value) {
                             true
+                        } else if let Some(info) = &call_info {
+                            info.is_pure
                         } else {
-                            self.functions
-                                .get(&v.value)
-                                .map(|i| i.is_pure)
-                                .unwrap_or(false)
+                            false
                         }
+                    } else if let Some(info) = &call_info {
+                        info.is_pure
                     } else {
                         false
                     };
@@ -378,7 +389,10 @@ impl Compiler {
                 format!("{}.{}", self.compile_lvalue(*target), field.value)
             }
             Expression::Deref(_, target) => {
-                format!("*({}.lock().unwrap())", self.compile_expr(*target))
+                format!(
+                    "*kiro_adr_or_fail(&{}).lock().unwrap()",
+                    self.compile_expr(*target)
+                )
             }
             _ => panic!("Invalid lvalue: {:?}", expr),
         }

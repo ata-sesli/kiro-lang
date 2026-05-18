@@ -1,11 +1,10 @@
-mod build_manager;
-mod compiler;
-mod errors;
-mod grammar;
-mod interpreter;
-
-use crate::build_manager::BuildManager;
-use crate::errors::{KiroError, emit_error, panic_payload_to_string};
+use kiro_lang::build_manager::BuildManager;
+use kiro_lang::compiler;
+use kiro_lang::errors::{self, KiroError, emit_error, panic_payload_to_string};
+use kiro_lang::formatter;
+use kiro_lang::grammar;
+use kiro_lang::interpreter;
+use kiro_lang::{StdAssets, unsupported_let_line};
 
 use std::fs;
 
@@ -63,6 +62,14 @@ enum Commands {
         emit_rust: bool,
         #[arg(short, long)]
         verbose: bool,
+    },
+    /// Format Kiro source files
+    Fmt {
+        /// Files or directories to format. Defaults to the current project.
+        paths: Vec<String>,
+        /// Check formatting without writing changes.
+        #[arg(long)]
+        check: bool,
     },
     /// Create a new Kiro project
     Create { project_name: String },
@@ -272,13 +279,16 @@ async fn main() {
             file,
             emit_rust,
             verbose,
-        }) => {
-            match run_compiler(&file, *emit_rust, *verbose) {
-                Ok(_) => {}
-                Err(e) => {
-                    emit_error(&e);
-                    std::process::exit(1);
-                }
+        }) => match run_compiler(&file, *emit_rust, *verbose) {
+            Ok(_) => {}
+            Err(e) => {
+                emit_error(&e);
+                std::process::exit(1);
+            }
+        },
+        Some(Commands::Fmt { paths, check }) => {
+            if !handle_fmt(paths, *check) {
+                std::process::exit(1);
             }
         }
         Some(Commands::Create { project_name }) => {
@@ -309,6 +319,65 @@ async fn main() {
             }
         }
     }
+}
+
+fn handle_fmt(paths: &[String], check: bool) -> bool {
+    let path_bufs: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+    let files = match formatter::collect_kiro_files(&path_bufs) {
+        Ok(files) => files,
+        Err(e) => {
+            emit_error(&e);
+            return false;
+        }
+    };
+
+    let mut changed = Vec::new();
+    for file in files {
+        let source = match fs::read_to_string(&file) {
+            Ok(source) => source,
+            Err(e) => {
+                emit_error(&KiroError::new(
+                    errors::ErrorCode::FileNotFound,
+                    errors::ErrorPhase::Cli,
+                    format!("Read error: {}", e),
+                )
+                .with_file(file.display().to_string()));
+                return false;
+            }
+        };
+        let display = file.display().to_string();
+        let formatted = match formatter::format_source_for_file(&source, &display) {
+            Ok(formatted) => formatted,
+            Err(e) => {
+                emit_error(&e);
+                return false;
+            }
+        };
+
+        if formatted != source {
+            if check {
+                println!("Would format {}", display);
+                changed.push(display);
+            } else if let Err(e) = fs::write(&file, formatted) {
+                emit_error(&KiroError::new(
+                    errors::ErrorCode::BuildGraphFailed,
+                    errors::ErrorPhase::Cli,
+                    format!("Failed to write '{}': {}", display, e),
+                )
+                .with_file(display));
+                return false;
+            } else {
+                println!("Formatted {}", display);
+            }
+        }
+    }
+
+    if check && !changed.is_empty() {
+        eprintln!("{} file(s) need formatting.", changed.len());
+        return false;
+    }
+
+    true
 }
 
 // Returns true if success
@@ -389,11 +458,16 @@ fn run_interpreter(filename: &str) -> bool {
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     let mut i = interpreter::Interpreter::with_base_dir(base_dir);
     if let Err(e) = i.run(prog) {
-        emit_error(&KiroError::new(
-            errors::ErrorCode::ParseFailed,
-            errors::ErrorPhase::Runtime,
-            format!("Interpreter error: {}", e),
-        ));
+        let err = if let Some(message) = e.strip_prefix("Check failed: ") {
+            KiroError::runtime_check_failed(message)
+        } else {
+            KiroError::new(
+                errors::ErrorCode::ParseFailed,
+                errors::ErrorPhase::Runtime,
+                format!("Interpreter error: {}", e),
+            )
+        };
+        emit_error(&err);
         return false;
     }
     true
@@ -414,10 +488,12 @@ fn run_compiler(filename: &str, _emit_rust: bool, verbose: bool) -> Result<PathB
     }
 
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut module_functions: std::collections::HashMap<(String, String), compiler::FunctionInfo> =
+        std::collections::HashMap::new();
     let path = std::path::Path::new(filename);
     let name = path.file_stem().unwrap().to_str().unwrap();
     let dir = path.parent().map(|p| p.to_str().unwrap()).unwrap_or("");
-    build_recursive(name, dir, &mut seen, &pm, true)?;
+    build_recursive(name, dir, &mut seen, &mut module_functions, &pm, true)?;
 
     match pm.build(verbose) {
         Ok(output_path) => Ok(output_path),
@@ -445,31 +521,11 @@ fn execute_binary(path: PathBuf) -> Result<(), String> {
     }
 }
 
-#[derive(rust_embed::RustEmbed)]
-#[folder = "src/kiro_std/"]
-pub struct StdAssets;
-
-#[derive(rust_embed::RustEmbed)]
-#[folder = "kiro_runtime/"]
-pub struct RuntimeAssets;
-
-fn unsupported_let_line(source: &str) -> Option<usize> {
-    for (idx, line) in source.lines().enumerate() {
-        let trimmed = line.trim_start();
-        if trimmed.is_empty() || trimmed.starts_with("//") {
-            continue;
-        }
-        if trimmed.split_whitespace().next() == Some("let") {
-            return Some(idx + 1);
-        }
-    }
-    None
-}
-
 fn build_recursive(
     name: &str,
     base_dir: &str,
     seen: &mut std::collections::HashSet<String>,
+    module_functions: &mut std::collections::HashMap<(String, String), compiler::FunctionInfo>,
     pm: &BuildManager,
     is_root: bool,
 ) -> Result<(), KiroError> {
@@ -517,6 +573,10 @@ fn build_recursive(
         }
     };
 
+    for (fn_name, info) in compiler::Compiler::collect_program_functions(&prog) {
+        module_functions.insert((name.to_string(), fn_name), info);
+    }
+
     // Collect rust fn declarations in this module so we can generate fallbacks
     // when no glue file is present.
     let mut rust_decl_names: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -543,18 +603,39 @@ fn build_recursive(
             } else {
                 base_dir
             };
-            build_recursive(module_name, import_dir, seen, pm, false)?;
+            build_recursive(module_name, import_dir, seen, module_functions, pm, false)?;
         }
     }
 
-    // Compile
-    let mut c = compiler::Compiler::new();
-    let code = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.compile(prog, is_root))) {
-        Ok(code) => code,
-        Err(payload) => {
-            return Err(KiroError::compiler_panic(name, &panic_payload_to_string(payload)));
-        }
+    let rs_path = if !base_dir.is_empty() {
+        format!("{}/{}.rs", base_dir, name)
+    } else {
+        format!("{}.rs", name)
     };
+
+    if !name.starts_with("std_")
+        && !rust_decl_names.is_empty()
+        && !std::path::Path::new(&rs_path).exists()
+    {
+        let mut missing: Vec<String> = rust_decl_names.iter().cloned().collect();
+        missing.sort();
+        return Err(missing_host_glue_error(name, &src, &missing[0]));
+    }
+
+    // Compile
+    let mut c = compiler::Compiler::with_module_functions(module_functions.clone());
+    let diagnostic_file = format!("{}.kiro", name);
+    c.validate_semantics(&prog, &diagnostic_file, &src)?;
+    let code =
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.compile(prog, is_root))) {
+            Ok(code) => code,
+            Err(payload) => {
+                return Err(KiroError::compiler_panic(
+                    name,
+                    &panic_payload_to_string(payload),
+                ));
+            }
+        };
 
     let save_name = if is_root { "main" } else { name };
     if let Err(e) = pm.save_file(save_name, code) {
@@ -590,12 +671,6 @@ fn build_recursive(
     } else {
         // For user modules, check if there is a corresponding .rs file (Glue Code)
         // e.g. for "mylib", check "mylib.rs" alongside "mylib.kiro"
-        let rs_path = if !base_dir.is_empty() {
-            format!("{}/{}.rs", base_dir, name)
-        } else {
-            format!("{}.rs", name)
-        };
-
         if std::path::Path::new(&rs_path).exists() {
             println!("  - Found Glue: {}", rs_path);
             match std::fs::read_to_string(&rs_path) {
@@ -606,24 +681,40 @@ fn build_recursive(
                 }
                 Err(e) => eprintln!("Failed to read glue file {}: {}", rs_path, e),
             }
-        } else if !rust_decl_names.is_empty() {
-            let mut stub_lines: Vec<String> = Vec::new();
-            for fn_name in rust_decl_names {
-                stub_lines.push(format!(
-                    "pub async fn {0}(_args: Vec<kiro_runtime::RuntimeVal>) -> Result<kiro_runtime::RuntimeVal, kiro_runtime::KiroError> {{ panic!(\"Missing glue for rust fn '{0}'. Add '{1}' with an implementation.\") }}",
-                    fn_name, rs_path
-                ));
-            }
-            let stubs = format!("\n// Auto-generated missing glue stubs for module '{}'\n{}\n", name, stub_lines.join("\n"));
-            if let Err(e) = pm.append_header(&stubs) {
-                eprintln!("Failed to append generated glue stubs for {}: {}", name, e);
-            } else {
-                eprintln!(
-                    "⚠️ Generated fallback rust fn glue stubs for '{}'. Add '{}' to override.",
-                    name, rs_path
-                );
-            }
         }
     }
     Ok(())
+}
+
+fn missing_host_glue_error(module: &str, source: &str, fn_name: &str) -> KiroError {
+    let glue_file = format!("{}.rs", module);
+    let mut err = KiroError::new(
+        errors::ErrorCode::MissingHostGlue,
+        errors::ErrorPhase::Compile,
+        format!(
+            "Missing Rust glue for host function '{}.{}'.",
+            module, fn_name
+        ),
+    )
+    .with_file(format!("{}.kiro", module))
+    .with_help(format!(
+        "add '{}' with `pub async fn {}(args: Vec<RuntimeVal>) -> HostResult`",
+        glue_file, fn_name
+    ));
+
+    let needle = format!("rust fn {}", fn_name);
+    for (idx, line) in source.lines().enumerate() {
+        if let Some(col) = line.find(&needle) {
+            err = err.with_source_location(
+                format!("{}.kiro", module),
+                idx + 1,
+                col + 1,
+                line.to_string(),
+                "missing glue",
+            );
+            break;
+        }
+    }
+
+    err
 }

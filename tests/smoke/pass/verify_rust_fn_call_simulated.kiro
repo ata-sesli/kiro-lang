@@ -1,0 +1,16 @@
+// Test that interpreter check mode simulates rust fn calls.
+
+error NotFound = "File not found"
+
+rust fn read_file(path: str) -> str!
+
+fn main() {
+    print "Testing interpreter simulation of rust fn calls..."
+
+    var content = read_file("test.txt")
+    print content
+
+    print "Simulator call completed"
+}
+
+main()

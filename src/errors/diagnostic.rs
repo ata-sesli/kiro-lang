@@ -7,7 +7,11 @@ pub struct KiroError {
     pub message: String,
     pub file: Option<String>,
     pub line: Option<usize>,
+    pub column: Option<usize>,
+    pub label: Option<String>,
+    pub source_line: Option<String>,
     pub help: Option<String>,
+    pub suggestion: Option<String>,
 }
 
 impl KiroError {
@@ -18,7 +22,11 @@ impl KiroError {
             message: message.into(),
             file: None,
             line: None,
+            column: None,
+            label: None,
+            source_line: None,
             help: None,
+            suggestion: None,
         }
     }
 
@@ -32,8 +40,29 @@ impl KiroError {
         self
     }
 
+    pub fn with_source_location(
+        mut self,
+        file: impl Into<String>,
+        line: usize,
+        column: usize,
+        source_line: impl Into<String>,
+        label: impl Into<String>,
+    ) -> Self {
+        self.file = Some(file.into());
+        self.line = Some(line);
+        self.column = Some(column);
+        self.source_line = Some(source_line.into());
+        self.label = Some(label.into());
+        self
+    }
+
     pub fn with_help(mut self, help: impl Into<String>) -> Self {
         self.help = Some(help.into());
+        self
+    }
+
+    pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
+        self.suggestion = Some(suggestion.into());
         self
     }
 
@@ -71,6 +100,27 @@ impl KiroError {
             ErrorCode::BuildGraphFailed,
             ErrorPhase::Compile,
             "Build graph resolution failed.",
+        )
+    }
+
+    pub fn compile_error(
+        module: &str,
+        code: ErrorCode,
+        message: impl Into<String>,
+        help: Option<String>,
+    ) -> Self {
+        let mut err = Self::new(code, ErrorPhase::Compile, message).with_file(module);
+        if let Some(help) = help {
+            err = err.with_help(help);
+        }
+        err
+    }
+
+    pub fn runtime_check_failed(message: impl Into<String>) -> Self {
+        Self::new(
+            ErrorCode::CheckFailed,
+            ErrorPhase::Runtime,
+            format!("Check failed: {}", message.into()),
         )
     }
 

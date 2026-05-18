@@ -1,9 +1,9 @@
 // Kiro Standard Library: File System (tokio::fs)
 // Glue layer between Kiro and Rust async file operations
 
-use kiro_runtime::{KiroError, RuntimeVal};
+use kiro_runtime::{HostResult, KiroError, RuntimeVal};
 
-pub async fn read(args: Vec<RuntimeVal>) -> Result<RuntimeVal, KiroError> {
+pub async fn read(args: Vec<RuntimeVal>) -> HostResult {
     let path = args[0].as_str()?;
     match tokio::fs::read_to_string(path).await {
         Ok(content) => Ok(RuntimeVal::from(content)),
@@ -19,7 +19,7 @@ pub async fn read(args: Vec<RuntimeVal>) -> Result<RuntimeVal, KiroError> {
     }
 }
 
-pub async fn write(args: Vec<RuntimeVal>) -> Result<RuntimeVal, KiroError> {
+pub async fn write(args: Vec<RuntimeVal>) -> HostResult {
     let path = args[0].as_str()?;
     let content = args[1].as_str()?;
     match tokio::fs::write(path, content).await {
@@ -34,7 +34,7 @@ pub async fn write(args: Vec<RuntimeVal>) -> Result<RuntimeVal, KiroError> {
     }
 }
 
-pub async fn exists(args: Vec<RuntimeVal>) -> Result<RuntimeVal, KiroError> {
+pub async fn exists(args: Vec<RuntimeVal>) -> HostResult {
     let path = args[0].as_str()?;
     match tokio::fs::try_exists(path).await {
         Ok(exists) => Ok(RuntimeVal::from(exists)),
@@ -42,7 +42,7 @@ pub async fn exists(args: Vec<RuntimeVal>) -> Result<RuntimeVal, KiroError> {
     }
 }
 
-pub async fn remove(args: Vec<RuntimeVal>) -> Result<RuntimeVal, KiroError> {
+pub async fn remove(args: Vec<RuntimeVal>) -> HostResult {
     let path = args[0].as_str()?;
     match tokio::fs::remove_file(path).await {
         Ok(()) => Ok(RuntimeVal::Void),
@@ -58,7 +58,7 @@ pub async fn remove(args: Vec<RuntimeVal>) -> Result<RuntimeVal, KiroError> {
     }
 }
 
-pub async fn list(args: Vec<RuntimeVal>) -> Result<RuntimeVal, KiroError> {
+pub async fn list(args: Vec<RuntimeVal>) -> HostResult {
     let path = args[0].as_str()?;
     match tokio::fs::read_dir(path).await {
         Ok(mut entries) => {

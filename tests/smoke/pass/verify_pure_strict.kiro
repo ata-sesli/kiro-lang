@@ -1,0 +1,26 @@
+x = 100 // External variable
+
+pure fn add(a: num, b: num) -> num {
+    // Uncomment next line to trigger capture error:
+    // return x + a
+    return a + b
+}
+
+pure fn check_local(val: num) -> num {
+    var local = 0
+    local = val + 10
+    return local
+}
+
+fn main() {
+    print "--- Strict Pure Verification ---"
+
+    // 1. Pure call with immutable value
+    print add(10, 20)
+
+    // 2. Pure call with local scope check
+    print check_local(5)
+
+    print "--- Passed ---"
+}
+main()

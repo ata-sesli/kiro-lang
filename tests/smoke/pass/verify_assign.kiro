@@ -1,0 +1,8 @@
+fn main() {
+    var a = "Hello"
+    var b = a // If this moves, 'a' should be invalid
+
+    print "b: " + b
+    print "a: " + a // Will this compile?
+}
+main()

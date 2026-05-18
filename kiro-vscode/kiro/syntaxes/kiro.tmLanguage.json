@@ -48,7 +48,7 @@
       "patterns": [
         {
           "name": "keyword.control.kiro",
-          "match": "\\b(return|break|continue|on|off|loop|in|per|error)\\b"
+          "match": "\\b(return|break|continue|on|off|loop|in|per|error|check)\\b"
         },
         {
           "name": "storage.type.kiro",
@@ -56,7 +56,7 @@
         },
         {
           "name": "keyword.other.kiro",
-          "match": "\\b(pure|run|give|take|close|rust|ref|deref)\\b"
+          "match": "\\b(pure|run|rest|give|take|close|rust|ref|deref)\\b"
         },
         {
           "name": "keyword.operator.kiro",

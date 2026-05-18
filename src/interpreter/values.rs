@@ -3,6 +3,8 @@ use std::fmt;
 use std::sync::mpsc::{Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 
+use kiro_runtime::RuntimeVal as HostRuntimeVal;
+
 #[derive(Clone, Debug)]
 pub enum PipeSender {
     Unbounded(Sender<RuntimeVal>),
@@ -93,6 +95,56 @@ impl RuntimeVal {
             RuntimeVal::Void => false,
             RuntimeVal::Moved => false,
             _ => true,
+        }
+    }
+
+    pub fn to_host_runtime(&self) -> Result<HostRuntimeVal, String> {
+        match self {
+            RuntimeVal::Float(n) => Ok(HostRuntimeVal::Num(*n)),
+            RuntimeVal::String(s) => Ok(HostRuntimeVal::Str(s.clone())),
+            RuntimeVal::Bool(b) => Ok(HostRuntimeVal::Bool(*b)),
+            RuntimeVal::List(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    out.push(item.to_host_runtime()?);
+                }
+                Ok(HostRuntimeVal::List(out))
+            }
+            RuntimeVal::Map(map) => {
+                let mut out = HashMap::new();
+                for (k, v) in map {
+                    out.insert(k.clone(), v.to_host_runtime()?);
+                }
+                Ok(HostRuntimeVal::Map(out))
+            }
+            RuntimeVal::Void => Ok(HostRuntimeVal::Void),
+            other => Err(format!(
+                "Type Error: Cannot pass '{}' to host function.",
+                other
+            )),
+        }
+    }
+
+    pub fn from_host_runtime(value: HostRuntimeVal) -> Result<Self, String> {
+        match value {
+            HostRuntimeVal::Num(n) => Ok(RuntimeVal::Float(n)),
+            HostRuntimeVal::Str(s) => Ok(RuntimeVal::String(s)),
+            HostRuntimeVal::Bool(b) => Ok(RuntimeVal::Bool(b)),
+            HostRuntimeVal::List(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    out.push(Self::from_host_runtime(item)?);
+                }
+                Ok(RuntimeVal::List(out))
+            }
+            HostRuntimeVal::Map(map) => {
+                let mut out = HashMap::new();
+                for (k, v) in map {
+                    out.insert(k, Self::from_host_runtime(v)?);
+                }
+                Ok(RuntimeVal::Map(out))
+            }
+            HostRuntimeVal::Void => Ok(RuntimeVal::Void),
         }
     }
 }

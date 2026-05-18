@@ -1,5 +1,3 @@
-error Fail = "Fail"
-
 fn test() -> num! {
     return 1
 }
@@ -7,7 +5,7 @@ fn test() -> num! {
 fn main() {
     var x = test()
     on (x) {
-        print "Success"
+        print "Which language is this? It looks familiar doesn't it?"
     }
 }
 main()

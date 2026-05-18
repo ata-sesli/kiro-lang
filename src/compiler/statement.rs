@@ -273,10 +273,15 @@ impl Compiler {
                     super::FunctionInfo {
                         is_pure,
                         can_error: can_error.is_some(),
+                        params: params.iter().map(|p| p.command_type.clone()).collect(),
+                        return_type: return_type.clone(),
                         doc: existing_doc,
                     },
                 );
-                if matches!(return_type, Some(crate::grammar::grammar::KiroType::FnType(_, _, _, _, _, _))) {
+                if matches!(
+                    return_type,
+                    Some(crate::grammar::grammar::KiroType::FnType(_, _, _, _, _, _))
+                ) {
                     self.fn_returning_fn.insert(name.clone());
                 }
 
@@ -292,7 +297,10 @@ impl Compiler {
                     }
                 }
                 for p in &params {
-                    if matches!(p.command_type, crate::grammar::grammar::KiroType::FnType(_, _, _, _, _, _)) {
+                    if matches!(
+                        p.command_type,
+                        crate::grammar::grammar::KiroType::FnType(_, _, _, _, _, _)
+                    ) {
                         self.fn_ref_vars.insert(p.name.clone());
                     }
                 }
@@ -358,6 +366,8 @@ impl Compiler {
                     super::FunctionInfo {
                         is_pure: false,
                         can_error: can_error.is_some(),
+                        params: params.iter().map(|p| p.command_type.clone()).collect(),
+                        return_type: Some(return_type.clone()),
                         doc: existing_doc,
                     },
                 );
@@ -392,13 +402,13 @@ impl Compiler {
 
                 let final_body = if can_error {
                     format!(
-                        "{{ match header::{}({}).await {{ Ok(v) => match v.try_into() {{ Ok(val) => Ok(val), Err(e) => Err(std::sync::Arc::new(anyhow::anyhow!(e))) }}, Err(e) => Err(std::sync::Arc::new(anyhow::anyhow!(e.name.clone()).context(e.name))) }} }}",
+                        "{{ match header::{}({}).await {{ Ok(v) => match v.try_into() {{ Ok(val) => Ok(val), Err(e) => Err(std::sync::Arc::new(anyhow::anyhow!(e))) }}, Err(e) => Err(std::sync::Arc::new(anyhow::anyhow!(e.to_string()).context(e.name))) }} }}",
                         name, args_vec
                     )
                 } else {
                     format!(
-                        "{{ header::{}({}).await.unwrap().try_into().unwrap() }}",
-                        name, args_vec
+                        "{{ match header::{}({}).await {{ Ok(v) => v.try_into().unwrap(), Err(e) => kiro_runtime_error(\"KIRO3007\", &format!(\"Host function '{}' failed: {{}}.\", e)) }} }}",
+                        name, args_vec, name
                     )
                 };
 
@@ -428,14 +438,29 @@ impl Compiler {
                 }
                 let ch = self.compile_expr(channel);
                 let val = self.compile_expr(value);
-                // We use unwrap() because if the receiver is closed, panic is appropriate for now
-                format!("{}.tx.send({}).await.unwrap();", ch, val)
+                format!(
+                    "if let Err(_) = {}.tx.send({}).await {{ kiro_runtime_error(\"KIRO3003\", \"Pipe receiver is closed; cannot give a value.\"); }}",
+                    ch, val
+                )
             }
 
             // 4. Close -> .tx.close()
             Statement::Close(_, channel) => {
                 let ch = self.compile_expr(channel);
                 format!("{}.tx.close();", ch)
+            }
+            Statement::Rest(_) => {
+                if self.in_pure_context {
+                    panic!("Pure Function Error: 'rest' is forbidden.");
+                }
+                "tokio::task::yield_now().await;".to_string()
+            }
+            Statement::Check(_, condition, message) => {
+                let cond = self.compile_expr(condition);
+                let msg = message
+                    .map(|m| m.value.value)
+                    .unwrap_or_else(|| "\"check failed\"".to_string());
+                format!("if !({}) {{ kiro_check_failed({}); }}", cond, msg)
             }
             // 3. Return -> return ...
             Statement::Return(_, expr) => {
@@ -448,12 +473,10 @@ impl Compiler {
                     } else {
                         format!("return {};", val)
                     }
+                } else if self.in_failable_fn {
+                    "return Ok(());".to_string()
                 } else {
-                    if self.in_failable_fn {
-                        "return Ok(());".to_string()
-                    } else {
-                        "return;".to_string()
-                    }
+                    "return;".to_string()
                 }
             }
             // 4. Break -> break

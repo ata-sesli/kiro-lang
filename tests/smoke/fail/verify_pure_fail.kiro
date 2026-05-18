@@ -1,0 +1,10 @@
+x = 100 // External variable
+
+pure fn add(a: num, b: num) -> num {
+    return x + a // Should FAIL: capturing external variable 'x'
+}
+
+fn main() {
+    print add(10, 20)
+}
+main()

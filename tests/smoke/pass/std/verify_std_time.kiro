@@ -1,0 +1,28 @@
+// Test for std time module
+import std_time
+
+fn main() {
+    print "=== Testing std_time ==="
+
+    // Test now
+    print "Testing now..."
+    var timestamp = std_time.now()
+    print timestamp
+
+    // Test monotonic
+    print "Testing monotonic..."
+    var mono = std_time.monotonic()
+    print mono
+
+    // Test sleep
+    print "Testing sleep (100ms)..."
+    var before = std_time.now()
+    std_time.sleep(100)
+    var after = std_time.now()
+    var elapsed = after - before
+    print elapsed
+
+    print "=== std_time tests complete ==="
+}
+
+main()

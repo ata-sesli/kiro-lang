@@ -1,12 +1,26 @@
-use super::Interpreter;
 use super::values::RuntimeVal;
+use super::{HostCallCtx, HostMode, Interpreter};
 use crate::grammar::grammar::{self, Expression, Statement};
 use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
+fn matches_kiro_type(value: &RuntimeVal, ty: &grammar::KiroType) -> bool {
+    match ty {
+        grammar::KiroType::Num => matches!(value, RuntimeVal::Float(_)),
+        grammar::KiroType::Str => matches!(value, RuntimeVal::String(_)),
+        grammar::KiroType::Bool => matches!(value, RuntimeVal::Bool(_)),
+        grammar::KiroType::List(_, _) => matches!(value, RuntimeVal::List(_)),
+        grammar::KiroType::Map(_, _, _) => matches!(value, RuntimeVal::Map(_)),
+        grammar::KiroType::Void => matches!(value, RuntimeVal::Void),
+        // Keep complex/runtime-only types permissive for now in interpreter mode.
+        _ => true,
+    }
+}
+
 impl Interpreter {
     pub fn eval_expr(&mut self, expr: Expression) -> Result<RuntimeVal, String> {
+        self.tick()?;
         match expr {
             Expression::MoveExpr(_, ident) => {
                 let name = ident.value;
@@ -364,215 +378,293 @@ impl Interpreter {
 
             // 1. Handle Standard Calls
             Expression::Call(func_var, _, args, _) => {
-                // A. Resolve the function
-                // It could be a simple Variable (global function)
-                // OR a FieldAccess (module function)
+                self.enter_call()?;
+                let result = (|| {
+                    // A. Resolve the function
+                    // It could be a simple Variable (global function)
+                    // OR a FieldAccess (module function)
+                    let (func_stmt, func_debug_name, host_module_hint) = match *func_var {
+                        Expression::Variable(v) => {
+                            let mut f = self.functions.get(&v.value).cloned();
+                            let mut debug_name = v.value.clone();
+                            if f.is_none() {
+                                if let Some(entry) = self.env.get(&v.value) {
+                                    if let RuntimeVal::FunctionRef(name) = &entry.data {
+                                        f = self.functions.get(name).cloned();
+                                        debug_name = format!("{} -> {}", v.value, name);
+                                    }
+                                }
+                            }
+                            (f, debug_name, Some(self.current_module.clone()))
+                        }
+                        Expression::FieldAccess(target, _, field) => {
+                            // Evaluate target to find the Module
+                            let module_hint = match &*target {
+                                Expression::Variable(v) => Some(v.value.clone()),
+                                _ => None,
+                            };
+                            let val = self.eval_expr(*target)?;
+                            if let RuntimeVal::Module(_, funcs) = &val {
+                                let f = funcs.get(&field.value).cloned();
+                                let debug_name = if let Some(ref m) = module_hint {
+                                    format!("{}.{}", m, field.value)
+                                } else {
+                                    format!("{}.{}", val, field.value)
+                                };
+                                (f, debug_name, module_hint)
+                            } else {
+                                return Err("Target of field access is not a module.".to_string());
+                            }
+                        }
+                        _ => return Err("Expected function name or module access".to_string()),
+                    };
 
-                // We'll extract the FunctionDef statement
-                let (func_stmt, func_debug_name) = match *func_var {
-                    Expression::Variable(v) => {
-                        let mut f = self.functions.get(&v.value).cloned();
-                        let mut debug_name = v.value.clone();
-                        if f.is_none() {
-                            if let Some(entry) = self.env.get(&v.value) {
-                                if let RuntimeVal::FunctionRef(name) = &entry.data {
-                                    f = self.functions.get(name).cloned();
-                                    debug_name = format!("{} -> {}", v.value, name);
+                    let func_stmt = func_stmt
+                        .ok_or_else(|| format!("Undefined function: '{}'", func_debug_name))?;
+
+                    if let Statement::FunctionDef(def) = func_stmt {
+                        let params = def.params.clone();
+                        let body = def.body.clone();
+                        let pure_kw = def.pure_kw;
+                        let return_type = def.return_type.clone();
+                        let can_error = def.can_error.is_some();
+
+                        // SAVE STATE
+                        let old_mode = self.in_pure_mode;
+                        let old_params = self.pure_scope_params.clone();
+                        let old_failable = self.in_failable_fn;
+
+                        // C. Purity Check (The "Sandbox")
+                        if pure_kw.is_some() {
+                            // Check Argument Safety (Must be Immutable)
+                            for arg_expr in &args {
+                                let mut current = arg_expr;
+                                // Unwrap FieldAccess to find root
+                                while let Expression::FieldAccess(target, _, _) = current {
+                                    current = target;
+                                }
+
+                                if let Expression::Variable(v) = current
+                                    && let Some(entry) = self.env.get(&v.value)
+                                    && entry.is_mutable
+                                {
+                                    return Err(format!(
+                                        "Pure Function Error: Argument '{}' is mutable. Pure functions only accept immutable values.",
+                                        v.value
+                                    ));
                                 }
                             }
                         }
-                        (f, debug_name)
-                    }
-                    Expression::FieldAccess(target, _, field) => {
-                        // Evaluate target to find the Module
-                        let val = self.eval_expr(*target)?;
-                        if let RuntimeVal::Module(_, funcs) = &val {
-                            let f = funcs.get(&field.value).cloned();
-                            (f, format!("{}.{}", val, field.value)) // Note: val display might be <Module>
-                        } else {
-                            return Err("Target of field access is not a module.".to_string());
+
+                        // D. Evaluate Arguments *in the current scope*
+                        let mut arg_values = Vec::new();
+                        for arg in args {
+                            arg_values.push(self.eval_expr(arg)?);
                         }
-                    }
-                    _ => return Err("Expected function name or module access".to_string()),
-                };
 
-                let func_stmt = func_stmt
-                    .ok_or_else(|| format!("Undefined function: '{}'", func_debug_name))?;
+                        // E. Create the "Stack Frame" (Local Scope)
+                        let old_env = self.env.clone();
+                        let mut fn_env = self.env.clone();
 
-                if let Statement::FunctionDef(def) = func_stmt {
-                    let params = def.params.clone();
-                    let body = def.body.clone();
-                    let pure_kw = def.pure_kw;
-                    let return_type = def.return_type.clone();
-                    let can_error = def.can_error.is_some();
+                        // F. Bind Arguments to Parameters
+                        if params.len() != arg_values.len() {
+                            return Err(format!(
+                                "Function '{}' expects {} args, got {}.",
+                                func_debug_name,
+                                params.len(),
+                                arg_values.len()
+                            ));
+                        }
 
-                    // SAVE STATE
-                    let old_mode = self.in_pure_mode;
-                    let old_params = self.pure_scope_params.clone();
-                    let old_failable = self.in_failable_fn;
+                        for (i, param) in params.clone().into_iter().enumerate() {
+                            fn_env.insert(
+                                param.name,
+                                super::values::Value {
+                                    data: arg_values[i].clone(),
+                                    is_mutable: pure_kw.is_none(),
+                                },
+                            );
+                        }
 
-                    // C. Purity Check (The "Sandbox")
-                    if pure_kw.is_some() {
-                        // Check Argument Safety (Must be Immutable)
-                        for arg_expr in &args {
-                            let mut current = arg_expr;
-                            // Unwrap FieldAccess to find root
-                            while let Expression::FieldAccess(target, _, _) = current {
-                                current = target;
+                        // H. Run the Body
+                        if pure_kw.is_some() {
+                            self.in_pure_mode = true;
+                            self.pure_scope_params.clear();
+                            for p in &params {
+                                self.pure_scope_params.insert(p.name.clone());
                             }
+                        }
+                        self.in_failable_fn = can_error;
 
-                            if let Expression::Variable(v) = current {
-                                if let Some(entry) = self.env.get(&v.value) {
-                                    if entry.is_mutable {
-                                        return Err(format!(
-                                            "Pure Function Error: Argument '{}' is mutable. Pure functions only accept immutable values.",
-                                            v.value
-                                        ));
+                        // G. Context Switch!
+                        self.env = fn_env;
+
+                        let result_sig = self.execute_block(body);
+
+                        // I. Restore the Old World
+                        self.env = old_env;
+                        self.in_pure_mode = old_mode;
+                        self.pure_scope_params = old_params;
+                        self.in_failable_fn = old_failable;
+
+                        let result_sig = result_sig?;
+
+                        // Return the result of the function
+                        let out = match result_sig {
+                            super::StatementResult::Normal(v) => Ok(v),
+                            super::StatementResult::Return(v) => Ok(v),
+                            super::StatementResult::Break | super::StatementResult::Continue => {
+                                Err("Error: 'break' or 'continue' leaked from function body."
+                                    .to_string())
+                            }
+                        }?;
+
+                        // Enforce function return contracts in interpreter for parity with compiler.
+                        let expects_void = match return_type {
+                            None => true, // Omitted `->` defaults to void
+                            Some(crate::grammar::grammar::KiroType::Void) => true,
+                            Some(_) => false,
+                        };
+                        if expects_void && !matches!(out, RuntimeVal::Void) {
+                            return Err(format!(
+                                "Type Error: Function '{}' has void return type but returned a value. Add an explicit return type (e.g. -> num).",
+                                func_debug_name
+                            ));
+                        }
+                        if !expects_void && matches!(out, RuntimeVal::Void) {
+                            return Err(format!(
+                                "Type Error: Function '{}' expects a return value but returned void.",
+                                func_debug_name
+                            ));
+                        }
+
+                        Ok(out)
+                    } else if let Statement::RustFnDecl(def) = func_stmt {
+                        let params = &def.params;
+                        let return_type = &def.return_type;
+                        let host_module_name =
+                            host_module_hint.unwrap_or_else(|| self.current_module.clone());
+
+                        // 1. Evaluate arguments (to ensure side-effects happen or checks pass)
+                        let mut arg_values = Vec::new();
+                        for arg in args {
+                            arg_values.push(self.eval_expr(arg)?);
+                        }
+
+                        if params.len() != arg_values.len() {
+                            return Err(format!(
+                                "Function '{}' expects {} args, got {}.",
+                                func_debug_name,
+                                params.len(),
+                                arg_values.len()
+                            ));
+                        }
+
+                        for (idx, (param, arg)) in params.iter().zip(arg_values.iter()).enumerate()
+                        {
+                            if !matches_kiro_type(arg, &param.command_type) {
+                                return Err(format!(
+                                    "Type Error: Argument {} for '{}' does not match declared type.",
+                                    idx + 1,
+                                    func_debug_name
+                                ));
+                            }
+                        }
+
+                        match self.host_mode {
+                            HostMode::Deny => Err(format!(
+                                "Interpreter Error: Host call denied for '{}'.",
+                                func_debug_name
+                            )),
+                            HostMode::Simulate => {
+                                println!(
+                                    "ℹ️ [Interpreter] Simulator: Calling host function '{}' (MOCK)",
+                                    func_debug_name
+                                );
+
+                                // Return Mock Value based on return_type
+                                match return_type {
+                                    crate::grammar::grammar::KiroType::Num => {
+                                        Ok(RuntimeVal::Float(0.0))
+                                    }
+                                    crate::grammar::grammar::KiroType::Str => {
+                                        Ok(RuntimeVal::String("MOCK_STRING".to_string()))
+                                    }
+                                    crate::grammar::grammar::KiroType::Bool => {
+                                        Ok(RuntimeVal::Bool(false))
+                                    }
+                                    crate::grammar::grammar::KiroType::List(_, _) => {
+                                        Ok(RuntimeVal::List(vec![]))
+                                    }
+                                    crate::grammar::grammar::KiroType::Map(_, _, _) => {
+                                        Ok(RuntimeVal::Map(std::collections::HashMap::new()))
+                                    }
+                                    crate::grammar::grammar::KiroType::FnType(_, _, _, _, _, _) => {
+                                        Ok(RuntimeVal::Void)
+                                    }
+                                    crate::grammar::grammar::KiroType::Void => Ok(RuntimeVal::Void),
+                                    _ => {
+                                        // For complex types (Custom, Pipe, Adr), return Void or simple fallback
+                                        // to avoid complex construction logic in interpreter.
+                                        Ok(RuntimeVal::Void)
+                                    }
+                                }
+                            }
+                            HostMode::Execute => {
+                                let handler = self
+                                    .host_registry
+                                    .get(&host_module_name, &def.name)
+                                    .ok_or_else(|| {
+                                        format!(
+                                            "Interpreter Error: Host function '{}.{}' is not registered.",
+                                            host_module_name, def.name
+                                        )
+                                    })?;
+
+                                let mut host_args = Vec::with_capacity(arg_values.len());
+                                for arg in &arg_values {
+                                    host_args.push(arg.to_host_runtime()?);
+                                }
+
+                                let host_ctx = HostCallCtx {
+                                    module_name: host_module_name,
+                                    function_name: def.name.clone(),
+                                    step_count: self.step_count,
+                                };
+
+                                match handler(host_ctx, host_args) {
+                                    Ok(value) => {
+                                        let out = RuntimeVal::from_host_runtime(value)?;
+                                        if !matches_kiro_type(&out, return_type) {
+                                            return Err(format!(
+                                                "Type Error: Host function '{}' returned a value that does not match declared type.",
+                                                func_debug_name
+                                            ));
+                                        }
+                                        Ok(out)
+                                    }
+                                    Err(host_err) => {
+                                        if def.can_error.is_some() {
+                                            Ok(RuntimeVal::Error(
+                                                host_err.name.clone(),
+                                                host_err.to_string(),
+                                            ))
+                                        } else {
+                                            Err(format!(
+                                                "Host Error: '{}' failed with '{}', but function is not declared failable.",
+                                                func_debug_name, host_err
+                                            ))
+                                        }
                                     }
                                 }
                             }
                         }
+                    } else {
+                        Err(format!("'{}' is not a function.", func_debug_name))
                     }
-
-                    // D. Evaluate Arguments *in the current scope*
-                    let mut arg_values = Vec::new();
-                    for arg in args {
-                        arg_values.push(self.eval_expr(arg)?);
-                    }
-
-                    // E. Create the "Stack Frame" (Local Scope)
-                    // We save the old environment to restore it later
-                    let old_env = self.env.clone();
-
-                    // We create a fresh environment.
-                    // Note: For true "Lexical Scoping", we should copy global variables in,
-                    // but for "Pure" functions, we might want an empty map!
-                    // For now, let's clone the global scope so we can read globals.
-                    let mut fn_env = self.env.clone();
-
-                    // F. Bind Arguments to Parameters
-                    if params.len() != arg_values.len() {
-                        return Err(format!(
-                            "Function '{}' expects {} args, got {}.",
-                            func_debug_name,
-                            params.len(),
-                            arg_values.len()
-                        ));
-                    }
-
-                    for (i, param) in params.clone().into_iter().enumerate() {
-                        fn_env.insert(
-                            param.name,
-                            super::values::Value {
-                                data: arg_values[i].clone(),
-                                is_mutable: if pure_kw.is_some() { false } else { true },
-                            },
-                        );
-                    }
-
-                    // H. Run the Body
-                    if pure_kw.is_some() {
-                        self.in_pure_mode = true;
-                        // Initialize allowed params with function arguments
-                        self.pure_scope_params.clear();
-                        for p in &params {
-                            self.pure_scope_params.insert(p.name.clone());
-                        }
-                    }
-                    self.in_failable_fn = can_error;
-
-                    // G. Context Switch!
-                    self.env = fn_env;
-
-                    let result_sig = self.execute_block(body);
-
-                    // I. Restore the Old World
-                    self.env = old_env;
-                    self.in_pure_mode = old_mode;
-                    self.pure_scope_params = old_params;
-                    self.in_failable_fn = old_failable;
-
-                    let result_sig = result_sig?; // Propagate error now
-
-                    // Return the result of the function
-                    let out = match result_sig {
-                        super::StatementResult::Normal(v) => Ok(v),
-                        super::StatementResult::Return(v) => Ok(v),
-                        super::StatementResult::Break | super::StatementResult::Continue => {
-                            Err("Error: 'break' or 'continue' leaked from function body."
-                                .to_string())
-                        }
-                    }?;
-
-                    // Enforce function return contracts in interpreter for parity with compiler.
-                    let expects_void = match return_type {
-                        None => true, // Omitted `->` defaults to void
-                        Some(crate::grammar::grammar::KiroType::Void) => true,
-                        Some(_) => false,
-                    };
-                    if expects_void && !matches!(out, RuntimeVal::Void) {
-                        return Err(format!(
-                            "Type Error: Function '{}' has void return type but returned a value. Add an explicit return type (e.g. -> num).",
-                            func_debug_name
-                        ));
-                    }
-                    if !expects_void && matches!(out, RuntimeVal::Void) {
-                        return Err(format!(
-                            "Type Error: Function '{}' expects a return value but returned void.",
-                            func_debug_name
-                        ));
-                    }
-
-                    Ok(out)
-                } else if let Statement::RustFnDecl(def) = func_stmt {
-                    let params = &def.params;
-                    let return_type = &def.return_type;
-                    // 1. Evaluate arguments (to ensure side-effects happen or checks pass)
-                    let mut arg_values = Vec::new();
-                    for arg in args {
-                        arg_values.push(self.eval_expr(arg)?);
-                    }
-
-                    if params.len() != arg_values.len() {
-                        return Err(format!(
-                            "Function '{}' expects {} args, got {}.",
-                            func_debug_name,
-                            params.len(),
-                            arg_values.len()
-                        ));
-                    }
-
-                    println!(
-                        "ℹ️ [Interpreter] Simulator: Calling host function '{}' (MOCK)",
-                        func_debug_name
-                    );
-
-                    // 2. Return Mock Value based on return_type
-                    match return_type {
-                        crate::grammar::grammar::KiroType::Num => Ok(RuntimeVal::Float(0.0)),
-                        crate::grammar::grammar::KiroType::Str => {
-                            Ok(RuntimeVal::String("MOCK_STRING".to_string()))
-                        }
-                        crate::grammar::grammar::KiroType::Bool => Ok(RuntimeVal::Bool(false)),
-                        crate::grammar::grammar::KiroType::List(_, _) => {
-                            Ok(RuntimeVal::List(vec![]))
-                        }
-                        crate::grammar::grammar::KiroType::Map(_, _, _) => {
-                            Ok(RuntimeVal::Map(std::collections::HashMap::new()))
-                        }
-                        crate::grammar::grammar::KiroType::FnType(_, _, _, _, _, _) => {
-                            Ok(RuntimeVal::Void)
-                        }
-                        crate::grammar::grammar::KiroType::Void => Ok(RuntimeVal::Void),
-                        _ => {
-                            // For complex types (Custom, Pipe, Adr), return Void or simple fallback
-                            // to avoid complex construction logic in interpreter.
-                            Ok(RuntimeVal::Void)
-                        }
-                    }
-                } else {
-                    Err(format!("'{}' is not a function.", func_debug_name))
-                }
+                })();
+                self.exit_call();
+                result
             }
 
             // 2. Handle 'Run' Calls

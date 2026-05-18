@@ -26,6 +26,19 @@ print (take p)
 
 `give` sends values into the channel, `take` receives them, and `close` signals completion when no more values will be sent.
 
+Because `run` is fire-and-forget, use a `pipe void` when the main flow needs to wait for a worker:
+
+```kiro
+fn worker(done: pipe void) {
+    print "done"
+    give done
+}
+
+var done = pipe void
+run worker(done)
+take done
+```
+
 Pipes work best when each channel has a clear purpose. In larger designs, use structs as message payloads so each message carries named fields rather than loosely connected primitives.
 
 ## Common Pitfalls

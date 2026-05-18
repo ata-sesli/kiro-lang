@@ -1,6 +1,7 @@
 use crate::grammar::grammar;
 use std::collections::{HashMap, HashSet};
 
+pub mod diagnostics;
 pub mod expression;
 pub mod statement;
 pub mod types;
@@ -14,6 +15,8 @@ pub struct VarInfo {
 pub struct FunctionInfo {
     pub is_pure: bool,
     pub can_error: bool,
+    pub params: Vec<grammar::KiroType>,
+    pub return_type: Option<grammar::KiroType>,
     pub doc: Option<String>,
 }
 
@@ -21,6 +24,7 @@ pub struct Compiler {
     pub known_vars: HashMap<String, VarInfo>,
     pub imported_modules: HashSet<String>,
     pub functions: HashMap<String, FunctionInfo>,
+    pub module_functions: HashMap<(String, String), FunctionInfo>,
     pub in_pure_context: bool,
     pub in_failable_fn: bool,
     pub pure_scope_params: HashSet<String>, // Parameters allowed in pure function scope
@@ -29,18 +33,337 @@ pub struct Compiler {
     pub fn_returning_fn: HashSet<String>,   // Function names returning fn(...) -> ...
 }
 
+const EFFECTFUL_RECURSION_MESSAGE: &str = "Recursive calls are only supported in pure fn. Effectful recursive functions are not supported yet; use a loop or split pure recursion from effects.";
+
+fn find_cycle_from(
+    start: &str,
+    current: &str,
+    graph: &HashMap<String, HashSet<String>>,
+    path: &mut Vec<String>,
+) -> Option<Vec<String>> {
+    path.push(current.to_string());
+    if let Some(nexts) = graph.get(current) {
+        for next in nexts {
+            if next == start {
+                let mut cycle = path.clone();
+                cycle.push(start.to_string());
+                path.pop();
+                return Some(cycle);
+            }
+            if !path.contains(next)
+                && let Some(cycle) = find_cycle_from(start, next, graph, path)
+            {
+                path.pop();
+                return Some(cycle);
+            }
+        }
+    }
+    path.pop();
+    None
+}
+
+fn collect_calls_from_block(
+    block: &grammar::Block,
+    local_functions: &HashSet<String>,
+    calls: &mut HashSet<String>,
+) {
+    for stmt in &block.statements {
+        collect_calls_from_statement(stmt, local_functions, calls);
+    }
+}
+
+fn collect_calls_from_statement(
+    stmt: &grammar::Statement,
+    local_functions: &HashSet<String>,
+    calls: &mut HashSet<String>,
+) {
+    match stmt {
+        grammar::Statement::VarDecl { value, .. } => {
+            collect_calls_from_expr(value, local_functions, calls)
+        }
+        grammar::Statement::AssignStmt { lhs, rhs, .. } => {
+            collect_calls_from_expr(lhs, local_functions, calls);
+            collect_calls_from_expr(rhs, local_functions, calls);
+        }
+        grammar::Statement::On {
+            condition,
+            body,
+            else_clause,
+            error_clauses,
+            ..
+        } => {
+            collect_calls_from_expr(condition, local_functions, calls);
+            collect_calls_from_block(body, local_functions, calls);
+            if let Some(off) = else_clause {
+                collect_calls_from_block(&off.body, local_functions, calls);
+            }
+            if let Some(errors) = error_clauses {
+                collect_calls_from_error_clauses(errors, local_functions, calls);
+            }
+        }
+        grammar::Statement::LoopOn {
+            condition, body, ..
+        } => {
+            collect_calls_from_expr(condition, local_functions, calls);
+            collect_calls_from_block(body, local_functions, calls);
+        }
+        grammar::Statement::LoopIter {
+            iterable,
+            step,
+            filter,
+            body,
+            else_clause,
+            ..
+        } => {
+            collect_calls_from_expr(iterable, local_functions, calls);
+            if let Some(step) = step {
+                collect_calls_from_expr(&step.value, local_functions, calls);
+            }
+            if let Some(filter) = filter {
+                collect_calls_from_expr(&filter.condition, local_functions, calls);
+            }
+            collect_calls_from_block(body, local_functions, calls);
+            if let Some(off) = else_clause {
+                collect_calls_from_block(&off.body, local_functions, calls);
+            }
+        }
+        grammar::Statement::Give(_, ch, val) => {
+            collect_calls_from_expr(ch, local_functions, calls);
+            collect_calls_from_expr(val, local_functions, calls);
+        }
+        grammar::Statement::Close(_, ch) | grammar::Statement::Print(_, ch) => {
+            collect_calls_from_expr(ch, local_functions, calls)
+        }
+        grammar::Statement::Return(_, expr) => {
+            if let Some(expr) = expr {
+                collect_calls_from_expr(expr, local_functions, calls);
+            }
+        }
+        grammar::Statement::Check(_, condition, _) => {
+            collect_calls_from_expr(condition, local_functions, calls);
+        }
+        grammar::Statement::ExprStmt(expr) => collect_calls_from_expr(expr, local_functions, calls),
+        grammar::Statement::Documented { item, .. } => {
+            if let grammar::AnnotatableItem::FunctionDef(def) = item {
+                collect_calls_from_block(&def.body, local_functions, calls);
+            }
+        }
+        grammar::Statement::StructDef(_)
+        | grammar::Statement::ErrorDef { .. }
+        | grammar::Statement::FunctionDef(_)
+        | grammar::Statement::RustFnDecl(_)
+        | grammar::Statement::Break(_)
+        | grammar::Statement::Continue(_)
+        | grammar::Statement::Rest(_)
+        | grammar::Statement::Import { .. } => {}
+    }
+}
+
+fn collect_calls_from_error_clauses(
+    clauses: &grammar::ErrorClauseList,
+    local_functions: &HashSet<String>,
+    calls: &mut HashSet<String>,
+) {
+    collect_calls_from_block(&clauses.first.body, local_functions, calls);
+    if let Some(rest) = &clauses.rest {
+        collect_calls_from_error_clauses(rest, local_functions, calls);
+    }
+}
+
+fn collect_calls_from_expr(
+    expr: &grammar::Expression,
+    local_functions: &HashSet<String>,
+    calls: &mut HashSet<String>,
+) {
+    match expr {
+        grammar::Expression::FieldAccess(target, _, _)
+        | grammar::Expression::At(target, _, _)
+        | grammar::Expression::Push(target, _, _)
+        | grammar::Expression::Ref(_, target)
+        | grammar::Expression::Deref(_, target)
+        | grammar::Expression::Take(_, target)
+        | grammar::Expression::Len(_, target)
+        | grammar::Expression::RunCall(_, target) => {
+            collect_calls_from_expr(target, local_functions, calls);
+        }
+        grammar::Expression::StructInit(_, _, fields, _) => {
+            for field in fields {
+                collect_calls_from_expr(&field.value, local_functions, calls);
+            }
+        }
+        grammar::Expression::ListInit(_, _, _, items, _) => {
+            for item in items {
+                collect_calls_from_expr(item, local_functions, calls);
+            }
+        }
+        grammar::Expression::MapInit(_, _, _, _, pairs, _) => {
+            for pair in pairs {
+                collect_calls_from_expr(&pair.key, local_functions, calls);
+                collect_calls_from_expr(&pair.value, local_functions, calls);
+            }
+        }
+        grammar::Expression::Call(func, _, args, _) => {
+            if let grammar::Expression::Variable(v) = &**func
+                && local_functions.contains(&v.value)
+            {
+                calls.insert(v.value.clone());
+            }
+            collect_calls_from_expr(func, local_functions, calls);
+            for arg in args {
+                collect_calls_from_expr(arg, local_functions, calls);
+            }
+        }
+        grammar::Expression::Add(lhs, _, rhs)
+        | grammar::Expression::Sub(lhs, _, rhs)
+        | grammar::Expression::Mul(lhs, _, rhs)
+        | grammar::Expression::Div(lhs, _, rhs)
+        | grammar::Expression::Eq(lhs, _, rhs)
+        | grammar::Expression::Neq(lhs, _, rhs)
+        | grammar::Expression::Gt(lhs, _, rhs)
+        | grammar::Expression::Lt(lhs, _, rhs)
+        | grammar::Expression::Geq(lhs, _, rhs)
+        | grammar::Expression::Leq(lhs, _, rhs)
+        | grammar::Expression::Range(lhs, _, rhs) => {
+            collect_calls_from_expr(lhs, local_functions, calls);
+            collect_calls_from_expr(rhs, local_functions, calls);
+        }
+        grammar::Expression::Number(_)
+        | grammar::Expression::StringLit(_)
+        | grammar::Expression::BoolLit(_)
+        | grammar::Expression::Variable(_)
+        | grammar::Expression::MoveExpr(_, _)
+        | grammar::Expression::ErrorRef(_)
+        | grammar::Expression::AdrInit(_, _)
+        | grammar::Expression::PipeInit(_, _, _) => {}
+    }
+}
+
 impl Compiler {
     pub fn new() -> Self {
         Self {
             known_vars: HashMap::new(),
             imported_modules: HashSet::new(),
             functions: HashMap::new(),
+            module_functions: HashMap::new(),
             in_pure_context: false,
             in_failable_fn: false,
             pure_scope_params: HashSet::new(),
             moved_vars: HashSet::new(),
             fn_ref_vars: HashSet::new(),
             fn_returning_fn: HashSet::new(),
+        }
+    }
+
+    pub fn with_module_functions(
+        module_functions: HashMap<(String, String), FunctionInfo>,
+    ) -> Self {
+        let mut compiler = Self::new();
+        compiler.module_functions = module_functions;
+        compiler
+    }
+
+    pub fn collect_program_functions(program: &grammar::Program) -> HashMap<String, FunctionInfo> {
+        let mut functions = HashMap::new();
+        for stmt in &program.statements {
+            match stmt {
+                grammar::Statement::Documented { doc, item } => match item {
+                    grammar::AnnotatableItem::FunctionDef(def) => {
+                        let doc_str = Some(
+                            doc.iter()
+                                .map(|d| d.content.trim_start_matches("///").trim().to_string())
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        );
+                        functions.insert(
+                            def.name.clone(),
+                            FunctionInfo {
+                                is_pure: def.pure_kw.is_some(),
+                                can_error: def.can_error.is_some(),
+                                params: def.params.iter().map(|p| p.command_type.clone()).collect(),
+                                return_type: def.return_type.clone(),
+                                doc: doc_str,
+                            },
+                        );
+                    }
+                    grammar::AnnotatableItem::RustFnDecl(def) => {
+                        let doc_str = Some(
+                            doc.iter()
+                                .map(|d| d.content.trim_start_matches("///").trim().to_string())
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        );
+                        functions.insert(
+                            def.name.clone(),
+                            FunctionInfo {
+                                is_pure: false,
+                                can_error: def.can_error.is_some(),
+                                params: def.params.iter().map(|p| p.command_type.clone()).collect(),
+                                return_type: Some(def.return_type.clone()),
+                                doc: doc_str,
+                            },
+                        );
+                    }
+                    _ => {}
+                },
+                grammar::Statement::FunctionDef(def) => {
+                    functions.insert(
+                        def.name.clone(),
+                        FunctionInfo {
+                            is_pure: def.pure_kw.is_some(),
+                            can_error: def.can_error.is_some(),
+                            params: def.params.iter().map(|p| p.command_type.clone()).collect(),
+                            return_type: def.return_type.clone(),
+                            doc: None,
+                        },
+                    );
+                }
+                grammar::Statement::RustFnDecl(def) => {
+                    functions.insert(
+                        def.name.clone(),
+                        FunctionInfo {
+                            is_pure: false,
+                            can_error: def.can_error.is_some(),
+                            params: def.params.iter().map(|p| p.command_type.clone()).collect(),
+                            return_type: Some(def.return_type.clone()),
+                            doc: None,
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
+        functions
+    }
+
+    pub fn call_function_info(&self, func: &grammar::Expression) -> Option<FunctionInfo> {
+        match func {
+            grammar::Expression::Variable(v) => self.functions.get(&v.value).cloned(),
+            grammar::Expression::FieldAccess(target, _, field) => {
+                if let grammar::Expression::Variable(module) = &**target
+                    && self.imported_modules.contains(&module.value)
+                {
+                    self.module_functions
+                        .get(&(module.value.clone(), field.value.clone()))
+                        .cloned()
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    pub fn call_name(&self, func: &grammar::Expression) -> String {
+        match func {
+            grammar::Expression::Variable(v) => v.value.clone(),
+            grammar::Expression::FieldAccess(target, _, field) => {
+                if let grammar::Expression::Variable(module) = &**target {
+                    format!("{}.{}", module.value, field.value)
+                } else {
+                    "<computed function>".to_string()
+                }
+            }
+            _ => "<computed function>".to_string(),
         }
     }
 
@@ -72,6 +395,64 @@ impl Compiler {
         }
     }
 
+    pub fn validate_effectful_recursion(
+        &self,
+        program: &grammar::Program,
+        module: &str,
+    ) -> Result<(), crate::errors::KiroError> {
+        let local_functions: HashSet<String> = self.functions.keys().cloned().collect();
+        let mut graph: HashMap<String, HashSet<String>> = HashMap::new();
+
+        for stmt in &program.statements {
+            match stmt {
+                grammar::Statement::FunctionDef(def) => {
+                    let mut calls = HashSet::new();
+                    collect_calls_from_block(&def.body, &local_functions, &mut calls);
+                    graph.insert(def.name.clone(), calls);
+                }
+                grammar::Statement::Documented { item, .. } => {
+                    if let grammar::AnnotatableItem::FunctionDef(def) = item {
+                        let mut calls = HashSet::new();
+                        collect_calls_from_block(&def.body, &local_functions, &mut calls);
+                        graph.insert(def.name.clone(), calls);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for name in graph.keys() {
+            let mut path = Vec::new();
+            if let Some(cycle) = find_cycle_from(name, name, &graph, &mut path)
+                && cycle.iter().any(|n| {
+                    self.functions
+                        .get(n)
+                        .map(|info| !info.is_pure)
+                        .unwrap_or(false)
+                })
+            {
+                return Err(crate::errors::KiroError::compile_error(
+                    module,
+                    crate::errors::ErrorCode::PureViolation,
+                    EFFECTFUL_RECURSION_MESSAGE,
+                    None,
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_effectful_recursion_or_panic(&self, program: &grammar::Program) {
+        if let Err(err) = self.validate_effectful_recursion(program, "<module>") {
+            panic!("{}", err.message);
+        }
+    }
+
+    pub fn effectful_recursion_message() -> &'static str {
+        EFFECTFUL_RECURSION_MESSAGE
+    }
+
     pub fn compile(&mut self, program: grammar::Program, is_main: bool) -> String {
         let mut output = String::new();
         output.push_str("#![allow(unused)]\n");
@@ -92,6 +473,32 @@ impl Compiler {
 
                 // --- KIRO RESULT (Cloneable Error) ---
                 pub type KiroResult<T> = Result<T, std::sync::Arc<anyhow::Error>>;
+
+                pub fn kiro_runtime_error(code: &str, message: &str) -> ! {
+                    eprintln!("[{}:runtime] {}", code, message);
+                    std::process::exit(1);
+                }
+
+                pub fn kiro_runtime_error_help(code: &str, message: &str, help: &str) -> ! {
+                    eprintln!("[{}:runtime] {}", code, message);
+                    eprintln!("help: {}", help);
+                    std::process::exit(1);
+                }
+
+                pub fn kiro_check_failed(message: &str) -> ! {
+                    kiro_runtime_error("KIRO3001", &format!("Check failed: {}", message));
+                }
+
+                pub fn kiro_adr_or_fail<T>(adr: &Option<std::sync::Arc<std::sync::Mutex<T>>>) -> std::sync::Arc<std::sync::Mutex<T>> {
+                    match adr {
+                        Some(value) => value.clone(),
+                        None => kiro_runtime_error_help(
+                            "KIRO3006",
+                            "Cannot deref an empty address.",
+                            "Assign it with `ref value` before using `deref`.",
+                        ),
+                    }
+                }
 
                 // --- KIRO ADR VOID (Opaque Managed Address Handle) ---
                 pub type KiroAdrErased = std::sync::Arc<dyn std::any::Any + Send + Sync>;
@@ -143,15 +550,26 @@ impl Compiler {
                 // List Implementation
                 impl<T: Clone> KiroAt<f64, T> for Vec<T> {
                     fn kiro_at(&self, index: f64) -> T {
-                        self.get(index as usize).cloned().expect("Index out of bounds")
+                        let index = index as usize;
+                        self.get(index).cloned().unwrap_or_else(|| {
+                            kiro_runtime_error(
+                                "KIRO3004",
+                                &format!("List index out of bounds: index {}, length {}.", index, self.len()),
+                            )
+                        })
                     }
                 }
     
                 // Map Implementation
                 impl<K, V> KiroAt<K, V> for std::collections::HashMap<K, V> 
-                where K: std::hash::Hash + Eq + Clone, V: Clone {
+                where K: std::hash::Hash + Eq + Clone + std::fmt::Debug, V: Clone {
                     fn kiro_at(&self, key: K) -> V {
-                        self.get(&key).cloned().expect("Key not found")
+                        self.get(&key).cloned().unwrap_or_else(|| {
+                            kiro_runtime_error(
+                                "KIRO3005",
+                                &format!("Map key not found: {:?}.", key),
+                            )
+                        })
                     }
                 }
     
@@ -313,56 +731,16 @@ impl Compiler {
         let mut body = String::new();
 
         // 0. Pre-Scan Functions for Metadata (Purity Check)
-        // 0. Pre-Scan Functions for Metadata (Purity Check)
-        for stmt in &program.statements {
-            match stmt {
-                grammar::Statement::Documented { doc, item } => {
-                    if let grammar::AnnotatableItem::FunctionDef(def) = item {
-                        let is_pure = def.pure_kw.is_some();
-                        let can_error = def.can_error.is_some();
-                        let doc_str = Some(
-                            doc.iter()
-                                .map(|d| d.content.trim_start_matches("///").trim().to_string())
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                        );
-                        self.functions.insert(
-                            def.name.clone(),
-                            FunctionInfo {
-                                is_pure,
-                                can_error,
-                                doc: doc_str,
-                            },
-                        );
-                        if matches!(
-                            def.return_type,
-                            Some(grammar::KiroType::FnType(_, _, _, _, _, _))
-                        ) {
-                            self.fn_returning_fn.insert(def.name.clone());
-                        }
-                    }
-                }
-                grammar::Statement::FunctionDef(def) => {
-                    let is_pure = def.pure_kw.is_some();
-                    let can_error = def.can_error.is_some();
-                    self.functions.insert(
-                        def.name.clone(),
-                        FunctionInfo {
-                            is_pure,
-                            can_error,
-                            doc: None,
-                        },
-                    );
-                    if matches!(
-                        def.return_type,
-                        Some(grammar::KiroType::FnType(_, _, _, _, _, _))
-                    ) {
-                        self.fn_returning_fn.insert(def.name.clone());
-                    }
-                }
-                _ => {}
+        self.functions = Self::collect_program_functions(&program);
+        for (name, info) in &self.functions {
+            if matches!(
+                info.return_type,
+                Some(grammar::KiroType::FnType(_, _, _, _, _, _))
+            ) {
+                self.fn_returning_fn.insert(name.clone());
             }
         }
+        self.validate_effectful_recursion_or_panic(&program);
 
         for statement in program.statements {
             // Check if it should be hoisted

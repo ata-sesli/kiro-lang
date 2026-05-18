@@ -1,0 +1,162 @@
+# Smoke tests for older .kiro feature samples.
+#
+# command:
+# - check: interpreter validation only
+# - build: transpile and build only
+# - run: full interpreter -> Rust build -> execute pipeline
+#
+# Network-dependent samples live in tests/smoke/manual and are intentionally not
+# listed here.
+
+[[case]]
+name = "scratch_parse_sample"
+path = "pass/test.kiro"
+command = "check"
+expect = "pass"
+
+[[case]]
+name = "imports"
+path = "pass/imports/main.kiro"
+command = "run"
+expect = "pass"
+stdout_contains = ["Testing Imports...", "30", "25"]
+
+[[case]]
+name = "assignment_keeps_source_usable"
+path = "pass/verify_assign.kiro"
+command = "check"
+expect = "pass"
+stdout_contains = ["b: Hello", "a: Hello"]
+
+[[case]]
+name = "documented_items_parse"
+path = "pass/verify_docs.kiro"
+command = "check"
+expect = "pass"
+stdout_contains = ["30", "Docs parsed successfully!"]
+
+[[case]]
+name = "error_handling"
+path = "pass/verify_error.kiro"
+command = "check"
+expect = "pass"
+stdout_contains = ["NotFound handled!", "NotFound propagated successfully!"]
+
+[[case]]
+name = "generic_builtin_types"
+path = "pass/verify_generics.kiro"
+command = "check"
+expect = "pass"
+stdout_contains = ["Pipe worked!", "Hello Generics"]
+
+[[case]]
+name = "move_basic"
+path = "pass/verify_move.kiro"
+command = "check"
+expect = "pass"
+stdout_contains = ["b: Hello"]
+
+[[case]]
+name = "multi_error_matching"
+path = "pass/verify_multi_error.kiro"
+command = "run"
+expect = "pass"
+stdout_contains = ["Caught NotFound (Expected)", "Done"]
+
+[[case]]
+name = "pure_functions"
+path = "pass/verify_pure.kiro"
+command = "check"
+expect = "pass"
+stdout_contains = ["--- Pure Verification ---", "--- Passed ---"]
+
+[[case]]
+name = "pure_strict_valid"
+path = "pass/verify_pure_strict.kiro"
+command = "check"
+expect = "pass"
+stdout_contains = ["--- Strict Pure Verification ---", "--- Passed ---"]
+
+[[case]]
+name = "pure_sync_calls"
+path = "pass/verify_pure_sync.kiro"
+command = "check"
+expect = "pass"
+stdout_contains = ["Start", "30", "Done"]
+
+[[case]]
+name = "rust_fn_declaration"
+path = "pass/verify_rust_fn.kiro"
+command = "check"
+expect = "pass"
+stdout_contains = ["rust fn declaration parsed successfully"]
+
+[[case]]
+name = "comparison_and_range_types"
+path = "pass/verify_types.kiro"
+command = "check"
+expect = "pass"
+stdout_contains = ["Control flow via Bool: OK", "--- Verification Complete ---"]
+
+[[case]]
+name = "void_and_address"
+path = "pass/verify_void.kiro"
+command = "check"
+expect = "pass"
+stdout_contains = ["Now I exist", "Doing nothing"]
+
+[[case]]
+name = "std_env"
+path = "pass/std/verify_std_env.kiro"
+command = "check"
+expect = "pass"
+stdout_contains = ["=== std_env tests complete ==="]
+
+[[case]]
+name = "std_fs"
+path = "pass/std/verify_std_fs.kiro"
+command = "run"
+expect = "pass"
+stdout_contains = ["write: Success", "remove: Success", "=== std_fs tests complete ==="]
+
+[[case]]
+name = "std_time"
+path = "pass/std/verify_std_time.kiro"
+command = "check"
+expect = "pass"
+stdout_contains = ["=== std_time tests complete ==="]
+
+[[case]]
+name = "move_use_after_move_fails"
+path = "fail/verify_move_fail.kiro"
+command = "build"
+expect = "fail"
+stderr_contains = ["was moved and cannot be used"]
+
+[[case]]
+name = "move_immutable_fails"
+path = "fail/verify_move_immut_fail.kiro"
+command = "build"
+expect = "fail"
+stderr_contains = ["Unsupported keyword 'let'"]
+
+[[case]]
+name = "move_in_pure_fails"
+path = "fail/verify_move_pure_fail.kiro"
+command = "build"
+expect = "fail"
+stderr_contains = ["move"]
+
+[[case]]
+name = "pure_capture_fails"
+path = "fail/verify_pure_fail.kiro"
+command = "build"
+expect = "fail"
+stderr_contains = ["Pure function cannot capture external variable"]
+
+[[case]]
+name = "rust_fn_interpreter_call_is_simulated"
+path = "pass/verify_rust_fn_call_simulated.kiro"
+command = "check"
+expect = "pass"
+stdout_contains = ["Testing interpreter simulation of rust fn calls", "Simulator call completed"]

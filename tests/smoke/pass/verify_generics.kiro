@@ -1,0 +1,28 @@
+fn get_message() -> str {
+    return "Hello Generics"
+}
+
+struct Container {
+    ptr: adr str
+    channel: pipe bool
+}
+
+fn entry() -> num {
+    var p = ref "Current Status"
+    var c = pipe bool
+
+    print deref p
+    give c true
+
+    var res = take c
+    on (res) {
+        print "Pipe worked!"
+    } off {
+        print "Pipe failed"
+    }
+
+    print get_message()
+    return 0
+}
+
+print entry()

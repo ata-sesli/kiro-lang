@@ -1,0 +1,11 @@
+id = "kiro"
+name = "Kiro"
+version = "0.0.1"
+schema_version = 1
+authors = ["Ata Sesli"]
+description = "Local Zed language support for Kiro."
+repository = "file:///Users/atasesli/Desktop/VsCode/kiro-lang/kiro-zed"
+
+[grammars.kiro]
+repository = "file:///Users/atasesli/Desktop/VsCode/kiro-lang/kiro-zed/tree-sitter-kiro"
+rev = "main"

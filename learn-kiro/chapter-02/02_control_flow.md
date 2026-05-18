@@ -52,6 +52,14 @@ loop n in 0..10 on (n > 5) {
 
 Control keywords complete the model: `break` exits a loop, `continue` skips to the next iteration, and `return` exits a function.
 
+Use `check` when continuing would make the program invalid:
+
+```kiro
+check score >= 0, "score must not be negative"
+```
+
+A failed check stops the program with a Kiro diagnostic. Use it for contracts and invariants, not as a replacement for ordinary `on` branching.
+
 ## Common Pitfalls
 
 Many loop bugs come from forgetting to update the loop variable in `loop on (...)`. The correct method is to place state updates near the end of each iteration so termination is guaranteed.

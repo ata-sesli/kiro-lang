@@ -6,6 +6,10 @@
 use std::collections::HashMap;
 use std::convert::TryFrom;
 
+pub const KIRO_RUNTIME_ABI_VERSION: u32 = 1;
+
+pub type HostResult = Result<RuntimeVal, KiroError>;
+
 /// Runtime value representation for Kiro types.
 /// This enum is used by:
 /// - Compiler-generated Rust code
@@ -25,19 +29,32 @@ pub enum RuntimeVal {
 #[derive(Clone, Debug)]
 pub struct KiroError {
     pub name: String,
+    pub message: Option<String>,
 }
 
 impl KiroError {
     pub fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
+            message: None,
+        }
+    }
+
+    pub fn message(name: &str, message: impl Into<String>) -> Self {
+        Self {
+            name: name.to_string(),
+            message: Some(message.into()),
         }
     }
 }
 
 impl std::fmt::Display for KiroError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.name)
+        if let Some(message) = &self.message {
+            write!(f, "{}: {}", self.name, message)
+        } else {
+            write!(f, "{}", self.name)
+        }
     }
 }
 
@@ -84,24 +101,76 @@ impl<T: Into<RuntimeVal>> From<Vec<T>> for RuntimeVal {
 // --- Conversion: RuntimeVal -> Rust types ---
 
 impl RuntimeVal {
+    pub fn expect_arity(args: &[RuntimeVal], expected: usize, fn_name: &str) -> Result<(), KiroError> {
+        if args.len() == expected {
+            Ok(())
+        } else {
+            let noun = if expected == 1 { "argument" } else { "arguments" };
+            Err(KiroError::message(
+                "ArgumentError",
+                format!(
+                    "{} expected {} {}, got {}.",
+                    fn_name,
+                    expected,
+                    noun,
+                    args.len()
+                ),
+            ))
+        }
+    }
+
+    pub fn expect_arg<'a>(
+        args: &'a [RuntimeVal],
+        index: usize,
+        fn_name: &str,
+    ) -> Result<&'a RuntimeVal, KiroError> {
+        args.get(index).ok_or_else(|| {
+            KiroError::message(
+                "ArgumentError",
+                format!("{} missing argument {}.", fn_name, index + 1),
+            )
+        })
+    }
+
     pub fn as_str(&self) -> Result<&str, KiroError> {
         match self {
             RuntimeVal::Str(s) => Ok(s.as_str()),
-            _ => Err(KiroError::new("TypeError")),
+            _ => Err(KiroError::message("TypeError", "expected str")),
         }
     }
 
     pub fn as_num(&self) -> Result<f64, KiroError> {
         match self {
             RuntimeVal::Num(n) => Ok(*n),
-            _ => Err(KiroError::new("TypeError")),
+            _ => Err(KiroError::message("TypeError", "expected num")),
         }
     }
 
     pub fn as_bool(&self) -> Result<bool, KiroError> {
         match self {
             RuntimeVal::Bool(b) => Ok(*b),
-            _ => Err(KiroError::new("TypeError")),
+            _ => Err(KiroError::message("TypeError", "expected bool")),
+        }
+    }
+
+    pub fn as_list(&self) -> Result<&[RuntimeVal], KiroError> {
+        match self {
+            RuntimeVal::List(items) => Ok(items.as_slice()),
+            _ => Err(KiroError::message("TypeError", "expected list")),
+        }
+    }
+
+    pub fn as_map(&self) -> Result<&HashMap<String, RuntimeVal>, KiroError> {
+        match self {
+            RuntimeVal::Map(map) => Ok(map),
+            _ => Err(KiroError::message("TypeError", "expected map")),
+        }
+    }
+
+    pub fn as_void(&self) -> Result<(), KiroError> {
+        match self {
+            RuntimeVal::Void => Ok(()),
+            _ => Err(KiroError::message("TypeError", "expected void")),
         }
     }
 }

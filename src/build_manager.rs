@@ -27,7 +27,7 @@ impl BuildManager {
 
         // 3. Initialize empty header.rs (will be populated by std modules)
         let header_path = format!("{}/src/header.rs", self.build_dir);
-        fs::write(&header_path, "//! Kiro Header - Generated glue code for rust fn\n\nuse kiro_runtime::{KiroError, RuntimeVal};\n\n")
+        fs::write(&header_path, "//! Kiro Header - Generated glue code for rust fn\n\nuse kiro_runtime::{HostResult, KiroError, RuntimeVal};\n\n")
             .map_err(|e| e.to_string())?;
 
         Ok(())
@@ -60,6 +60,7 @@ impl BuildManager {
         let output = Command::new("cargo")
             .arg("build")
             .arg("--quiet") // Less noise
+            .env("CARGO_TARGET_DIR", "target")
             .current_dir(&self.build_dir)
             .output()
             .map_err(|e| format!("Failed to execute cargo: {}", e))?;
@@ -89,7 +90,7 @@ impl BuildManager {
         // Simple parser: find the line starting with 'tokio ='
         let tokio_dep = my_cargo.lines()
             .find(|line| line.trim().starts_with("tokio ="))
-            .unwrap_or(r#"tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }"#); // Fallback if file missing
+            .unwrap_or(r#"tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }"#); // Fallback if file missing
         let async_channel_dep = my_cargo
             .lines()
             .find(|line| line.trim().starts_with("async-channel ="))

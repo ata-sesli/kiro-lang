@@ -1,8 +1,0 @@
-fn main() {
-    print "--- Move Test ---"
-    var a = "Hello"
-    var b = move a
-    
-    print "b: " + b
-}
-main()

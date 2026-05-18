@@ -38,6 +38,7 @@ fn update_nested_field(
 
 impl Interpreter {
     pub fn execute_statement(&mut self, statement: Statement) -> Result<StatementResult, String> {
+        self.tick()?;
         match statement {
             // Error definitions register the type and description
             Statement::ErrorDef {
@@ -159,7 +160,8 @@ impl Interpreter {
                                 Ok(StatementResult::Normal(RuntimeVal::Void))
                             }
                             _ => {
-                                Err("Runtime Error: Assignment target is not a pointer.".to_string())
+                                Err("Runtime Error: Assignment target is not a pointer."
+                                    .to_string())
                             }
                         }
                     }
@@ -178,6 +180,28 @@ impl Interpreter {
             }
             Statement::Break(_) => Ok(StatementResult::Break),
             Statement::Continue(_) => Ok(StatementResult::Continue),
+            Statement::Rest(_) => {
+                if self.in_pure_mode {
+                    return Err("Pure Function Error: 'rest' is forbidden.".to_string());
+                }
+                Ok(StatementResult::Normal(RuntimeVal::Void))
+            }
+            Statement::Check(_, condition, message) => {
+                let value = self.eval_expr(condition)?;
+                match value {
+                    RuntimeVal::Bool(true) => Ok(StatementResult::Normal(RuntimeVal::Void)),
+                    RuntimeVal::Bool(false) => {
+                        let msg = message
+                            .map(|m| m.value.value.trim_matches('"').to_string())
+                            .unwrap_or_else(|| "check failed".to_string());
+                        Err(format!("Check failed: {}", msg))
+                    }
+                    other => Err(format!(
+                        "Type Error: Check condition must be bool, got '{}'.",
+                        other
+                    )),
+                }
+            }
 
             Statement::On {
                 condition,
@@ -416,20 +440,56 @@ impl Interpreter {
             }
             // 7. Import Logic
             Statement::Import { module_name, .. } => {
-                let cache_key = if module_name.starts_with("std_") {
-                    format!("std://{}", module_name)
+                // 1. Resolve Source
+                let loaded = if let Some(loader) = &self.module_loader {
+                    loader.load(&module_name, &self.current_dir)?
                 } else {
-                    let filename = format!("{}.kiro", module_name);
-                    let full_path = self.current_dir.join(filename);
-                    std::fs::canonicalize(&full_path)
-                        .unwrap_or(full_path)
-                        .to_string_lossy()
-                        .to_string()
+                    let cache_key = if module_name.starts_with("std_") {
+                        format!("std://{}", module_name)
+                    } else {
+                        let filename = format!("{}.kiro", module_name);
+                        let full_path = self.current_dir.join(filename);
+                        std::fs::canonicalize(&full_path)
+                            .unwrap_or(full_path)
+                            .to_string_lossy()
+                            .to_string()
+                    };
+
+                    let (source, base_dir) = if module_name.starts_with("std_") {
+                        let key = &module_name[4..];
+                        let asset_path = format!("{}/{}.kiro", key, module_name);
+                        let content = crate::StdAssets::get(&asset_path)
+                            .map(|f| std::str::from_utf8(f.data.as_ref()).unwrap().to_string())
+                            .ok_or_else(|| {
+                                format!(
+                                    "Standard library module '{}' not found in embedded assets",
+                                    module_name
+                                )
+                            })?;
+                        (content, self.current_dir.clone())
+                    } else {
+                        let filename = format!("{}.kiro", module_name);
+                        let full_path = self.current_dir.join(&filename);
+                        let resolved =
+                            std::fs::canonicalize(&full_path).unwrap_or(full_path.clone());
+                        let content = std::fs::read_to_string(&resolved)
+                            .map_err(|_| format!("Module '{}' not found", resolved.display()))?;
+                        let parent = resolved
+                            .parent()
+                            .map(|p| p.to_path_buf())
+                            .unwrap_or_else(|| PathBuf::from("."));
+                        (content, parent)
+                    };
+
+                    super::LoadedModule {
+                        cache_key,
+                        source,
+                        base_dir,
+                    }
                 };
 
-                if let Some(mod_val) = self.module_cache.get(&cache_key) {
-                    println!("📦 Using cached module '{}'", cache_key);
-                    // Inject into current env
+                if let Some(mod_val) = self.module_cache.get(&loaded.cache_key) {
+                    println!("📦 Using cached module '{}'", loaded.cache_key);
                     self.env.insert(
                         module_name.clone(),
                         crate::interpreter::values::Value {
@@ -440,40 +500,22 @@ impl Interpreter {
                     return Ok(StatementResult::Normal(RuntimeVal::Void));
                 }
 
-                // 2. Resolve Source
-                let (src, import_base_dir) = if module_name.starts_with("std_") {
-                    let key = &module_name[4..];
-                    let asset_path = format!("{}/{}.kiro", key, module_name);
-                    let content = crate::StdAssets::get(&asset_path)
-                        .map(|f| std::str::from_utf8(f.data.as_ref()).unwrap().to_string())
-                        .ok_or_else(|| {
-                            format!(
-                                "Standard library module '{}' not found in embedded assets",
-                                module_name
-                            )
-                        })?;
-                    (content, self.current_dir.clone())
-                } else {
-                    let filename = format!("{}.kiro", module_name);
-                    let full_path = self.current_dir.join(&filename);
-                    let resolved = std::fs::canonicalize(&full_path).unwrap_or(full_path.clone());
-                    let content = std::fs::read_to_string(&resolved)
-                        .map_err(|_| format!("Module '{}' not found", resolved.display()))?;
-                    let parent = resolved
-                        .parent()
-                        .map(|p| p.to_path_buf())
-                        .unwrap_or_else(|| PathBuf::from("."));
-                    (content, parent)
-                };
-
                 println!("📦 Importing {}...", module_name);
 
-                // 3. Parse
-                let prog = crate::grammar::parse(&src)
+                // 2. Parse
+                let prog = crate::grammar::parse(&loaded.source)
                     .map_err(|e| format!("Parse Error in module '{}': {:?}", module_name, e))?;
 
-                // 4. Run Sub-Interpreter
-                let mut sub_interp = Interpreter::with_base_dir(import_base_dir);
+                // 3. Run Sub-Interpreter
+                let mut sub_interp = Interpreter::with_base_dir(loaded.base_dir);
+                sub_interp.set_current_module(module_name.clone());
+                sub_interp.host_mode = self.host_mode;
+                sub_interp.host_registry = self.host_registry.clone();
+                sub_interp.limits = self.limits.clone();
+                sub_interp.step_count = self.step_count;
+                sub_interp.call_depth = self.call_depth;
+                sub_interp.started_at = self.started_at;
+                sub_interp.module_loader = self.module_loader.clone();
                 sub_interp.module_cache = self.module_cache.clone();
 
                 sub_interp.run(prog)?;
@@ -492,9 +534,13 @@ impl Interpreter {
 
                 let mod_val = RuntimeVal::Module(exports_data, exports_funcs);
 
-                // 6. Cache and Inject
+                // 4. Cache and Inject
                 self.module_cache = sub_interp.module_cache;
-                self.module_cache.insert(cache_key, mod_val.clone());
+                self.module_cache
+                    .insert(loaded.cache_key.clone(), mod_val.clone());
+                self.step_count = sub_interp.step_count;
+                self.call_depth = sub_interp.call_depth;
+                self.started_at = sub_interp.started_at;
                 self.env.insert(
                     module_name.clone(),
                     crate::interpreter::values::Value {

@@ -15,6 +15,7 @@ rust-sitter = { version = "0.4.5", default-features = false, features = ["tree-s
 tokio = { version = "1.49.0", features = ["macros", "sync", "rt-multi-thread", "fs", "time"] }
 toml_edit = "0.24.0"
 tree-sitter = "0.25.2"
+kiro_runtime = { path = "kiro_runtime" }
 
 [build-dependencies]
 rust-sitter-tool = "0.4.5"

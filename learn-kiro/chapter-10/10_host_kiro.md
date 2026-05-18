@@ -26,6 +26,23 @@ on (content == FileNotFound) {
 
 In real projects, host calls are often at system boundaries: filesystem access, networking, cryptography, or integration with existing Rust crates.
 
+For a user module named `tools.kiro`, put the Rust implementation next to it as `tools.rs`. If the `.kiro` file declares a `rust fn` and the adjacent `.rs` file is missing, Kiro reports a compile diagnostic before Rust build.
+
+Rust glue uses the ABI v1 shape:
+
+```rust
+use kiro_runtime::{HostResult, KiroError, RuntimeVal};
+
+pub async fn read_file(args: Vec<RuntimeVal>) -> HostResult {
+    RuntimeVal::expect_arity(&args, 1, "read_file")?;
+    let path = RuntimeVal::expect_arg(&args, 0, "read_file")?.as_str()?;
+    let content = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|_| KiroError::message("NotFound", path.to_string()))?;
+    Ok(RuntimeVal::from(content))
+}
+```
+
 ## Common Pitfalls
 
 A common issue is signature drift between `.kiro` declaration and Rust glue function. The correct method is to update both sides together and treat mismatches as build blockers.

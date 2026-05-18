@@ -1,0 +1,39 @@
+struct Pilot {
+    name: str
+    energy: num
+}
+
+pure fn calibrate(x: num) -> num {
+    return x + 7
+}
+
+fn reporter(out: pipe str, who: str, level: num) {
+    give out "[async] " + who + " online"
+    on (level > 100) {
+        give out "[async] energy peak"
+    } off {
+        give out "[async] stabilizing"
+    }
+}
+
+fn main() {
+    title = "Kiro Showcase"
+    print title
+
+    var p = Pilot { name: "Astra", energy: 95 }
+    var p_ref = ref p
+    var energy_ref = ref p.energy
+    energy_snapshot = p.energy
+
+    deref energy_ref = calibrate(energy_snapshot)
+    p.energy = deref energy_ref
+    print "pilot=" + p_ref.name + ", energy=" + p.energy
+
+    var channel = pipe str
+    run reporter(channel, p.name, p.energy)
+
+    print take channel
+    print take channel
+}
+
+main()

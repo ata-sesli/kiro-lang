@@ -13,7 +13,7 @@ run worker()
 print "Main flow continues"
 ```
 
-`run worker()` starts background work and immediately returns control to the next statement. This means output order between worker and main flow is not guaranteed.
+`run worker()` starts fire-and-forget background work and immediately returns control to the next statement. This means output order between worker and main flow is not guaranteed, and the worker may not finish if the program exits first.
 
 Arguments are passed normally:
 
@@ -25,11 +25,25 @@ fn log(msg: str) {
 run log("Async message")
 ```
 
+Long-running tasks can use `rest` to give other running tasks a chance to continue:
+
+```kiro
+fn crunch() {
+    var i = 0
+    loop on (i < 1000000) {
+        i = i + 1
+        rest
+    }
+}
+```
+
+`rest` does not send data or sleep. It only cooperates with the scheduler.
+
 As your programs grow, asynchronous execution should be paired with clear communication boundaries, which is exactly what pipes provide in the next chapter.
 
 ## Common Pitfalls
 
-A frequent mistake is assuming statements after `run` wait for completion. The correct method is to treat `run` as non-blocking and design synchronization intentionally.
+A frequent mistake is assuming statements after `run` wait for completion. The correct method is to treat `run` as non-blocking and design synchronization intentionally with pipes.
 
 Another issue is mixing shared mutable state into multiple concurrent tasks too early. The correct method is to prefer message passing and narrow ownership so task behavior stays understandable.
 

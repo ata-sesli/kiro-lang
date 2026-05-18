@@ -22,6 +22,13 @@ pub mod grammar {
         #[rust_sitter::leaf(pattern = r#""([^"\\]|\\.)*""#, transform = |s| s.to_string())]
         pub value: String,
     }
+
+    #[derive(Debug, Clone)]
+    pub struct CheckMessage {
+        #[rust_sitter::leaf(text = ",")]
+        _comma: (),
+        pub value: StringVal,
+    }
     // 3. For Struct Names (Capitalized: "User")
     #[derive(Debug, Clone)]
     pub struct StructNameVal {
@@ -243,6 +250,14 @@ pub mod grammar {
         /// Continue to next loop iteration.
         // 5. Continue Statement
         Continue(#[rust_sitter::leaf(text = "continue")] ()),
+        /// Cooperative scheduler rest point: `rest`.
+        Rest(#[rust_sitter::leaf(text = "rest")] ()),
+        /// Runtime guard: `check condition` or `check condition, "message"`.
+        Check(
+            #[rust_sitter::leaf(text = "check")] (),
+            Expression,
+            Option<CheckMessage>,
+        ),
 
         /// Import module by name: `import math`.
         // 6. Import Statement
@@ -368,7 +383,11 @@ pub mod grammar {
 
         /// Pipe initializer expression: `pipe <type>` or bounded `pipe <type> <capacity>`.
         #[rust_sitter::prec_left(1)]
-        PipeInit(#[rust_sitter::leaf(text = "pipe")] (), KiroType, Option<NumberVal>),
+        PipeInit(
+            #[rust_sitter::leaf(text = "pipe")] (),
+            KiroType,
+            Option<NumberVal>,
+        ),
 
         /// Receive from pipe: `take ch`.
         // 4. Take: take <channel>

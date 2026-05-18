@@ -15,7 +15,7 @@ var inputs = list num { 5, 50, 150 }
 loop val in inputs {
     var res = analyze(val)
     print "Analyzing " + val + "..."
-    
+
     on (res == TooSmall) {
         print " -> Error: Too Small!"
     } off {

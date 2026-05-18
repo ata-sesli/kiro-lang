@@ -83,8 +83,18 @@ const keywordDocs = {
   },
   run: {
     signature: 'run fn_call(...)',
-    detail: 'Starts asynchronous execution.',
+    detail: 'Starts fire-and-forget asynchronous execution.',
     example: 'run worker(job)'
+  },
+  rest: {
+    signature: 'rest',
+    detail: 'Gives other running tasks a chance to continue; does not send data or sleep.',
+    example: 'rest'
+  },
+  check: {
+    signature: 'check condition[, "message"]',
+    detail: 'Checks that a condition is true; failed checks stop the program with a Kiro diagnostic.',
+    example: 'check count > 0, "count must be positive"'
   },
   give: {
     signature: 'give pipe value',

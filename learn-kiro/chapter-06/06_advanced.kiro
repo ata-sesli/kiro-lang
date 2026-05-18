@@ -23,7 +23,7 @@ var message_pipe = pipe str
 fn worker(out: pipe str) {
     // Simulate work
     // (In a real app, maybe sleep or compute heavy task)
-    
+
     // Send message back
     give out "Task Complete!"
 }

@@ -1,0 +1,19 @@
+// Test file for rust fn declaration parsing and interpreter behavior
+
+error NotFound = "File not found"
+error PermissionDenied = "Access denied"
+
+// Rust-backed function declaration (must have explicit return type)
+rust fn read_file(path: str) -> str!
+
+fn main() {
+    print "Testing Rust Function Declaration..."
+
+    // This should fail in interpreter with a specific error
+    // But should compile correctly
+    // var content = read_file("test.txt")
+
+    print "Test passed: rust fn declaration parsed successfully!"
+}
+
+main()
