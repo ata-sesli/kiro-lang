@@ -26,7 +26,7 @@ on (content == FileNotFound) {
 
 In real projects, host calls are often at system boundaries: filesystem access, networking, cryptography, or integration with existing Rust crates.
 
-For a user module named `tools.kiro`, put the Rust implementation next to it as `tools.rs`. If the `.kiro` file declares a `rust fn` and the adjacent `.rs` file is missing, Kiro reports a compile diagnostic before Rust build.
+For a user module named `tools.kiro`, put the Rust implementation next to it as `tools.rs`. If `main.kiro` declares a `rust fn`, its glue lives in `main.rs`. There is no `native/` fallback in V1. If the `.kiro` file declares a `rust fn` and the adjacent `.rs` file is missing, Kiro reports a compile diagnostic before Rust build.
 
 Rust glue uses the ABI v1 shape:
 

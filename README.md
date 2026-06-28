@@ -44,6 +44,12 @@ Kiro is designed for a fast feedback loop. By default, it runs your code through
 # Full Pipeline: Interpret -> Compile -> Execute
 kiro main.kiro
 
+# Inside a project with kiro.toml, use the manifest entry
+kiro
+kiro run
+kiro build
+kiro check
+
 # Fast Validation: Interpret ONLY
 kiro check main.kiro
 
@@ -56,6 +62,10 @@ kiro fmt main.kiro
 # Check formatting without writing changes
 kiro fmt --check
 
+# Run *_test.kiro files
+kiro test
+kiro test tests/
+
 # Skip interpreter validation (e.g. for CI or heavy host modules usage)
 kiro main.kiro --no-interpret
 
@@ -64,6 +74,8 @@ kiro main.kiro --verbose
 ```
 
 Kiro reports common language errors before Rust codegen when possible: wrong argument counts, unknown names, pure-function violations, immutable mutation, bad imported calls, bad pipe/list/map use, and failed `check` guards.
+
+Single-file scripts do not need a manifest. For project commands without an explicit file, Kiro walks upward to the nearest `kiro.toml` and uses `[package].entry`.
 
 ---
 
@@ -103,7 +115,26 @@ Kiro uses a "sane default" approach to mutability.
 
 ### 2. Module System (Separate Files)
 
-Kiro supports code modularization. Any `.kiro` file in the same directory can be imported.
+Kiro supports code modularization with flat sibling modules. In V1, `import math` resolves to `math.kiro` beside the importing file. Dotted imports, path imports, aliases, and nested module trees are intentionally not part of the project layout yet.
+
+```text
+my_app/
+  kiro.toml
+  main.kiro
+  math.kiro
+  tools.kiro
+  tools.rs
+```
+
+`kiro.toml` is optional. Use it when a directory should behave like a project:
+
+```toml
+[package]
+name = "my_app"
+entry = "main.kiro"
+
+[dependencies]
+```
 
 **`math.kiro`**:
 
@@ -203,6 +234,16 @@ Use `check` when a condition must be true for the program to continue. A failed 
 
 ```kiro
 check user.age > 0, "age must be positive"
+```
+
+`check` is also the seed of Kiro's tiny test story. Files named `*_test.kiro` are ordinary Kiro programs, and `kiro test` runs them as isolated compiled programs. A failed `check` marks that file as failed.
+
+**`math_test.kiro`**:
+
+```kiro
+import math
+
+check math.add(2, 3) == 5, "add should sum numbers"
 ```
 
 ### 6. Pointers & Memory (`ref` / `deref`)
@@ -386,7 +427,7 @@ rust fn read_file(path: str) -> str!
 
 #### 2. Rust Glue Layer (`mylib.rs`)
 
-The logic lives in an adjacent Rust glue file. A user module `mylib.kiro` uses `mylib.rs`; standard modules keep embedded headers. Kiro scripts and Rust glue communicate through the `kiro_runtime` ABI.
+The logic lives in an adjacent Rust glue file. A user module `mylib.kiro` uses `mylib.rs`; `main.kiro` uses `main.rs` if it declares `rust fn`. Standard modules keep embedded headers. There is no `native/` fallback in V1. Kiro scripts and Rust glue communicate through the `kiro_runtime` ABI.
 
 - **Glue implementation**: Use the `kiro_runtime` crate to convert types between Kiro and Rust.
 - **ABI v1**: Host functions are async and return `kiro_runtime::HostResult`.
@@ -429,11 +470,12 @@ Kiro uses a **Double Pass** system:
     - **Recursive Build**: The transpiler identifies dependencies and compiles them as Rust modules (`pub mod {name}`).
     - Hoists struct definitions and imports to ensure valid Rust output.
 
-## 🛠️ Project Structure
+## 🛠️ Repository Structure
 
 - `src/grammar/`: Language rules and parser (Rust Sitter).
 - `src/interpreter/`: Recursive execution engine and value representations.
 - `src/compiler/`: Rust code generation logic.
+- `src/project.rs`: Kiro project discovery and manifest entry resolution.
 - `src/kiro_std/`: Standard library source code (Embedded in binary).
 - `src/build_manager.rs`: Cargo project lifecycle management.
 - `main.kiro`: Entry point script.

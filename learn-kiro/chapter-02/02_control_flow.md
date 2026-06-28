@@ -60,6 +60,14 @@ check score >= 0, "score must not be negative"
 
 A failed check stops the program with a Kiro diagnostic. Use it for contracts and invariants, not as a replacement for ordinary `on` branching.
 
+Checks also power Kiro's first testing story. Put checks in files named `*_test.kiro`, then run:
+
+```bash
+kiro test
+```
+
+Each test file is an ordinary Kiro program. If any `check` fails, that file fails.
+
 ## Common Pitfalls
 
 Many loop bugs come from forgetting to update the loop variable in `loop on (...)`. The correct method is to place state updates near the end of each iteration so termination is guaranteed.

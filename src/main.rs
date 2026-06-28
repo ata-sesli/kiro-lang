@@ -4,6 +4,8 @@ use kiro_lang::errors::{self, KiroError, emit_error, panic_payload_to_string};
 use kiro_lang::formatter;
 use kiro_lang::grammar;
 use kiro_lang::interpreter;
+use kiro_lang::project;
+use kiro_lang::test_runner;
 use kiro_lang::{StdAssets, unsupported_let_line};
 
 use std::fs;
@@ -43,7 +45,7 @@ struct Cli {
 enum Commands {
     /// Parse, Compile, and Execute (Default)
     Run {
-        file: String,
+        file: Option<String>,
         #[arg(long)]
         no_interpret: bool,
         #[arg(long)]
@@ -54,10 +56,10 @@ enum Commands {
         verbose: bool,
     },
     /// Interpret ONLY (No Compilation, No Host Modules)
-    Check { file: String },
+    Check { file: Option<String> },
     /// Transpile and Build ONLY (No Execution)
     Build {
-        file: String,
+        file: Option<String>,
         #[arg(long)]
         emit_rust: bool,
         #[arg(short, long)]
@@ -70,6 +72,11 @@ enum Commands {
         /// Check formatting without writing changes.
         #[arg(long)]
         check: bool,
+    },
+    /// Run Kiro test files
+    Test {
+        /// Files or directories to test. Defaults to *_test.kiro under the current project.
+        paths: Vec<String>,
     },
     /// Create a new Kiro project
     Create { project_name: String },
@@ -93,10 +100,10 @@ fn scaffold_project(project_name: &str) {
 
     let toml_content = format!(
         r#"[package]
-            name = "{}"
-            entry = "main.kiro"
+name = "{}"
+entry = "main.kiro"
 
-            [dependencies]
+[dependencies]
 "#,
         project_name
     );
@@ -266,11 +273,17 @@ async fn main() {
             emit_rust,
             verbose,
         }) => {
+            let Some(file) = resolve_input_file(file.as_deref()) else {
+                std::process::exit(1);
+            };
             if !execute_pipeline(&file, !*no_interpret, !*no_run, *emit_rust, *verbose) {
                 std::process::exit(1);
             }
         }
         Some(Commands::Check { file }) => {
+            let Some(file) = resolve_input_file(file.as_deref()) else {
+                std::process::exit(1);
+            };
             if !run_interpreter(&file) {
                 std::process::exit(1);
             }
@@ -279,18 +292,34 @@ async fn main() {
             file,
             emit_rust,
             verbose,
-        }) => match run_compiler(&file, *emit_rust, *verbose) {
-            Ok(_) => {}
-            Err(e) => {
-                emit_error(&e);
+        }) => {
+            let Some(file) = resolve_input_file(file.as_deref()) else {
                 std::process::exit(1);
+            };
+            match run_compiler(&file, *emit_rust, *verbose) {
+                Ok(_) => {}
+                Err(e) => {
+                    emit_error(&e);
+                    std::process::exit(1);
+                }
             }
-        },
+        }
         Some(Commands::Fmt { paths, check }) => {
             if !handle_fmt(paths, *check) {
                 std::process::exit(1);
             }
         }
+        Some(Commands::Test { paths }) => match test_runner::run(paths) {
+            Ok(summary) => {
+                if !summary.is_success() {
+                    std::process::exit(1);
+                }
+            }
+            Err(e) => {
+                emit_error(&e);
+                std::process::exit(1);
+            }
+        },
         Some(Commands::Create { project_name }) => {
             scaffold_project(project_name);
         }
@@ -301,10 +330,10 @@ async fn main() {
             handle_remove(dependency);
         }
         None => {
-            if let Some(file) = &cli.file {
+            if let Some(file) = resolve_input_file(cli.file.as_deref()) {
                 // Default behavior: Interpret -> Compile -> Run
                 if !execute_pipeline(
-                    file,
+                    &file,
                     !cli.no_interpret,
                     !cli.no_run,
                     cli.emit_rust,
@@ -313,10 +342,62 @@ async fn main() {
                     std::process::exit(1);
                 }
             } else {
-                <Cli as clap::CommandFactory>::command()
-                    .print_help()
-                    .unwrap();
+                std::process::exit(1);
             }
+        }
+    }
+}
+
+fn resolve_input_file(explicit: Option<&str>) -> Option<String> {
+    if let Some(file) = explicit {
+        return Some(file.to_string());
+    }
+
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            emit_error(&KiroError::new(
+                errors::ErrorCode::FileNotFound,
+                errors::ErrorPhase::Cli,
+                format!("Failed to read current directory: {}", e),
+            ));
+            return None;
+        }
+    };
+
+    match project::find_project(cwd) {
+        Ok(Some(project)) => {
+            let entry = project.entry_path();
+            if !entry.exists() {
+                emit_error(
+                    &KiroError::file_not_found(&entry.display().to_string())
+                        .with_help("check [package].entry in kiro.toml"),
+                );
+                return None;
+            }
+            if let Err(e) = std::env::set_current_dir(&project.root) {
+                emit_error(&KiroError::new(
+                    errors::ErrorCode::FileNotFound,
+                    errors::ErrorPhase::Cli,
+                    format!(
+                        "Failed to enter project root '{}': {}",
+                        project.root.display(),
+                        e
+                    ),
+                ));
+                return None;
+            }
+            Some(entry.display().to_string())
+        }
+        Ok(None) => {
+            let _ = <Cli as clap::CommandFactory>::command().print_help();
+            println!();
+            emit_error(&project::no_input_error());
+            None
+        }
+        Err(e) => {
+            emit_error(&e);
+            None
         }
     }
 }
@@ -336,12 +417,14 @@ fn handle_fmt(paths: &[String], check: bool) -> bool {
         let source = match fs::read_to_string(&file) {
             Ok(source) => source,
             Err(e) => {
-                emit_error(&KiroError::new(
-                    errors::ErrorCode::FileNotFound,
-                    errors::ErrorPhase::Cli,
-                    format!("Read error: {}", e),
-                )
-                .with_file(file.display().to_string()));
+                emit_error(
+                    &KiroError::new(
+                        errors::ErrorCode::FileNotFound,
+                        errors::ErrorPhase::Cli,
+                        format!("Read error: {}", e),
+                    )
+                    .with_file(file.display().to_string()),
+                );
                 return false;
             }
         };
@@ -359,12 +442,14 @@ fn handle_fmt(paths: &[String], check: bool) -> bool {
                 println!("Would format {}", display);
                 changed.push(display);
             } else if let Err(e) = fs::write(&file, formatted) {
-                emit_error(&KiroError::new(
-                    errors::ErrorCode::BuildGraphFailed,
-                    errors::ErrorPhase::Cli,
-                    format!("Failed to write '{}': {}", display, e),
-                )
-                .with_file(display));
+                emit_error(
+                    &KiroError::new(
+                        errors::ErrorCode::BuildGraphFailed,
+                        errors::ErrorPhase::Cli,
+                        format!("Failed to write '{}': {}", display, e),
+                    )
+                    .with_file(display),
+                );
                 return false;
             } else {
                 println!("Formatted {}", display);

@@ -5,6 +5,8 @@ pub mod errors;
 pub mod formatter;
 pub mod grammar;
 pub mod interpreter;
+pub mod project;
+pub mod test_runner;
 
 #[derive(rust_embed::RustEmbed)]
 #[folder = "src/kiro_std/"]

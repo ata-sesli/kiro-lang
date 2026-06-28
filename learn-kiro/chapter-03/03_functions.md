@@ -74,6 +74,8 @@ Current rule: function references are for named pure functions only. This keeps 
 
 Modules are just `.kiro` files. Import by module name without the extension.
 
+In V1, local modules are flat siblings. `import mylib` looks for `mylib.kiro` beside the file doing the import. There are no dotted imports, path imports, aliases, or nested module trees yet.
+
 `mylib.kiro`:
 
 ```kiro
@@ -89,7 +91,27 @@ import mylib
 print mylib.pi()
 ```
 
-This module boundary is the foundation for larger projects.
+This module boundary is the foundation for larger projects. A project can add an optional `kiro.toml` at the root:
+
+```toml
+[package]
+name = "my_app"
+entry = "main.kiro"
+
+[dependencies]
+```
+
+Then `kiro`, `kiro run`, `kiro build`, and `kiro check` use that entry file when no explicit `.kiro` file is provided. Single-file scripts still work without a manifest.
+
+For tests, use ordinary files named `*_test.kiro`:
+
+```kiro
+import mylib
+
+check mylib.pi() == 3.14, "pi should be available"
+```
+
+`kiro test` discovers those files recursively from the project root and runs each one as its own compiled program.
 
 ## Common Pitfalls
 
