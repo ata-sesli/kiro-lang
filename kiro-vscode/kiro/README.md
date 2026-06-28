@@ -4,7 +4,13 @@
 
 # Kiro Language Support for VS Code
 
-Official Visual Studio Code extension for **Kiro**, an experimental programming language focused on clear syntax, explicit control flow, and practical host integration.
+![Maintenance](https://img.shields.io/badge/maintenance-community--maintained-yellow)
+
+> Maintenance status: community-maintained.
+>
+> I no longer use VS Code as my daily editor, so I do not plan to actively develop this extension myself. The extension remains available, and pull requests are welcome from anyone who wants to improve or maintain VS Code support for Kiro. My own editor tooling focus is now the Zed extension.
+
+Visual Studio Code extension for **Kiro**, an experimental programming language focused on clear syntax, explicit control flow, and practical host integration.
 
 ## Features
 
@@ -91,6 +97,8 @@ It does **not** currently include full semantic tooling such as:
 
 Those are natural next steps when/if an LSP server is introduced.
 
+This extension is intentionally in maintenance mode. New Kiro language features may not appear here immediately unless contributors update the TextMate grammar and hover docs.
+
 ## Contributing
 
 Contributions are welcome. Good contributions include:
@@ -100,7 +108,7 @@ Contributions are welcome. Good contributions include:
 - Tightening language config behavior
 - Keeping docs aligned with language evolution
 
-When changing syntax or keywords in the compiler, update this extension in the same PR to avoid tooling drift.
+If you use VS Code and notice tooling drift after a Kiro language change, PRs are welcome. Good PRs should include updates to the TextMate grammar, hover docs, and README examples when relevant.
 
 ## Kiro Language
 
