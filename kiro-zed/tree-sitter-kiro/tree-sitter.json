@@ -1,0 +1,26 @@
+{
+  "grammars": [
+    {
+      "name": "kiro",
+      "camelcase": "Kiro",
+      "scope": "source.kiro",
+      "path": ".",
+      "file-types": [
+        "kiro"
+      ]
+    }
+  ],
+  "metadata": {
+    "version": "0.0.1",
+    "license": "MIT",
+    "description": "Tree-sitter grammar for Kiro"
+  },
+  "bindings": {
+    "c": true,
+    "node": false,
+    "rust": false,
+    "python": false,
+    "swift": false,
+    "go": false
+  }
+}

@@ -1,0 +1,30 @@
+// Kiro Standard Library: IO
+// Terminal input/output helpers.
+
+error IoError = "I/O error"
+error ParseNumError = "Failed to parse number"
+
+/// Writes `msg` to stderr without a trailing newline.
+rust fn eprint(msg: str) -> void
+
+/// Reads one line from stdin and strips trailing newline characters.
+/// Returns `IoError` on read failure.
+rust fn read_line() -> str!
+
+/// Adds two numbers.
+/// Returns the sum.
+pure fn add(a: num, b: num) -> num {
+    return a + b
+}
+
+struct User {
+    name: str
+    age: num
+}
+
+fn main() {
+    print add(10, 20)
+    print "Docs parsed successfully!"
+}
+
+main()

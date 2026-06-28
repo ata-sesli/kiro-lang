@@ -1,0 +1,22 @@
+{
+  "name": "tree-sitter-kiro",
+  "version": "0.0.1",
+  "description": "Tree-sitter grammar for Kiro",
+  "main": "bindings/node",
+  "keywords": [
+    "tree-sitter",
+    "kiro"
+  ],
+  "license": "MIT",
+  "tree-sitter": [
+    {
+      "scope": "source.kiro",
+      "file-types": [
+        "kiro"
+      ]
+    }
+  ],
+  "devDependencies": {
+    "tree-sitter-cli": "^0.26.3"
+  }
+}

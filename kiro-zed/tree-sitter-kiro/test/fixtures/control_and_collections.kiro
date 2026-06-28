@@ -1,0 +1,27 @@
+fn main() {
+    var gt = 10 > 5
+    var eq = 5 == 5
+
+    on (gt) {
+        print "Control flow via Bool: OK"
+    } off {
+        print "Control flow via Bool: FAIL"
+    }
+
+    loop i in 0..10 per 2 on (i > 3) {
+        print "i: " + i
+    } off {
+        print "filtered"
+    }
+
+    var nums = list num { 1, 2, 3 }
+    nums push 4
+    print nums at 0
+
+    var scores = map str num { "Ada" 100, "Kiro" 95 }
+    print scores at "Ada"
+
+    check eq, "equality should hold"
+}
+
+main()
