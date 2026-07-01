@@ -253,6 +253,30 @@ fn plain_script_uses_minimal_async_dependencies() {
 }
 
 #[test]
+fn generated_main_uses_runtime_helpers_instead_of_inlining_them() {
+    let (_, main_rs) = build_source("runtime_helpers", r#"print "hello""#);
+
+    assert!(
+        main_rs.contains("use kiro_runtime::*;"),
+        "generated main.rs should import shared runtime helpers:\n{}",
+        main_rs
+    );
+    for helper in [
+        "pub type KiroResult",
+        "pub trait KiroAdd",
+        "pub trait KiroEq",
+        "pub struct KiroAdrVoid",
+    ] {
+        assert!(
+            !main_rs.contains(helper),
+            "generated main.rs should not inline '{}':\n{}",
+            helper,
+            main_rs
+        );
+    }
+}
+
+#[test]
 fn std_fs_import_enables_tokio_fs_only() {
     let (cargo_toml, _) = build_source(
         "std_fs",
