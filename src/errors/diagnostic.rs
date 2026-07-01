@@ -10,6 +10,9 @@ pub struct KiroError {
     pub column: Option<usize>,
     pub label: Option<String>,
     pub source_line: Option<String>,
+    pub source_text: Option<String>,
+    pub span_offset: Option<usize>,
+    pub span_len: Option<usize>,
     pub help: Option<String>,
     pub suggestion: Option<String>,
 }
@@ -25,6 +28,9 @@ impl KiroError {
             column: None,
             label: None,
             source_line: None,
+            source_text: None,
+            span_offset: None,
+            span_len: None,
             help: None,
             suggestion: None,
         }
@@ -52,6 +58,27 @@ impl KiroError {
         self.line = Some(line);
         self.column = Some(column);
         self.source_line = Some(source_line.into());
+        self.label = Some(label.into());
+        self
+    }
+
+    pub fn with_source_span(
+        mut self,
+        file: impl Into<String>,
+        source_text: impl Into<String>,
+        line: usize,
+        column: usize,
+        span_len: usize,
+        label: impl Into<String>,
+    ) -> Self {
+        let source_text = source_text.into();
+        self.file = Some(file.into());
+        self.line = Some(line);
+        self.column = Some(column);
+        self.source_line = source_line(&source_text, line);
+        self.span_offset = byte_offset_at(&source_text, line, column);
+        self.span_len = Some(span_len.max(1));
+        self.source_text = Some(source_text);
         self.label = Some(label.into());
         self
     }
@@ -132,4 +159,31 @@ impl KiroError {
         )
         .with_file(module)
     }
+}
+
+fn source_line(source: &str, target_line: usize) -> Option<String> {
+    source
+        .lines()
+        .nth(target_line.saturating_sub(1))
+        .map(str::to_string)
+}
+
+fn byte_offset_at(source: &str, target_line: usize, target_column: usize) -> Option<usize> {
+    let mut line_start = 0;
+    for (idx, line) in source.split_inclusive('\n').enumerate() {
+        let line_number = idx + 1;
+        if line_number == target_line {
+            let column_offset = target_column.saturating_sub(1);
+            return (column_offset <= line.len()).then_some(line_start + column_offset);
+        }
+        line_start += line.len();
+    }
+
+    if target_line == source.lines().count().max(1) {
+        let column_offset = target_column.saturating_sub(1);
+        return (column_offset <= source.len().saturating_sub(line_start))
+            .then_some(line_start + column_offset);
+    }
+
+    None
 }

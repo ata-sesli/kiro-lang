@@ -253,11 +253,12 @@ fn missing_host_glue_error(
     let needle = format!("rust fn {}", fn_name);
     for (idx, line) in source.lines().enumerate() {
         if let Some(col) = line.find(&needle) {
-            err = err.with_source_location(
+            err = err.with_source_span(
                 file_name_for(module_path),
+                source,
                 idx + 1,
                 col + 1,
-                line.to_string(),
+                needle.len(),
                 "missing glue",
             );
             break;

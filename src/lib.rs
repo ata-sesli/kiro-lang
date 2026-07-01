@@ -7,6 +7,7 @@ pub mod formatter;
 pub mod grammar;
 pub mod interpreter;
 pub mod lsp;
+pub mod lsp_symbols;
 pub mod project;
 pub mod test_runner;
 

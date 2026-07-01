@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -6,19 +6,19 @@ use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionOptions, Diagnostic, DiagnosticSeverity,
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DidSaveTextDocumentParams, DocumentSymbol, DocumentSymbolParams, Hover, HoverContents,
-    HoverParams, MarkedString, NumberOrString, OneOf, Position, PublishDiagnosticsParams, Range,
-    ServerCapabilities, SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri,
+    DidSaveTextDocumentParams, DocumentSymbol, DocumentSymbolParams, GotoDefinitionParams, Hover,
+    HoverContents, HoverParams, MarkedString, NumberOrString, OneOf, Position,
+    PublishDiagnosticsParams, Range, ServerCapabilities, SignatureHelpOptions, SignatureHelpParams,
+    SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    TextDocumentSyncSaveOptions, TextEdit, Uri,
 };
 use serde_json::Value;
 use url::Url;
 
-use crate::analysis::{self, AnalysisResult, SourceOverlays};
-use crate::compiler::FunctionInfo;
+use crate::analysis::{self, SourceOverlays};
 use crate::errors::{ErrorCode, ErrorPhase, KiroError};
 use crate::formatter;
-use crate::grammar::{self, grammar as ast};
+use crate::lsp_symbols::{self, IndexedKind, SymbolDecl, SymbolIndex};
 
 pub fn run() -> Result<(), KiroError> {
     let (connection, io_threads) = Connection::stdio();
@@ -66,6 +66,12 @@ fn server_capabilities() -> ServerCapabilities {
             trigger_characters: Some(vec![".".to_string()]),
             ..CompletionOptions::default()
         }),
+        signature_help_provider: Some(SignatureHelpOptions {
+            trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+            retrigger_characters: Some(vec![",".to_string()]),
+            work_done_progress_options: Default::default(),
+        }),
+        definition_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
         ..ServerCapabilities::default()
@@ -96,6 +102,8 @@ impl LspState {
             "textDocument/hover" => self.hover(request.params),
             "textDocument/completion" => self.completion(request.params),
             "textDocument/documentSymbol" => self.document_symbols(request.params),
+            "textDocument/definition" => self.definition(request.params),
+            "textDocument/signatureHelp" => self.signature_help(request.params),
             _ => {
                 let response = Response::new_err(
                     id,
@@ -187,8 +195,7 @@ impl LspState {
         let Some(document) = self.documents.get(uri) else {
             return Ok(());
         };
-        let mut overlays = SourceOverlays::new();
-        overlays.insert(document.path.clone(), document.text.clone());
+        let overlays = self.source_overlays();
         let diagnostics = match analysis::analyze_path(&document.path, &overlays) {
             Ok(()) => Vec::new(),
             Err(err) => vec![diagnostic_from_error(err)],
@@ -211,20 +218,35 @@ impl LspState {
         serde_json::to_value(edits).map_err(lsp_error)
     }
 
+    fn definition(&self, params: Value) -> Result<Value, KiroError> {
+        let params: GotoDefinitionParams = serde_json::from_value(params).map_err(lsp_error)?;
+        let doc = params.text_document_position_params;
+        let Some((path, source)) = self.source_for_uri(&doc.text_document.uri) else {
+            return Ok(Value::Null);
+        };
+        let index = self.symbol_index_for(&path, &source);
+        let Some(location) = index.definition_at(&path, &source, doc.position) else {
+            return Ok(Value::Null);
+        };
+        serde_json::to_value(location).map_err(lsp_error)
+    }
+
     fn hover(&self, params: Value) -> Result<Value, KiroError> {
         let params: HoverParams = serde_json::from_value(params).map_err(lsp_error)?;
         let doc = params.text_document_position_params;
-        let Some((_path, source)) = self.source_for_uri(&doc.text_document.uri) else {
+        let Some((path, source)) = self.source_for_uri(&doc.text_document.uri) else {
             return Ok(Value::Null);
         };
-        let Some(word) = word_at(&source, doc.position) else {
-            return Ok(Value::Null);
-        };
-        let Some(text) = hover_doc(&word) else {
+        let index = self.symbol_index_for(&path, &source);
+        let text = index.hover_at(&path, &source, doc.position).or_else(|| {
+            lsp_symbols::word_at(&source, doc.position)
+                .and_then(|word| hover_doc(&word).map(str::to_string))
+        });
+        let Some(text) = text else {
             return Ok(Value::Null);
         };
         let hover = Hover {
-            contents: HoverContents::Scalar(MarkedString::String(text.to_string())),
+            contents: HoverContents::Scalar(MarkedString::String(text)),
             range: None,
         };
         serde_json::to_value(hover).map_err(lsp_error)
@@ -238,10 +260,22 @@ impl LspState {
             return serde_json::to_value(Vec::<CompletionItem>::new()).map_err(lsp_error);
         };
 
-        let mut items = if let Some(module) = module_prefix_at(&source, doc.position) {
-            module_completion_items(&path, &source, &module)
+        let mut items = if lsp_symbols::is_import_completion(&source, doc.position) {
+            import_completion_items(&path)
         } else {
-            general_completion_items(&source)
+            let index = self.symbol_index_for(&path, &source);
+            if let Some(module) = lsp_symbols::module_prefix_at(&source, doc.position) {
+                let mut items = module_completion_items(&index, &module);
+                if items.is_empty() {
+                    items = self
+                        .index_for_sibling_module(&path, &module)
+                        .map(|index| module_completion_items(&index, &module))
+                        .unwrap_or_default();
+                }
+                items
+            } else {
+                general_completion_items(&index, &path)
+            }
         };
         items.sort_by(|a, b| a.label.cmp(&b.label));
         items.dedup_by(|a, b| a.label == b.label);
@@ -249,16 +283,26 @@ impl LspState {
         serde_json::to_value(items).map_err(lsp_error)
     }
 
+    fn signature_help(&self, params: Value) -> Result<Value, KiroError> {
+        let params: SignatureHelpParams = serde_json::from_value(params).map_err(lsp_error)?;
+        let doc = params.text_document_position_params;
+        let Some((path, source)) = self.source_for_uri(&doc.text_document.uri) else {
+            return Ok(Value::Null);
+        };
+        let index = self.symbol_index_for(&path, &source);
+        let Some(help) = index.signature_help_at(&path, &source, doc.position) else {
+            return Ok(Value::Null);
+        };
+        serde_json::to_value(help).map_err(lsp_error)
+    }
+
     fn document_symbols(&self, params: Value) -> Result<Value, KiroError> {
         let params: DocumentSymbolParams = serde_json::from_value(params).map_err(lsp_error)?;
-        let Some((_path, source)) = self.source_for_uri(&params.text_document.uri) else {
+        let Some((path, source)) = self.source_for_uri(&params.text_document.uri) else {
             return serde_json::to_value(Vec::<DocumentSymbol>::new()).map_err(lsp_error);
         };
-        let program = match grammar::parse(&source) {
-            Ok(program) => program,
-            Err(_) => return serde_json::to_value(Vec::<DocumentSymbol>::new()).map_err(lsp_error),
-        };
-        serde_json::to_value(document_symbols_from_program(&program, &source)).map_err(lsp_error)
+        let index = self.symbol_index_for(&path, &source);
+        serde_json::to_value(document_symbols_from_index(&index, &path)).map_err(lsp_error)
     }
 
     fn source_for_uri(&self, uri: &Uri) -> Option<(PathBuf, String)> {
@@ -268,6 +312,25 @@ impl LspState {
         let path = uri_to_path(uri)?;
         let source = std::fs::read_to_string(&path).ok()?;
         Some((path, source))
+    }
+
+    fn source_overlays(&self) -> SourceOverlays {
+        self.documents
+            .values()
+            .map(|document| (document.path.clone(), document.text.clone()))
+            .collect()
+    }
+
+    fn symbol_index_for(&self, path: &Path, source: &str) -> SymbolIndex {
+        let mut overlays = self.source_overlays();
+        overlays.insert(path.to_path_buf(), source.to_string());
+        SymbolIndex::build(path, &overlays)
+    }
+
+    fn index_for_sibling_module(&self, path: &Path, module: &str) -> Option<SymbolIndex> {
+        let module_path = path.parent()?.join(format!("{}.kiro", module));
+        let overlays = self.source_overlays();
+        Some(SymbolIndex::build(&module_path, &overlays))
     }
 }
 
@@ -321,105 +384,60 @@ fn diagnostic_from_error(err: KiroError) -> Diagnostic {
     )
 }
 
-fn general_completion_items(source: &str) -> Vec<CompletionItem> {
-    let mut labels = BTreeMap::new();
-    for keyword in KEYWORDS {
-        labels.insert(
-            (*keyword).to_string(),
-            (CompletionItemKind::KEYWORD, "keyword".to_string()),
-        );
-    }
-    if let Ok(program) = grammar::parse(source) {
-        collect_program_completion_labels(&program, &mut labels);
-    }
-    labels
+fn import_completion_items(path: &Path) -> Vec<CompletionItem> {
+    lsp_symbols::sibling_and_std_modules(path)
         .into_iter()
-        .map(|(label, (kind, detail))| completion_item(&label, kind, &detail))
+        .map(|module| completion_item(&module, CompletionItemKind::MODULE, "module"))
         .collect()
 }
 
-fn module_completion_items(path: &Path, source: &str, module: &str) -> Vec<CompletionItem> {
-    let mut overlays = SourceOverlays::new();
-    overlays.insert(path.to_path_buf(), source.to_string());
-    let Ok(result) = analysis::analyze_path_with_info(path, &overlays) else {
-        return Vec::new();
-    };
-    module_function_items(&result, module)
-}
-
-fn module_function_items(result: &AnalysisResult, module: &str) -> Vec<CompletionItem> {
+fn general_completion_items(index: &SymbolIndex, path: &Path) -> Vec<CompletionItem> {
     let mut items = Vec::new();
-    for ((module_name, function_name), info) in &result.module_functions {
-        if module_name == module {
-            items.push(completion_item(
-                function_name,
-                CompletionItemKind::FUNCTION,
-                &function_detail(info),
-            ));
-        }
+    for keyword in KEYWORDS {
+        items.push(completion_item(
+            keyword,
+            CompletionItemKind::KEYWORD,
+            "keyword",
+        ));
+    }
+    for decl in index.declarations_for_path(path) {
+        items.push(completion_item(
+            &decl.name,
+            completion_kind(&decl.kind),
+            &completion_detail(decl),
+        ));
     }
     items
 }
 
-fn collect_program_completion_labels(
-    program: &ast::Program,
-    labels: &mut BTreeMap<String, (CompletionItemKind, String)>,
-) {
-    for stmt in &program.statements {
-        match stmt {
-            ast::Statement::Import { module_name, .. } => {
-                labels.insert(
-                    module_name.clone(),
-                    (CompletionItemKind::MODULE, "module".to_string()),
-                );
-            }
-            ast::Statement::FunctionDef(def) => {
-                labels.insert(
-                    def.name.clone(),
-                    (CompletionItemKind::FUNCTION, "function".to_string()),
-                );
-            }
-            ast::Statement::RustFnDecl(def) => {
-                labels.insert(
-                    def.name.clone(),
-                    (CompletionItemKind::FUNCTION, "rust fn".to_string()),
-                );
-            }
-            ast::Statement::VarDecl { ident, .. } => {
-                labels.insert(
-                    ident.clone(),
-                    (CompletionItemKind::VARIABLE, "variable".to_string()),
-                );
-            }
-            ast::Statement::Documented { item, .. } => match item {
-                ast::AnnotatableItem::FunctionDef(def) => {
-                    labels.insert(
-                        def.name.clone(),
-                        (CompletionItemKind::FUNCTION, "function".to_string()),
-                    );
-                }
-                ast::AnnotatableItem::RustFnDecl(def) => {
-                    labels.insert(
-                        def.name.clone(),
-                        (CompletionItemKind::FUNCTION, "rust fn".to_string()),
-                    );
-                }
-                ast::AnnotatableItem::StructDef(def) => {
-                    labels.insert(
-                        def.name.value.clone(),
-                        (CompletionItemKind::STRUCT, "struct".to_string()),
-                    );
-                }
-            },
-            ast::Statement::StructDef(def) => {
-                labels.insert(
-                    def.name.value.clone(),
-                    (CompletionItemKind::STRUCT, "struct".to_string()),
-                );
-            }
-            _ => {}
-        }
+fn module_completion_items(index: &SymbolIndex, module: &str) -> Vec<CompletionItem> {
+    index
+        .module_functions(module)
+        .into_iter()
+        .map(|decl| {
+            completion_item(
+                &decl.name,
+                completion_kind(&decl.kind),
+                &completion_detail(decl),
+            )
+        })
+        .collect()
+}
+
+fn completion_kind(kind: &IndexedKind) -> CompletionItemKind {
+    match kind {
+        IndexedKind::Import => CompletionItemKind::MODULE,
+        IndexedKind::Function | IndexedKind::RustFunction => CompletionItemKind::FUNCTION,
+        IndexedKind::Struct => CompletionItemKind::STRUCT,
+        IndexedKind::Error => CompletionItemKind::ENUM_MEMBER,
+        IndexedKind::Var => CompletionItemKind::VARIABLE,
     }
+}
+
+fn completion_detail(decl: &SymbolDecl) -> String {
+    decl.signature
+        .clone()
+        .unwrap_or_else(|| decl.detail.clone())
 }
 
 fn completion_item(label: &str, kind: CompletionItemKind, detail: &str) -> CompletionItem {
@@ -431,94 +449,36 @@ fn completion_item(label: &str, kind: CompletionItemKind, detail: &str) -> Compl
     }
 }
 
-fn function_detail(info: &FunctionInfo) -> String {
-    let purity = if info.is_pure { "pure fn" } else { "fn" };
-    let failable = if info.can_error { "!" } else { "" };
-    format!("{} -> {:?}{}", purity, info.return_type, failable)
-}
-
-fn document_symbols_from_program(program: &ast::Program, source: &str) -> Vec<DocumentSymbol> {
-    let mut symbols = Vec::new();
-    for stmt in &program.statements {
-        match stmt {
-            ast::Statement::Import { module_name, .. } => {
-                symbols.push(symbol(module_name, "import", SymbolKind::MODULE, source));
-            }
-            ast::Statement::FunctionDef(def) => {
-                let detail = if def.pure_kw.is_some() {
-                    "pure fn"
-                } else {
-                    "fn"
-                };
-                symbols.push(symbol(&def.name, detail, SymbolKind::FUNCTION, source));
-            }
-            ast::Statement::RustFnDecl(def) => {
-                symbols.push(symbol(&def.name, "rust fn", SymbolKind::FUNCTION, source));
-            }
-            ast::Statement::StructDef(def) => {
-                symbols.push(symbol(
-                    &def.name.value,
-                    "struct",
-                    SymbolKind::STRUCT,
-                    source,
-                ));
-            }
-            ast::Statement::ErrorDef { name, .. } => {
-                symbols.push(symbol(name, "error", SymbolKind::ENUM_MEMBER, source));
-            }
-            ast::Statement::Documented { item, .. } => match item {
-                ast::AnnotatableItem::FunctionDef(def) => {
-                    symbols.push(symbol(&def.name, "fn", SymbolKind::FUNCTION, source));
-                }
-                ast::AnnotatableItem::RustFnDecl(def) => {
-                    symbols.push(symbol(&def.name, "rust fn", SymbolKind::FUNCTION, source));
-                }
-                ast::AnnotatableItem::StructDef(def) => {
-                    symbols.push(symbol(
-                        &def.name.value,
-                        "struct",
-                        SymbolKind::STRUCT,
-                        source,
-                    ));
-                }
-            },
-            _ => {}
-        }
-    }
-    symbols
+fn document_symbols_from_index(index: &SymbolIndex, path: &Path) -> Vec<DocumentSymbol> {
+    index
+        .declarations_for_path(path)
+        .into_iter()
+        .map(symbol_from_decl)
+        .collect()
 }
 
 #[allow(deprecated)]
-fn symbol(name: &str, detail: &str, kind: SymbolKind, source: &str) -> DocumentSymbol {
-    let range = range_for_token(source, name);
+fn symbol_from_decl(decl: &SymbolDecl) -> DocumentSymbol {
     DocumentSymbol {
-        name: name.to_string(),
-        detail: Some(detail.to_string()),
-        kind,
+        name: decl.name.clone(),
+        detail: Some(completion_detail(decl)),
+        kind: symbol_kind(&decl.kind),
         tags: None,
         deprecated: None,
-        range,
-        selection_range: range,
+        range: decl.range,
+        selection_range: decl.selection_range,
         children: None,
     }
 }
 
-fn range_for_token(source: &str, token: &str) -> Range {
-    for (line_idx, line) in source.lines().enumerate() {
-        if let Some(col) = line.find(token) {
-            return Range {
-                start: Position {
-                    line: line_idx as u32,
-                    character: col as u32,
-                },
-                end: Position {
-                    line: line_idx as u32,
-                    character: (col + token.len()).max(col + 1) as u32,
-                },
-            };
-        }
+fn symbol_kind(kind: &IndexedKind) -> SymbolKind {
+    match kind {
+        IndexedKind::Import => SymbolKind::MODULE,
+        IndexedKind::Function | IndexedKind::RustFunction => SymbolKind::FUNCTION,
+        IndexedKind::Struct => SymbolKind::STRUCT,
+        IndexedKind::Error => SymbolKind::ENUM_MEMBER,
+        IndexedKind::Var => SymbolKind::VARIABLE,
     }
-    Range::default()
 }
 
 fn full_range(source: &str) -> Range {
@@ -527,49 +487,6 @@ fn full_range(source: &str) -> Range {
         start: Position::new(0, 0),
         end: Position::new(line_count.saturating_add(1), 0),
     }
-}
-
-fn word_at(source: &str, position: Position) -> Option<String> {
-    let line = source.lines().nth(position.line as usize)?;
-    let char_idx = position.character as usize;
-    let bytes = line.as_bytes();
-    if bytes.is_empty() {
-        return None;
-    }
-    let mut idx = char_idx.min(bytes.len().saturating_sub(1));
-    if !is_word_byte(bytes[idx]) && idx > 0 {
-        idx -= 1;
-    }
-    if !is_word_byte(bytes[idx]) {
-        return None;
-    }
-    let mut start = idx;
-    while start > 0 && is_word_byte(bytes[start - 1]) {
-        start -= 1;
-    }
-    let mut end = idx + 1;
-    while end < bytes.len() && is_word_byte(bytes[end]) {
-        end += 1;
-    }
-    Some(line[start..end].to_string())
-}
-
-fn module_prefix_at(source: &str, position: Position) -> Option<String> {
-    let line = source.lines().nth(position.line as usize)?;
-    let prefix = line.get(..(position.character as usize).min(line.len()))?;
-    let before_dot = prefix.strip_suffix('.')?;
-    let module = before_dot
-        .rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-        .next()?;
-    if module.is_empty() {
-        None
-    } else {
-        Some(module.to_string())
-    }
-}
-
-fn is_word_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 fn hover_doc(word: &str) -> Option<&'static str> {

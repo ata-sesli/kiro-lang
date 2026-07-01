@@ -118,9 +118,11 @@ fn initialize(stdin: &mut ChildStdin, stdout: &mut BufReader<ChildStdout>, root:
     let response = read_response(stdout, 1);
     let capabilities = &response["result"]["capabilities"];
     assert_eq!(capabilities["documentFormattingProvider"], true);
+    assert_eq!(capabilities["definitionProvider"], true);
     assert!(capabilities.get("hoverProvider").is_some());
     assert!(capabilities.get("completionProvider").is_some());
     assert!(capabilities.get("documentSymbolProvider").is_some());
+    assert!(capabilities.get("signatureHelpProvider").is_some());
 
     send_lsp(
         stdin,
@@ -542,6 +544,407 @@ pure fn add(a: num, b: num) -> num {
         names.contains(&"worker"),
         "function symbol missing: {:?}",
         names
+    );
+
+    shutdown(child, &mut stdin, &mut stdout);
+}
+
+#[test]
+fn lsp_symbol_intelligence_handles_definition_hover_signature_and_symbols() {
+    let dir = temp_project("symbol_intelligence");
+    let main = dir.join("main.kiro");
+    let math = dir.join("math.kiro");
+    fs::write(
+        &main,
+        r#"import math
+
+/// Does work.
+fn worker(value: num) -> num {
+    return math.add(value, 1)
+}
+
+struct User { name: str age: num }
+error NotFound = "missing"
+rust fn host_read(path: str) -> str!
+
+var total = math.add(1, 2)
+
+worker(total)
+math.add(1, 2)
+"#,
+    )
+    .expect("main file should be written");
+    fs::write(
+        &math,
+        r#"pure fn seed() -> num { return 0 }
+
+/// Adds numbers.
+pure fn add(a: num, b: num) -> num {
+    return a + b
+}
+"#,
+    )
+    .expect("math file should be written");
+    fs::write(
+        dir.join("main.rs"),
+        r#"pub async fn host_read(_args: Vec<kiro_runtime::RuntimeVal>) -> kiro_runtime::HostResult {
+    Ok("ok".into())
+}
+"#,
+    )
+    .expect("host glue should be written");
+
+    let main_uri = file_uri(&main);
+    let math_uri = file_uri(&math);
+    let (child, mut stdin, mut stdout) = start_lsp(&dir);
+    initialize(&mut stdin, &mut stdout, &dir);
+    let source = fs::read_to_string(&main).expect("main source should read");
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": main_uri,
+                    "languageId": "kiro",
+                    "version": 1,
+                    "text": source
+                }
+            }
+        }),
+    );
+
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 20,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": { "uri": main_uri },
+                "position": { "line": 13, "character": 1 }
+            }
+        }),
+    );
+    let definition = read_response(&mut stdout, 20);
+    assert_eq!(definition["result"]["uri"], main_uri);
+    assert_eq!(definition["result"]["range"]["start"]["line"], 3);
+
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": { "uri": main_uri },
+                "position": { "line": 14, "character": 6 }
+            }
+        }),
+    );
+    let definition = read_response(&mut stdout, 21);
+    assert_eq!(definition["result"]["uri"], math_uri);
+    assert_eq!(definition["result"]["range"]["start"]["line"], 3);
+
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 25,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": { "uri": main_uri },
+                "position": { "line": 14, "character": 1 }
+            }
+        }),
+    );
+    let definition = read_response(&mut stdout, 25);
+    assert_eq!(definition["result"]["uri"], math_uri);
+    assert_eq!(definition["result"]["range"]["start"]["line"], 0);
+
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 22,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": main_uri },
+                "position": { "line": 13, "character": 1 }
+            }
+        }),
+    );
+    let hover = read_response(&mut stdout, 22);
+    let hover_text = hover["result"]["contents"].to_string();
+    assert!(
+        hover_text.contains("fn worker(value: num) -> num"),
+        "hover should include Kiro signature: {}",
+        hover
+    );
+    assert!(
+        hover_text.contains("Does work."),
+        "hover should include doc comment: {}",
+        hover
+    );
+
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 23,
+            "method": "textDocument/signatureHelp",
+            "params": {
+                "textDocument": { "uri": main_uri },
+                "position": { "line": 14, "character": 12 }
+            }
+        }),
+    );
+    let signature = read_response(&mut stdout, 23);
+    assert_eq!(
+        signature["result"]["signatures"][0]["label"],
+        "pure fn add(a: num, b: num) -> num"
+    );
+    assert_eq!(signature["result"]["activeParameter"], 1);
+
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 24,
+            "method": "textDocument/documentSymbol",
+            "params": {
+                "textDocument": { "uri": main_uri }
+            }
+        }),
+    );
+    let symbols = read_response(&mut stdout, 24);
+    let items = symbols["result"]
+        .as_array()
+        .expect("symbols should be array");
+    let names = items
+        .iter()
+        .filter_map(|item| item["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        names.contains(&"math"),
+        "import symbol missing: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"worker"),
+        "function symbol missing: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"User"),
+        "struct symbol missing: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"NotFound"),
+        "error symbol missing: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"host_read"),
+        "rust fn symbol missing: {:?}",
+        names
+    );
+    assert!(names.contains(&"total"), "var symbol missing: {:?}", names);
+    let worker = items
+        .iter()
+        .find(|item| item["name"] == "worker")
+        .expect("worker symbol should exist");
+    assert_eq!(worker["range"]["start"]["line"], 3);
+
+    shutdown(child, &mut stdin, &mut stdout);
+}
+
+#[test]
+fn lsp_context_completion_handles_imports_modules_and_invalid_source() {
+    let dir = temp_project("context_completion");
+    let main = dir.join("main.kiro");
+    fs::write(&main, "import math\nmath.\n").expect("main file should be written");
+    fs::write(
+        dir.join("math.kiro"),
+        "pure fn add(a: num, b: num) -> num { return a + b }\n",
+    )
+    .expect("math file should be written");
+
+    let uri = file_uri(&main);
+    let (child, mut stdin, mut stdout) = start_lsp(&dir);
+    initialize(&mut stdin, &mut stdout, &dir);
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kiro",
+                    "version": 1,
+                    "text": "import math\nmath.\n"
+                }
+            }
+        }),
+    );
+
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 30,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 1, "character": 5 }
+            }
+        }),
+    );
+    let completion = read_response(&mut stdout, 30);
+    let labels = completion["result"]
+        .as_array()
+        .expect("module completion should be array")
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        labels.contains(&"add"),
+        "module completion missing add: {:?}",
+        labels
+    );
+    assert!(
+        !labels.contains(&"fn"),
+        "module completion should not include keywords: {:?}",
+        labels
+    );
+
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": 2 },
+                "contentChanges": [{ "text": "import \nfn helper() -> num {\n    return 1\n}\nfn broken() {\n" }]
+            }
+        }),
+    );
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 31,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 0, "character": 7 }
+            }
+        }),
+    );
+    let completion = read_response(&mut stdout, 31);
+    let labels = completion["result"]
+        .as_array()
+        .expect("import completion should be array")
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        labels.contains(&"math"),
+        "sibling module missing: {:?}",
+        labels
+    );
+    assert!(
+        labels.contains(&"std_fs"),
+        "std module missing: {:?}",
+        labels
+    );
+
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 32,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 1, "character": 0 }
+            }
+        }),
+    );
+    let completion = read_response(&mut stdout, 32);
+    let labels = completion["result"]
+        .as_array()
+        .expect("fallback completion should be array")
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        labels.contains(&"fn"),
+        "invalid source should still offer keywords: {:?}",
+        labels
+    );
+    assert!(
+        labels.contains(&"helper"),
+        "invalid source should still offer local parse-only symbols: {:?}",
+        labels
+    );
+
+    shutdown(child, &mut stdin, &mut stdout);
+}
+
+#[test]
+fn lsp_definition_does_not_return_fake_file_uri_for_embedded_std_modules() {
+    let dir = temp_project("std_definition");
+    let main = dir.join("main.kiro");
+    fs::write(
+        &main,
+        r#"import std_fs
+
+std_fs.exists("missing.txt")
+"#,
+    )
+    .expect("main file should be written");
+
+    let uri = file_uri(&main);
+    let (child, mut stdin, mut stdout) = start_lsp(&dir);
+    initialize(&mut stdin, &mut stdout, &dir);
+    let source = fs::read_to_string(&main).expect("main source should read");
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kiro",
+                    "version": 1,
+                    "text": source
+                }
+            }
+        }),
+    );
+
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 40,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 2, "character": 9 }
+            }
+        }),
+    );
+    let definition = read_response(&mut stdout, 40);
+    assert!(
+        definition["result"].is_null(),
+        "embedded std definition should not point at a fake file: {}",
+        definition
     );
 
     shutdown(child, &mut stdin, &mut stdout);

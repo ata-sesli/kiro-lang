@@ -8,7 +8,6 @@ use super::{Compiler, FunctionInfo};
 struct SourceLocation {
     line: usize,
     column: usize,
-    source_line: String,
 }
 
 struct SourceIndex {
@@ -41,11 +40,9 @@ impl SourceIndex {
         for (idx, line) in self.source.split_inclusive('\n').enumerate() {
             let line_end = line_start + line.len();
             if offset < line_end {
-                let source_line = line.trim_end_matches('\n').to_string();
                 return Some(SourceLocation {
                     line: idx + 1,
                     column: offset.saturating_sub(line_start) + 1,
-                    source_line,
                 });
             }
             line_start = line_end;
@@ -60,11 +57,12 @@ impl SourceIndex {
             self.locate(token)
         };
         if let Some(loc) = located {
-            err.with_source_location(
+            err.with_source_span(
                 self.file.clone(),
+                self.source.clone(),
                 loc.line,
                 loc.column,
-                loc.source_line,
+                token.len().max(1),
                 label,
             )
         } else {

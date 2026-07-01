@@ -322,7 +322,7 @@ print coutn
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "unknown variable should fail");
     assert!(
-        stderr.contains("--> main.kiro:3:7"),
+        stderr.contains("main.kiro:3:7"),
         "diagnostic should include file, line, and column:\n{}",
         stderr
     );
@@ -332,7 +332,7 @@ print coutn
         stderr
     );
     assert!(
-        stderr.contains("|       ^^^^^ unknown variable"),
+        stderr.contains("unknown variable"),
         "diagnostic should label the unknown variable:\n{}",
         stderr
     );
@@ -599,7 +599,7 @@ print math.raed(1)
         "unknown imported function should fail"
     );
     assert!(
-        stderr.contains("--> main.kiro:4:7"),
+        stderr.contains("main.kiro:4:7"),
         "diagnostic should include call-site location:\n{}",
         stderr
     );
@@ -1026,7 +1026,7 @@ rust fn read_file(path: str) -> str!
         stderr
     );
     assert!(
-        stderr.contains("--> main.kiro:2:1"),
+        stderr.contains("main.kiro:2:1"),
         "diagnostic should point at rust fn declaration:\n{}",
         stderr
     );
