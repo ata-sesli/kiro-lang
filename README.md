@@ -4,7 +4,7 @@
 
 # 🌀 Kiro Language
 
-**Kiro** is a modern, experimental programming language designed to explore the intersection of high-level expressivity and low-level performance concepts. It features a dual-execution model (Interpreter + Transpiler to Rust) and introduces unique syntax for flow control and concurrency.
+**Kiro** is a modern, experimental programming language designed to explore the intersection of high-level expressivity and low-level performance concepts. It uses a static analyzer, transpiles valid Kiro to Rust for normal execution, and keeps a direct interpreter for explicit runtime experiments and embedding.
 
 ## 🚀 Key Features
 
@@ -38,10 +38,10 @@ cp target/release/kiro-lang /usr/local/bin/kiro # example
 
 ### Usage
 
-Kiro is designed for a fast feedback loop. By default, it runs your code through the interpreter for immediate validation, then compiles and executes it via Rust for production performance.
+Kiro is designed for a fast feedback loop. By default, it analyzes your source, compiles it to Rust, and executes the generated binary. The interpreter is available when you explicitly ask for direct execution.
 
 ```bash
-# Full Pipeline: Interpret -> Compile -> Execute
+# Full Pipeline: Analyze -> Compile -> Execute
 kiro main.kiro
 
 # Inside a project with kiro.toml, use the manifest entry
@@ -50,8 +50,14 @@ kiro run
 kiro build
 kiro check
 
-# Fast Validation: Interpret ONLY
+# Static validation: Parse + semantic analysis, no Rust build, no execution
 kiro check main.kiro
+
+# Direct interpreter execution: Analyze -> Interpret
+kiro interpret main.kiro
+
+# Start the editor language server over stdio
+kiro lsp
 
 # Production Build: Compile ONLY
 kiro build main.kiro
@@ -66,14 +72,15 @@ kiro fmt --check
 kiro test
 kiro test tests/
 
-# Skip interpreter validation (e.g. for CI or heavy host modules usage)
-kiro main.kiro --no-interpret
-
 # Show compiler logs
 kiro main.kiro --verbose
 ```
 
-Kiro reports common language errors before Rust codegen when possible: wrong argument counts, unknown names, pure-function violations, immutable mutation, bad imported calls, bad pipe/list/map use, and failed `check` guards.
+Kiro reports common language errors before Rust codegen when possible: wrong argument counts, unknown names, pure-function violations, immutable mutation, bad imported calls, bad pipe/list/map use, and failed `check` guards. `kiro check` uses the same static analysis layer as `kiro lsp`; it does not run the interpreter or generated Rust.
+
+### Editor Support
+
+`kiro lsp` starts Kiro's lightweight language server over standard input/output. V1 validates on save, formats through the official formatter, and provides hover docs, basic completions, and document symbols. Editor extensions should launch `kiro lsp` instead of reimplementing Kiro language rules.
 
 Single-file scripts do not need a manifest. For project commands without an explicit file, Kiro walks upward to the nearest `kiro.toml` and uses `[package].entry`.
 
@@ -432,6 +439,7 @@ The logic lives in an adjacent Rust glue file. A user module `mylib.kiro` uses `
 - **Glue implementation**: Use the `kiro_runtime` crate to convert types between Kiro and Rust.
 - **ABI v1**: Host functions are async and return `kiro_runtime::HostResult`.
 - **Missing Glue**: If a module declares `rust fn` but the matching `.rs` file is absent, Kiro reports a compile diagnostic before Rust build.
+- **Generated dependencies**: Kiro only adds runtime dependencies required by Kiro source (`std_*` imports and pipes). User glue should not assume crates such as `reqwest` or Tokio feature modules are available unless the build system explicitly includes them.
 
 ```rust
 // Example Glue Implementation
@@ -441,7 +449,7 @@ pub async fn read_file(args: Vec<RuntimeVal>) -> HostResult {
     RuntimeVal::expect_arity(&args, 1, "read_file")?;
     let path = RuntimeVal::expect_arg(&args, 0, "read_file")?.as_str()?;
 
-    match tokio::fs::read_to_string(path).await {
+    match std::fs::read_to_string(path) {
         Ok(c) => Ok(RuntimeVal::from(c)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             Err(KiroError::message("NotFound", path.to_string()))
@@ -451,7 +459,7 @@ pub async fn read_file(args: Vec<RuntimeVal>) -> HostResult {
 }
 ```
 
-- **Interpreter Behavior**: The interpreter includes a **Simulator**. It does not execute Rust glue, but it validates the call (argument count/types) and returns a mock value (e.g., an empty string or `0.0`) so the script can proceed with logical validation without crashing.
+- **Interpreter Behavior**: `kiro interpret` uses the direct interpreter path. Its current host behavior is simulation-oriented: it does not execute Rust glue, but it can return mock values for host calls after the analyzer has accepted the source.
 - **Compiler parity**: Results from Rust are strictly type-checked and integrated into Kiro's error handling (`on/error`).
 - **Error Matching**: Kiro matches host errors by name (`NotFound`). Optional host error messages are kept for diagnostics.
 
@@ -459,23 +467,27 @@ pub async fn read_file(args: Vec<RuntimeVal>) -> HostResult {
 
 ## 🏗️ Architecture
 
-Kiro uses a **Double Pass** system:
+Kiro keeps validation, code generation, and direct execution separate:
 
-1.  **Interpreter (`src/interpreter/`)**:
-    - Walks the AST and maintains a runtime environment.
-    - **Simulator**: Provides mock responses for `rust fn` to enable validation without Rust compilation.
-    - Recursively loads and executes imported modules in isolation.
-2.  **Transpiler (`src/compiler/`)**:
-    - Converts Kiro to idiomatic **Rust**.
-    - **Recursive Build**: The transpiler identifies dependencies and compiles them as Rust modules (`pub mod {name}`).
+1.  **Analyzer (`src/analysis.rs` + compiler diagnostics)**:
+    - Parses modules, resolves imports, collects function metadata, and rejects invalid Kiro before runtime or Rust build.
+    - Powers `kiro check`, `kiro lsp`, `kiro run`, `kiro build`, and `kiro interpret`.
+2.  **Compiler (`src/compiler/`)**:
+    - Lowers already-valid Kiro to idiomatic **Rust**.
+    - **Recursive Build**: The compiler identifies dependencies and compiles them as Rust modules (`pub mod {name}`).
     - Hoists struct definitions and imports to ensure valid Rust output.
+3.  **Interpreter (`src/interpreter/`)**:
+    - Executes Kiro directly only when requested through `kiro interpret` or embedding APIs.
+    - Remains useful for learning, simulation, runtime parity tests, and a future REPL, but it is not the validity checker for compiled runs.
 
 ## 🛠️ Repository Structure
 
 - `src/grammar/`: Language rules and parser (Rust Sitter).
+- `src/analysis.rs`: Shared static validation for check, LSP, build, run, and interpret.
 - `src/interpreter/`: Recursive execution engine and value representations.
 - `src/compiler/`: Rust code generation logic.
 - `src/project.rs`: Kiro project discovery and manifest entry resolution.
+- `src/lsp.rs`: Lightweight Language Server Protocol implementation.
 - `src/kiro_std/`: Standard library source code (Embedded in binary).
 - `src/build_manager.rs`: Cargo project lifecycle management.
 - `main.kiro`: Entry point script.

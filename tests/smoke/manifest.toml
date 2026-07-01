@@ -1,7 +1,7 @@
 # Smoke tests for older .kiro feature samples.
 #
 # command:
-# - check: interpreter validation only
+# - check: static parser + semantic validation only
 # - build: transpile and build only
 # - run: full interpreter -> Rust build -> execute pipeline
 #
@@ -26,35 +26,35 @@ name = "assignment_keeps_source_usable"
 path = "pass/verify_assign.kiro"
 command = "check"
 expect = "pass"
-stdout_contains = ["b: Hello", "a: Hello"]
+stdout_contains = ["OK"]
 
 [[case]]
 name = "documented_items_parse"
 path = "pass/verify_docs.kiro"
 command = "check"
 expect = "pass"
-stdout_contains = ["30", "Docs parsed successfully!"]
+stdout_contains = ["OK"]
 
 [[case]]
 name = "error_handling"
 path = "pass/verify_error.kiro"
 command = "check"
 expect = "pass"
-stdout_contains = ["NotFound handled!", "NotFound propagated successfully!"]
+stdout_contains = ["OK"]
 
 [[case]]
 name = "generic_builtin_types"
 path = "pass/verify_generics.kiro"
 command = "check"
 expect = "pass"
-stdout_contains = ["Pipe worked!", "Hello Generics"]
+stdout_contains = ["OK"]
 
 [[case]]
 name = "move_basic"
 path = "pass/verify_move.kiro"
 command = "check"
 expect = "pass"
-stdout_contains = ["b: Hello"]
+stdout_contains = ["OK"]
 
 [[case]]
 name = "multi_error_matching"
@@ -68,49 +68,49 @@ name = "pure_functions"
 path = "pass/verify_pure.kiro"
 command = "check"
 expect = "pass"
-stdout_contains = ["--- Pure Verification ---", "--- Passed ---"]
+stdout_contains = ["OK"]
 
 [[case]]
 name = "pure_strict_valid"
 path = "pass/verify_pure_strict.kiro"
 command = "check"
 expect = "pass"
-stdout_contains = ["--- Strict Pure Verification ---", "--- Passed ---"]
+stdout_contains = ["OK"]
 
 [[case]]
 name = "pure_sync_calls"
 path = "pass/verify_pure_sync.kiro"
 command = "check"
 expect = "pass"
-stdout_contains = ["Start", "30", "Done"]
+stdout_contains = ["OK"]
 
 [[case]]
 name = "rust_fn_declaration"
 path = "pass/verify_rust_fn.kiro"
 command = "check"
 expect = "pass"
-stdout_contains = ["rust fn declaration parsed successfully"]
+stdout_contains = ["OK"]
 
 [[case]]
 name = "comparison_and_range_types"
 path = "pass/verify_types.kiro"
 command = "check"
 expect = "pass"
-stdout_contains = ["Control flow via Bool: OK", "--- Verification Complete ---"]
+stdout_contains = ["OK"]
 
 [[case]]
 name = "void_and_address"
 path = "pass/verify_void.kiro"
 command = "check"
 expect = "pass"
-stdout_contains = ["Now I exist", "Doing nothing"]
+stdout_contains = ["OK"]
 
 [[case]]
 name = "std_env"
 path = "pass/std/verify_std_env.kiro"
 command = "check"
 expect = "pass"
-stdout_contains = ["=== std_env tests complete ==="]
+stdout_contains = ["OK"]
 
 [[case]]
 name = "std_fs"
@@ -124,7 +124,7 @@ name = "std_time"
 path = "pass/std/verify_std_time.kiro"
 command = "check"
 expect = "pass"
-stdout_contains = ["=== std_time tests complete ==="]
+stdout_contains = ["OK"]
 
 [[case]]
 name = "move_use_after_move_fails"
@@ -159,4 +159,4 @@ name = "rust_fn_interpreter_call_is_simulated"
 path = "pass/verify_rust_fn_call_simulated.kiro"
 command = "check"
 expect = "pass"
-stdout_contains = ["Testing interpreter simulation of rust fn calls", "Simulator call completed"]
+stdout_contains = ["OK"]

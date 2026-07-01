@@ -77,7 +77,7 @@ fn no_file_run_uses_manifest_entry() {
     write_manifest(&dir, "main.kiro");
     fs::write(dir.join("main.kiro"), "print \"manifest run\"\n").expect("entry should be written");
 
-    let output = run_kiro(&["run", "--no-interpret"], &dir);
+    let output = run_kiro(&["run"], &dir);
 
     assert!(
         output.status.success(),
@@ -116,8 +116,8 @@ fn no_file_build_and_check_use_manifest_entry() {
         String::from_utf8_lossy(&check.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&check.stdout).contains("manifest command"),
-        "check should interpret manifest entry:\n{}",
+        String::from_utf8_lossy(&check.stdout).contains("OK"),
+        "check should statically validate manifest entry:\n{}",
         String::from_utf8_lossy(&check.stdout)
     );
 }
@@ -131,7 +131,7 @@ fn bare_kiro_uses_manifest_entry_from_subdirectory() {
     write_manifest(&dir, "main.kiro");
     fs::write(dir.join("main.kiro"), "print \"walked up\"\n").expect("entry should be written");
 
-    let output = run_kiro(&["--no-interpret"], &nested);
+    let output = run_kiro(&[], &nested);
 
     assert!(
         output.status.success(),
@@ -155,7 +155,7 @@ fn explicit_file_overrides_manifest_entry() {
     fs::write(dir.join("other.kiro"), "print \"explicit\"\n")
         .expect("other file should be written");
 
-    let output = run_kiro(&["run", "other.kiro", "--no-interpret"], &dir);
+    let output = run_kiro(&["run", "other.kiro"], &dir);
 
     assert!(
         output.status.success(),
@@ -261,7 +261,7 @@ pure fn add(a: num, b: num) -> num {
     )
     .expect("module should be written");
 
-    let output = run_kiro(&["run", "--no-interpret"], &dir);
+    let output = run_kiro(&["run"], &dir);
 
     assert!(
         output.status.success(),

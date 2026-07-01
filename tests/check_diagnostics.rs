@@ -149,7 +149,7 @@ main()
     .expect("main module should be written");
 
     let output = run_kiro(
-        &["run", main_path.to_str().unwrap(), "--no-interpret"],
+        &["run", main_path.to_str().unwrap()],
         &PathBuf::from(env!("CARGO_MANIFEST_DIR")),
     );
 
@@ -837,7 +837,7 @@ print take p
     .expect("main module should be written");
 
     let output = run_kiro(
-        &["run", main_path.to_str().unwrap(), "--no-interpret"],
+        &["run", main_path.to_str().unwrap()],
         &PathBuf::from(env!("CARGO_MANIFEST_DIR")),
     );
 
@@ -865,7 +865,7 @@ give p 1
     .expect("main module should be written");
 
     let output = run_kiro(
-        &["run", main_path.to_str().unwrap(), "--no-interpret"],
+        &["run", main_path.to_str().unwrap()],
         &PathBuf::from(env!("CARGO_MANIFEST_DIR")),
     );
 
@@ -892,7 +892,7 @@ print xs at 5
     .expect("main module should be written");
 
     let output = run_kiro(
-        &["run", main_path.to_str().unwrap(), "--no-interpret"],
+        &["run", main_path.to_str().unwrap()],
         &PathBuf::from(env!("CARGO_MANIFEST_DIR")),
     );
 
@@ -919,7 +919,7 @@ print users at "user_id"
     .expect("main module should be written");
 
     let output = run_kiro(
-        &["run", main_path.to_str().unwrap(), "--no-interpret"],
+        &["run", main_path.to_str().unwrap()],
         &PathBuf::from(env!("CARGO_MANIFEST_DIR")),
     );
 
@@ -946,7 +946,7 @@ print deref p
     .expect("main module should be written");
 
     let output = run_kiro(
-        &["run", main_path.to_str().unwrap(), "--no-interpret"],
+        &["run", main_path.to_str().unwrap()],
         &PathBuf::from(env!("CARGO_MANIFEST_DIR")),
     );
 
@@ -988,7 +988,7 @@ pub async fn fail(_args: Vec<kiro_runtime::RuntimeVal>) -> kiro_runtime::HostRes
     .expect("host glue should be written");
 
     let output = run_kiro(
-        &["run", main_path.to_str().unwrap(), "--no-interpret"],
+        &["run", main_path.to_str().unwrap()],
         &PathBuf::from(env!("CARGO_MANIFEST_DIR")),
     );
 
@@ -1079,7 +1079,7 @@ pub async fn read_file(_args: Vec<kiro_runtime::RuntimeVal>) -> kiro_runtime::Ho
     .expect("host glue should be written");
 
     let output = run_kiro(
-        &["run", main_path.to_str().unwrap(), "--no-interpret"],
+        &["run", main_path.to_str().unwrap()],
         &PathBuf::from(env!("CARGO_MANIFEST_DIR")),
     );
 

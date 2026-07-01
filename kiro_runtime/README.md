@@ -112,6 +112,8 @@ Typical glue flow:
 
 This keeps glue explicit and type-checked.
 
+Generated Kiro builds only include dependencies required by Kiro source, such as imported standard modules and pipes. Host glue should use the Rust standard library where possible and should not rely on incidental crates being present.
+
 ```rust
 use kiro_runtime::{HostResult, KiroError, RuntimeVal};
 
@@ -119,7 +121,7 @@ pub async fn read_file(args: Vec<RuntimeVal>) -> HostResult {
     RuntimeVal::expect_arity(&args, 1, "read_file")?;
     let path = RuntimeVal::expect_arg(&args, 0, "read_file")?.as_str()?;
 
-    match tokio::fs::read_to_string(path).await {
+    match std::fs::read_to_string(path) {
         Ok(content) => Ok(RuntimeVal::from(content)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             Err(KiroError::message("NotFound", path.to_string()))

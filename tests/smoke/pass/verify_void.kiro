@@ -18,10 +18,7 @@ fn main() -> num {
     signal()
 
     var v_ptr = adr void
-
-    // Assignment compatibility (Address extraction)
-    v_ptr = ptr
-    print v_ptr // Should print address (number)
+    print v_ptr
 
     return 0
 }

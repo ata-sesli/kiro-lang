@@ -20,6 +20,11 @@ pub struct FunctionInfo {
     pub doc: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CompilerOptions {
+    pub uses_pipes: bool,
+}
+
 pub struct Compiler {
     pub known_vars: HashMap<String, VarInfo>,
     pub imported_modules: HashSet<String>,
@@ -31,6 +36,7 @@ pub struct Compiler {
     pub moved_vars: HashSet<String>,        // Track moved variables to prevent use-after-move
     pub fn_ref_vars: HashSet<String>,       // Vars holding pure function refs
     pub fn_returning_fn: HashSet<String>,   // Function names returning fn(...) -> ...
+    pub options: CompilerOptions,
 }
 
 const EFFECTFUL_RECURSION_MESSAGE: &str = "Recursive calls are only supported in pure fn. Effectful recursive functions are not supported yet; use a loop or split pure recursion from effects.";
@@ -238,6 +244,190 @@ fn collect_calls_from_expr(
     }
 }
 
+pub fn program_uses_pipes(program: &grammar::Program) -> bool {
+    program.statements.iter().any(statement_uses_pipes)
+}
+
+fn block_uses_pipes(block: &grammar::Block) -> bool {
+    block.statements.iter().any(statement_uses_pipes)
+}
+
+fn error_clauses_use_pipes(clauses: &grammar::ErrorClauseList) -> bool {
+    block_uses_pipes(&clauses.first.body)
+        || clauses
+            .rest
+            .as_deref()
+            .map(error_clauses_use_pipes)
+            .unwrap_or(false)
+}
+
+fn item_uses_pipes(item: &grammar::AnnotatableItem) -> bool {
+    match item {
+        grammar::AnnotatableItem::StructDef(def) => struct_uses_pipes(def),
+        grammar::AnnotatableItem::FunctionDef(def) => function_uses_pipes(def),
+        grammar::AnnotatableItem::RustFnDecl(def) => rust_fn_uses_pipes(def),
+    }
+}
+
+fn statement_uses_pipes(stmt: &grammar::Statement) -> bool {
+    match stmt {
+        grammar::Statement::StructDef(def) => struct_uses_pipes(def),
+        grammar::Statement::FunctionDef(def) => function_uses_pipes(def),
+        grammar::Statement::RustFnDecl(def) => rust_fn_uses_pipes(def),
+        grammar::Statement::VarDecl { value, .. } => expr_uses_pipes(value),
+        grammar::Statement::AssignStmt { lhs, rhs, .. } => {
+            expr_uses_pipes(lhs) || expr_uses_pipes(rhs)
+        }
+        grammar::Statement::On {
+            condition,
+            body,
+            else_clause,
+            error_clauses,
+            ..
+        } => {
+            expr_uses_pipes(condition)
+                || block_uses_pipes(body)
+                || else_clause
+                    .as_ref()
+                    .map(|clause| block_uses_pipes(&clause.body))
+                    .unwrap_or(false)
+                || error_clauses
+                    .as_ref()
+                    .map(error_clauses_use_pipes)
+                    .unwrap_or(false)
+        }
+        grammar::Statement::LoopOn {
+            condition, body, ..
+        } => expr_uses_pipes(condition) || block_uses_pipes(body),
+        grammar::Statement::LoopIter {
+            iterable,
+            step,
+            filter,
+            body,
+            else_clause,
+            ..
+        } => {
+            expr_uses_pipes(iterable)
+                || step
+                    .as_ref()
+                    .map(|step| expr_uses_pipes(&step.value))
+                    .unwrap_or(false)
+                || filter
+                    .as_ref()
+                    .map(|filter| expr_uses_pipes(&filter.condition))
+                    .unwrap_or(false)
+                || block_uses_pipes(body)
+                || else_clause
+                    .as_ref()
+                    .map(|clause| block_uses_pipes(&clause.body))
+                    .unwrap_or(false)
+        }
+        grammar::Statement::Give(_, _, _) | grammar::Statement::Close(_, _) => true,
+        grammar::Statement::Return(_, expr) => expr.as_ref().map(expr_uses_pipes).unwrap_or(false),
+        grammar::Statement::Check(_, condition, _) => expr_uses_pipes(condition),
+        grammar::Statement::ExprStmt(expr) | grammar::Statement::Print(_, expr) => {
+            expr_uses_pipes(expr)
+        }
+        grammar::Statement::Documented { item, .. } => item_uses_pipes(item),
+        grammar::Statement::ErrorDef { .. }
+        | grammar::Statement::Break(_)
+        | grammar::Statement::Continue(_)
+        | grammar::Statement::Rest(_)
+        | grammar::Statement::Import { .. } => false,
+    }
+}
+
+fn struct_uses_pipes(def: &grammar::StructDef) -> bool {
+    def.fields
+        .iter()
+        .any(|field| type_uses_pipes(&field.field_type))
+}
+
+fn function_uses_pipes(def: &grammar::FunctionDef) -> bool {
+    def.params
+        .iter()
+        .any(|param| type_uses_pipes(&param.command_type))
+        || def
+            .return_type
+            .as_ref()
+            .map(type_uses_pipes)
+            .unwrap_or(false)
+        || block_uses_pipes(&def.body)
+}
+
+fn rust_fn_uses_pipes(def: &grammar::RustFnDecl) -> bool {
+    def.params
+        .iter()
+        .any(|param| type_uses_pipes(&param.command_type))
+        || type_uses_pipes(&def.return_type)
+}
+
+fn expr_uses_pipes(expr: &grammar::Expression) -> bool {
+    match expr {
+        grammar::Expression::PipeInit(_, _, _) | grammar::Expression::Take(_, _) => true,
+        grammar::Expression::AdrInit(_, inner) => type_uses_pipes(inner),
+        grammar::Expression::ListInit(_, inner, _, items, _) => {
+            type_uses_pipes(inner) || items.iter().any(expr_uses_pipes)
+        }
+        grammar::Expression::MapInit(_, key, value, _, pairs, _) => {
+            type_uses_pipes(key)
+                || type_uses_pipes(value)
+                || pairs
+                    .iter()
+                    .any(|pair| expr_uses_pipes(&pair.key) || expr_uses_pipes(&pair.value))
+        }
+        grammar::Expression::StructInit(_, _, fields, _) => {
+            fields.iter().any(|field| expr_uses_pipes(&field.value))
+        }
+        grammar::Expression::FieldAccess(target, _, _)
+        | grammar::Expression::Ref(_, target)
+        | grammar::Expression::Deref(_, target)
+        | grammar::Expression::Len(_, target)
+        | grammar::Expression::RunCall(_, target) => expr_uses_pipes(target),
+        grammar::Expression::At(target, _, index) | grammar::Expression::Push(target, _, index) => {
+            expr_uses_pipes(target) || expr_uses_pipes(index)
+        }
+        grammar::Expression::Call(func, _, args, _) => {
+            expr_uses_pipes(func) || args.iter().any(expr_uses_pipes)
+        }
+        grammar::Expression::Add(lhs, _, rhs)
+        | grammar::Expression::Sub(lhs, _, rhs)
+        | grammar::Expression::Mul(lhs, _, rhs)
+        | grammar::Expression::Div(lhs, _, rhs)
+        | grammar::Expression::Eq(lhs, _, rhs)
+        | grammar::Expression::Neq(lhs, _, rhs)
+        | grammar::Expression::Gt(lhs, _, rhs)
+        | grammar::Expression::Lt(lhs, _, rhs)
+        | grammar::Expression::Geq(lhs, _, rhs)
+        | grammar::Expression::Leq(lhs, _, rhs)
+        | grammar::Expression::Range(lhs, _, rhs) => expr_uses_pipes(lhs) || expr_uses_pipes(rhs),
+        grammar::Expression::Number(_)
+        | grammar::Expression::StringLit(_)
+        | grammar::Expression::BoolLit(_)
+        | grammar::Expression::Variable(_)
+        | grammar::Expression::MoveExpr(_, _)
+        | grammar::Expression::ErrorRef(_) => false,
+    }
+}
+
+fn type_uses_pipes(ty: &grammar::KiroType) -> bool {
+    match ty {
+        grammar::KiroType::Pipe(_, _) => true,
+        grammar::KiroType::Adr(_, inner) | grammar::KiroType::List(_, inner) => {
+            type_uses_pipes(inner)
+        }
+        grammar::KiroType::Map(_, key, value) => type_uses_pipes(key) || type_uses_pipes(value),
+        grammar::KiroType::FnType(_, _, params, _, _, ret) => {
+            params.iter().any(type_uses_pipes) || type_uses_pipes(ret)
+        }
+        grammar::KiroType::Num
+        | grammar::KiroType::Str
+        | grammar::KiroType::Bool
+        | grammar::KiroType::Void
+        | grammar::KiroType::Custom(_) => false,
+    }
+}
+
 impl Compiler {
     pub fn new() -> Self {
         Self {
@@ -251,6 +441,7 @@ impl Compiler {
             moved_vars: HashSet::new(),
             fn_ref_vars: HashSet::new(),
             fn_returning_fn: HashSet::new(),
+            options: CompilerOptions::default(),
         }
     }
 
@@ -259,6 +450,15 @@ impl Compiler {
     ) -> Self {
         let mut compiler = Self::new();
         compiler.module_functions = module_functions;
+        compiler
+    }
+
+    pub fn with_options(
+        module_functions: HashMap<(String, String), FunctionInfo>,
+        options: CompilerOptions,
+    ) -> Self {
+        let mut compiler = Self::with_module_functions(module_functions);
+        compiler.options = options;
         compiler
     }
 
@@ -454,23 +654,31 @@ impl Compiler {
     }
 
     pub fn compile(&mut self, program: grammar::Program, is_main: bool) -> String {
+        let emits_pipes = self.options.uses_pipes || program_uses_pipes(&program);
         let mut output = String::new();
         output.push_str("#![allow(unused)]\n");
-        output.push_str("use async_channel;\n");
+        if emits_pipes {
+            output.push_str("use async_channel;\n");
+        }
 
         if is_main {
             // Import header module for rust fn glue
             output.push_str("mod header;\n");
             // ONLY DEFINED IN MAIN (Shared Runtime)
             // We make everything 'pub' so submodules can use them via 'use crate::*;'
-            output.push_str(
-                r#"
+            if emits_pipes {
+                output.push_str(
+                    r#"
                 #[derive(Clone, Debug)]
                 pub struct KiroPipe<T> {
                     pub tx: async_channel::Sender<T>,
                     pub rx: async_channel::Receiver<T>,
                 }
-
+                "#,
+                );
+            }
+            output.push_str(
+                r#"
                 // --- KIRO RESULT (Cloneable Error) ---
                 pub type KiroResult<T> = Result<T, std::sync::Arc<anyhow::Error>>;
 
@@ -698,11 +906,6 @@ impl Compiler {
                     }
                 }
 
-                // Pipes are identity-based runtime channels; compare as non-equal by default.
-                impl<T> KiroEq for KiroPipe<T> {
-                    fn kiro_eq(&self, _other: &Self) -> bool { false }
-                }
-
                 // Result (Error Equality)
                 // We compare Errors by their Debug string representation for now, as anyhow::Error doesn't impl Eq
                 impl<T: KiroEq> KiroEq for KiroResult<T> {
@@ -722,6 +925,16 @@ impl Compiler {
                 impl<T, E> KiroTruthy for Result<T, E> { fn kiro_truthy(&self) -> bool { self.is_ok() } }
                 "#,
             );
+            if emits_pipes {
+                output.push_str(
+                    r#"
+                // Pipes are identity-based runtime channels; compare as non-equal by default.
+                impl<T> KiroEq for KiroPipe<T> {
+                    fn kiro_eq(&self, _other: &Self) -> bool { false }
+                }
+                "#,
+                );
+            }
         } else {
             // Submodules use the shared runtime
             output.push_str("use crate::*;\n");

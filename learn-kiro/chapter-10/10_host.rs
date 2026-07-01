@@ -7,7 +7,7 @@ pub async fn read_file(args: Vec<kiro_runtime::RuntimeVal>) -> kiro_runtime::Hos
     let path = kiro_runtime::RuntimeVal::expect_arg(&args, 0, "read_file")?.as_str()?;
 
     // 2. Do Work (Mock Implementation for safety/demo)
-    // In a real app, we would use tokio::fs::read_to_string(path).await
+    // Real glue should not assume optional async crates are available by default.
     // Here we just return a greeting to verify it works.
     let content = format!("Content of {}: Hello from Rust Glue!", path);
 

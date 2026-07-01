@@ -21,7 +21,10 @@ fn process(code: num) -> str! {
     } error NotFound {
         print "NotFound caught, propagating..."
         return NotFound
+    } error PermissionDenied {
+        return PermissionDenied
     }
+    return "unreachable"
 }
 
 fn main() {

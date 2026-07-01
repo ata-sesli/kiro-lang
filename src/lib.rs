@@ -1,3 +1,4 @@
+pub mod analysis;
 pub mod build_manager;
 pub mod compiler;
 pub mod engine;
@@ -5,16 +6,13 @@ pub mod errors;
 pub mod formatter;
 pub mod grammar;
 pub mod interpreter;
+pub mod lsp;
 pub mod project;
 pub mod test_runner;
 
 #[derive(rust_embed::RustEmbed)]
 #[folder = "src/kiro_std/"]
 pub struct StdAssets;
-
-#[derive(rust_embed::RustEmbed)]
-#[folder = "kiro_runtime/"]
-pub struct RuntimeAssets;
 
 pub fn unsupported_let_line(source: &str) -> Option<usize> {
     for (idx, line) in source.lines().enumerate() {

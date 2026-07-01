@@ -5,7 +5,17 @@ schema_version = 1
 authors = ["Ata Sesli"]
 description = "Local Zed language support for Kiro."
 repository = "file:///Users/atasesli/Desktop/VsCode/kiro-lang/kiro-zed"
+languages = ["languages/kiro"]
+capabilities = []
 
 [grammars.kiro]
 repository = "file:///Users/atasesli/Desktop/VsCode/kiro-lang/kiro-zed/tree-sitter-kiro"
 rev = "main"
+
+[lib]
+kind = "Rust"
+version = "0.7.0"
+
+[language_servers.kiro-lsp]
+name = "Kiro LSP"
+languages = ["Kiro"]

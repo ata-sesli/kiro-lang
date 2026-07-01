@@ -1,4 +1,5 @@
-use kiro_lang::build_manager::BuildManager;
+use kiro_lang::analysis::{self, SourceOverlays};
+use kiro_lang::build_manager::{BuildManager, BuildRequirements};
 use kiro_lang::compiler;
 use kiro_lang::errors::{self, KiroError, emit_error, panic_payload_to_string};
 use kiro_lang::formatter;
@@ -8,10 +9,11 @@ use kiro_lang::project;
 use kiro_lang::test_runner;
 use kiro_lang::{StdAssets, unsupported_let_line};
 
+use std::collections::HashMap;
 use std::fs;
 
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use toml_edit::{DocumentMut, Item, Table, value};
 
@@ -23,10 +25,6 @@ struct Cli {
 
     /// Default file argument (if no subcommand is used)
     file: Option<String>,
-
-    /// Skip interpreter step
-    #[arg(long)]
-    no_interpret: bool,
 
     /// Skip execution after build
     #[arg(long)]
@@ -43,11 +41,9 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Parse, Compile, and Execute (Default)
+    /// Analyze, compile, and execute through Rust
     Run {
         file: Option<String>,
-        #[arg(long)]
-        no_interpret: bool,
         #[arg(long)]
         no_run: bool,
         #[arg(long)]
@@ -55,9 +51,13 @@ enum Commands {
         #[arg(short, long)]
         verbose: bool,
     },
-    /// Interpret ONLY (No Compilation, No Host Modules)
+    /// Static validation only (no Rust build or execution)
     Check { file: Option<String> },
-    /// Transpile and Build ONLY (No Execution)
+    /// Analyze and execute directly with the Kiro interpreter
+    Interpret { file: Option<String> },
+    /// Run the Kiro language server over stdio
+    Lsp,
+    /// Analyze, transpile, and build ONLY (No Execution)
     Build {
         file: Option<String>,
         #[arg(long)]
@@ -268,7 +268,6 @@ async fn main() {
     match &cli.command {
         Some(Commands::Run {
             file,
-            no_interpret,
             no_run,
             emit_rust,
             verbose,
@@ -276,7 +275,7 @@ async fn main() {
             let Some(file) = resolve_input_file(file.as_deref()) else {
                 std::process::exit(1);
             };
-            if !execute_pipeline(&file, !*no_interpret, !*no_run, *emit_rust, *verbose) {
+            if !execute_compiled_pipeline(&file, !*no_run, *emit_rust, *verbose) {
                 std::process::exit(1);
             }
         }
@@ -284,7 +283,21 @@ async fn main() {
             let Some(file) = resolve_input_file(file.as_deref()) else {
                 std::process::exit(1);
             };
-            if !run_interpreter(&file) {
+            if !run_static_check(&file) {
+                std::process::exit(1);
+            }
+        }
+        Some(Commands::Interpret { file }) => {
+            let Some(file) = resolve_input_file(file.as_deref()) else {
+                std::process::exit(1);
+            };
+            if !run_interpret_pipeline(&file) {
+                std::process::exit(1);
+            }
+        }
+        Some(Commands::Lsp) => {
+            if let Err(e) = kiro_lang::lsp::run() {
+                emit_error(&e);
                 std::process::exit(1);
             }
         }
@@ -296,7 +309,10 @@ async fn main() {
             let Some(file) = resolve_input_file(file.as_deref()) else {
                 std::process::exit(1);
             };
-            match run_compiler(&file, *emit_rust, *verbose) {
+            let Some(analysis) = analyze_with_info_or_emit(&file) else {
+                std::process::exit(1);
+            };
+            match run_compiler(analysis, *emit_rust, *verbose) {
                 Ok(_) => {}
                 Err(e) => {
                     emit_error(&e);
@@ -331,14 +347,8 @@ async fn main() {
         }
         None => {
             if let Some(file) = resolve_input_file(cli.file.as_deref()) {
-                // Default behavior: Interpret -> Compile -> Run
-                if !execute_pipeline(
-                    &file,
-                    !cli.no_interpret,
-                    !cli.no_run,
-                    cli.emit_rust,
-                    cli.verbose,
-                ) {
+                // Default behavior: Analyze -> Compile -> Run
+                if !execute_compiled_pipeline(&file, !cli.no_run, cli.emit_rust, cli.verbose) {
                     std::process::exit(1);
                 }
             } else {
@@ -465,22 +475,40 @@ fn handle_fmt(paths: &[String], check: bool) -> bool {
     true
 }
 
-// Returns true if success
-fn execute_pipeline(
-    file: &str,
-    do_interpret: bool,
-    do_run: bool,
-    emit_rust: bool,
-    verbose: bool,
-) -> bool {
-    println!("🚀 Kiro Build System v0.2");
+fn run_static_check(filename: &str) -> bool {
+    if analyze_with_info_or_emit(filename).is_some() {
+        println!("OK {}", filename);
+        true
+    } else {
+        false
+    }
+}
 
-    if do_interpret {
-        println!("🤖 --- INTERPRETER ---");
-        if !run_interpreter(file) {
-            return false;
+fn analyze_with_info_or_emit(filename: &str) -> Option<analysis::AnalysisResult> {
+    let overlays = SourceOverlays::new();
+    match analysis::analyze_path_with_info(filename, &overlays) {
+        Ok(result) => Some(result),
+        Err(e) => {
+            emit_error(&e);
+            None
         }
     }
+}
+
+fn run_interpret_pipeline(file: &str) -> bool {
+    if analyze_with_info_or_emit(file).is_none() {
+        return false;
+    }
+    run_interpreter(file)
+}
+
+// Returns true if success
+fn execute_compiled_pipeline(file: &str, do_run: bool, emit_rust: bool, verbose: bool) -> bool {
+    println!("🚀 Kiro Build System v0.2");
+
+    let Some(analysis) = analyze_with_info_or_emit(file) else {
+        return false;
+    };
 
     if verbose {
         println!("🔨 --- COMPILING ---");
@@ -488,7 +516,7 @@ fn execute_pipeline(
         println!("🔨 --- COMPILING --- (Output hidden, use --verbose to show)");
     }
 
-    match run_compiler(file, emit_rust, verbose) {
+    match run_compiler(analysis, emit_rust, verbose) {
         Ok(exe_path) => {
             if do_run {
                 println!("🚀 --- RUNNING ---");
@@ -558,11 +586,11 @@ fn run_interpreter(filename: &str) -> bool {
     true
 }
 
-fn run_compiler(filename: &str, _emit_rust: bool, verbose: bool) -> Result<PathBuf, KiroError> {
-    if !std::path::Path::new(filename).exists() {
-        return Err(KiroError::file_not_found(filename));
-    }
-
+fn run_compiler(
+    analysis: analysis::AnalysisResult,
+    _emit_rust: bool,
+    verbose: bool,
+) -> Result<PathBuf, KiroError> {
     let pm = BuildManager::new("kiro_build_cache");
     if let Err(e) = pm.init() {
         return Err(KiroError::new(
@@ -572,13 +600,49 @@ fn run_compiler(filename: &str, _emit_rust: bool, verbose: bool) -> Result<PathB
         ));
     }
 
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut module_functions: std::collections::HashMap<(String, String), compiler::FunctionInfo> =
-        std::collections::HashMap::new();
-    let path = std::path::Path::new(filename);
-    let name = path.file_stem().unwrap().to_str().unwrap();
-    let dir = path.parent().map(|p| p.to_str().unwrap()).unwrap_or("");
-    build_recursive(name, dir, &mut seen, &mut module_functions, &pm, true)?;
+    let requirements = build_requirements(&analysis.modules);
+    let header = build_header_content(&analysis.modules);
+    let root_name = module_name_from_path(&analysis.root)?;
+    let module_functions = analysis.module_functions.clone();
+    let mut modules = analysis.modules;
+
+    let mut module_names: Vec<String> = modules
+        .keys()
+        .filter(|name| *name != &root_name)
+        .cloned()
+        .collect();
+    module_names.sort();
+
+    for name in module_names {
+        if let Some(module) = modules.remove(&name) {
+            compile_analyzed_module(module, false, &module_functions, &requirements, &pm)?;
+        }
+    }
+
+    let root_module = modules.remove(&root_name).ok_or_else(|| {
+        KiroError::new(
+            errors::ErrorCode::BuildGraphFailed,
+            errors::ErrorPhase::Compile,
+            format!("Analyzed root module '{}' was not found.", root_name),
+        )
+    })?;
+    compile_analyzed_module(root_module, true, &module_functions, &requirements, &pm)?;
+
+    if let Err(e) = pm.save_header(&header) {
+        return Err(KiroError::new(
+            errors::ErrorCode::BuildGraphFailed,
+            errors::ErrorPhase::Compile,
+            format!("Failed to save header.rs: {}", e),
+        ));
+    }
+
+    if let Err(e) = pm.write_cargo_toml(&requirements) {
+        return Err(KiroError::new(
+            errors::ErrorCode::BuildGraphFailed,
+            errors::ErrorPhase::Compile,
+            format!("Cargo.toml error: {}", e),
+        ));
+    }
 
     match pm.build(verbose) {
         Ok(output_path) => Ok(output_path),
@@ -606,123 +670,88 @@ fn execute_binary(path: PathBuf) -> Result<(), String> {
     }
 }
 
-fn build_recursive(
-    name: &str,
-    base_dir: &str,
-    seen: &mut std::collections::HashSet<String>,
-    module_functions: &mut std::collections::HashMap<(String, String), compiler::FunctionInfo>,
-    pm: &BuildManager,
-    is_root: bool,
-) -> Result<(), KiroError> {
-    if seen.contains(name) {
-        return Ok(());
+fn build_requirements(modules: &HashMap<String, analysis::AnalyzedModule>) -> BuildRequirements {
+    let mut requirements = BuildRequirements::default();
+    for module in modules.values() {
+        requirements.record_module(&module.name);
+        requirements.record_pipes(compiler::program_uses_pipes(&module.program));
     }
-    seen.insert(name.to_string());
+    requirements
+}
 
-    // Try to resolve module path:
-    // 1. If starts with "std_", look in embedded assets
-    // 2. Otherwise, look in base_dir or current directory as {name}.kiro
-    let src = if name.starts_with("std_") {
-        let module_name = &name[4..]; // Remove "std_" prefix
-        // Map std_fs -> fs/std_fs.kiro
-        let asset_path = format!("{}/{}.kiro", module_name, name);
-        StdAssets::get(&asset_path)
-            .map(|f| std::str::from_utf8(f.data.as_ref()).unwrap().to_string())
-            .expect(&format!(
-                "Standard library module '{}' not found in embedded assets",
-                name
-            ))
-    } else {
-        let filename = if !base_dir.is_empty() {
-            format!("{}/{}.kiro", base_dir, name)
-        } else {
-            format!("{}.kiro", name)
+fn build_header_content(modules: &HashMap<String, analysis::AnalyzedModule>) -> String {
+    let mut header = BuildManager::header_preamble().to_string();
+    let mut module_names: Vec<String> = modules.keys().cloned().collect();
+    module_names.sort();
+
+    for name in module_names {
+        let Some(module) = modules.get(&name) else {
+            continue;
         };
-
-        match fs::read_to_string(&filename) {
-            Ok(s) => s,
-            Err(_) => {
-                return Err(KiroError::file_not_found(&filename));
+        if name.starts_with("std_") {
+            let module_suffix = &name[4..];
+            let header_path = format!("{}/header.rs", module_suffix);
+            if let Some(file) = StdAssets::get(&header_path) {
+                let header_content = std::str::from_utf8(file.data.as_ref()).unwrap();
+                let content = header_content
+                    .lines()
+                    .filter(|line| {
+                        !line.trim().starts_with("use crate::")
+                            && !line.trim().starts_with("use kiro_runtime")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                header.push_str(&content);
             }
-        }
-    };
-
-    if let Some(line) = unsupported_let_line(&src) {
-        return Err(KiroError::unsupported_keyword(name, line, "let"));
-    }
-
-    let prog = match grammar::parse(&src) {
-        Ok(p) => p,
-        Err(e) => {
-            return Err(KiroError::parse_failed(name, &format!("{:?}", e)));
-        }
-    };
-
-    for (fn_name, info) in compiler::Compiler::collect_program_functions(&prog) {
-        module_functions.insert((name.to_string(), fn_name), info);
-    }
-
-    // Collect rust fn declarations in this module so we can generate fallbacks
-    // when no glue file is present.
-    let mut rust_decl_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for s in &prog.statements {
-        match s {
-            grammar::grammar::Statement::RustFnDecl(def) => {
-                rust_decl_names.insert(def.name.clone());
-            }
-            grammar::grammar::Statement::Documented { item, .. } => {
-                if let grammar::grammar::AnnotatableItem::RustFnDecl(def) = item {
-                    rust_decl_names.insert(def.name.clone());
+        } else {
+            let rs_path = module.path.with_extension("rs");
+            if rs_path.exists() {
+                println!("  - Found Glue: {}", rs_path.display());
+                match fs::read_to_string(&rs_path) {
+                    Ok(content) => header.push_str(&content),
+                    Err(e) => eprintln!("Failed to read glue file {}: {}", rs_path.display(), e),
                 }
             }
-            _ => {}
         }
     }
 
-    // Find imports to recurse
-    for s in &prog.statements {
-        if let grammar::grammar::Statement::Import { module_name, .. } = s {
-            // For imports, use base_dir for relative imports or "" for std imports
-            let import_dir = if module_name.starts_with("std_") {
-                ""
-            } else {
-                base_dir
-            };
-            build_recursive(module_name, import_dir, seen, module_functions, pm, false)?;
-        }
-    }
+    header
+}
 
-    let rs_path = if !base_dir.is_empty() {
-        format!("{}/{}.rs", base_dir, name)
-    } else {
-        format!("{}.rs", name)
+fn module_name_from_path(path: &Path) -> Result<String, KiroError> {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(str::to_string)
+        .ok_or_else(|| KiroError::file_not_found(&path.display().to_string()))
+}
+
+fn compile_analyzed_module(
+    module: analysis::AnalyzedModule,
+    is_root: bool,
+    module_functions: &HashMap<(String, String), compiler::FunctionInfo>,
+    requirements: &BuildRequirements,
+    pm: &BuildManager,
+) -> Result<(), KiroError> {
+    let module_name = module.name;
+    let mut c = compiler::Compiler::with_options(
+        module_functions.clone(),
+        compiler::CompilerOptions {
+            uses_pipes: requirements.uses_pipes,
+        },
+    );
+    let code = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        c.compile(module.program, is_root)
+    })) {
+        Ok(code) => code,
+        Err(payload) => {
+            return Err(KiroError::compiler_panic(
+                &module_name,
+                &panic_payload_to_string(payload),
+            ));
+        }
     };
 
-    if !name.starts_with("std_")
-        && !rust_decl_names.is_empty()
-        && !std::path::Path::new(&rs_path).exists()
-    {
-        let mut missing: Vec<String> = rust_decl_names.iter().cloned().collect();
-        missing.sort();
-        return Err(missing_host_glue_error(name, &src, &missing[0]));
-    }
-
-    // Compile
-    let mut c = compiler::Compiler::with_module_functions(module_functions.clone());
-    let diagnostic_file = format!("{}.kiro", name);
-    c.validate_semantics(&prog, &diagnostic_file, &src)?;
-    let code =
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.compile(prog, is_root))) {
-            Ok(code) => code,
-            Err(payload) => {
-                return Err(KiroError::compiler_panic(
-                    name,
-                    &panic_payload_to_string(payload),
-                ));
-            }
-        };
-
-    let save_name = if is_root { "main" } else { name };
+    let save_name = if is_root { "main" } else { &module_name };
     if let Err(e) = pm.save_file(save_name, code) {
         return Err(KiroError::new(
             errors::ErrorCode::BuildGraphFailed,
@@ -730,76 +759,7 @@ fn build_recursive(
             format!("Failed to save {}: {}", save_name, e),
         ));
     } else {
-        println!("  - Compiled {}", name);
-    }
-
-    // If this is a std module, also copy its header.rs content
-    if name.starts_with("std_") {
-        let module_suffix = &name[4..];
-        let header_path = format!("{}/header.rs", module_suffix);
-        if let Some(file) = StdAssets::get(&header_path) {
-            let header_content = std::str::from_utf8(file.data.as_ref()).unwrap();
-            // Strip the initial use statement since we already have it in the main header
-            let content = header_content
-                .lines()
-                .filter(|l| {
-                    !l.trim().starts_with("use crate::")
-                        && !l.trim().starts_with("use kiro_runtime")
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-
-            if let Err(e) = pm.append_header(&content) {
-                eprintln!("Failed to append header for {}: {}", name, e);
-            }
-        }
-    } else {
-        // For user modules, check if there is a corresponding .rs file (Glue Code)
-        // e.g. for "mylib", check "mylib.rs" alongside "mylib.kiro"
-        if std::path::Path::new(&rs_path).exists() {
-            println!("  - Found Glue: {}", rs_path);
-            match std::fs::read_to_string(&rs_path) {
-                Ok(content) => {
-                    if let Err(e) = pm.append_header(&content) {
-                        eprintln!("Failed to append glue code for {}: {}", name, e);
-                    }
-                }
-                Err(e) => eprintln!("Failed to read glue file {}: {}", rs_path, e),
-            }
-        }
+        println!("  - Compiled {}", module_name);
     }
     Ok(())
-}
-
-fn missing_host_glue_error(module: &str, source: &str, fn_name: &str) -> KiroError {
-    let glue_file = format!("{}.rs", module);
-    let mut err = KiroError::new(
-        errors::ErrorCode::MissingHostGlue,
-        errors::ErrorPhase::Compile,
-        format!(
-            "Missing Rust glue for host function '{}.{}'.",
-            module, fn_name
-        ),
-    )
-    .with_file(format!("{}.kiro", module))
-    .with_help(format!(
-        "add '{}' with `pub async fn {}(args: Vec<RuntimeVal>) -> HostResult`",
-        glue_file, fn_name
-    ));
-
-    let needle = format!("rust fn {}", fn_name);
-    for (idx, line) in source.lines().enumerate() {
-        if let Some(col) = line.find(&needle) {
-            err = err.with_source_location(
-                format!("{}.kiro", module),
-                idx + 1,
-                col + 1,
-                line.to_string(),
-                "missing glue",
-            );
-            break;
-        }
-    }
-
-    err
 }

@@ -30,14 +30,15 @@ For a user module named `tools.kiro`, put the Rust implementation next to it as 
 
 Rust glue uses the ABI v1 shape:
 
+Generated Kiro builds only include dependencies required by Kiro source (`std_*` imports and pipes), so this example uses the Rust standard library instead of assuming optional async crates are present.
+
 ```rust
 use kiro_runtime::{HostResult, KiroError, RuntimeVal};
 
 pub async fn read_file(args: Vec<RuntimeVal>) -> HostResult {
     RuntimeVal::expect_arity(&args, 1, "read_file")?;
     let path = RuntimeVal::expect_arg(&args, 0, "read_file")?.as_str()?;
-    let content = tokio::fs::read_to_string(path)
-        .await
+    let content = std::fs::read_to_string(path)
         .map_err(|_| KiroError::message("NotFound", path.to_string()))?;
     Ok(RuntimeVal::from(content))
 }

@@ -20,8 +20,9 @@ Zed should select the `Kiro` language automatically for `.kiro` files.
 - Bracket pairing for `{}`, `[]`, `()`, double quotes, and single quotes.
 - Tree-sitter parsing for Kiro syntax used by this repository.
 - Syntax highlighting, bracket matching, indentation queries, outline entries, text objects, and override captures.
+- Kiro LSP integration through `kiro lsp` for save-time diagnostics, formatting, hover docs, basic completions, and document symbols.
 
-Hover docs and diagnostics are intentionally out of scope for this local v1. They need a Kiro language server or Zed language-server adapter.
+The extension launches `kiro-lang lsp` from `PATH`, falling back to `kiro lsp` when available. Keep Tree-sitter responsible for syntax/highlighting and keep semantic language rules in the compiler-backed LSP.
 
 ## Grammar source
 

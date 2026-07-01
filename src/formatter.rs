@@ -110,7 +110,8 @@ fn format_lines(source: &str) -> String {
         let leading_closes = leading_closing_delimiters(&normalized_code);
         let line_depth = depth.saturating_sub(leading_closes);
         let is_comment_only = normalized_code.is_empty();
-        let is_doc_comment = comment_part.is_some_and(|comment| comment.trim_start().starts_with("///"));
+        let is_doc_comment =
+            comment_part.is_some_and(|comment| comment.trim_start().starts_with("///"));
         let is_top_level_item_start = line_depth == 0
             && ((!is_comment_only && starts_top_level_item(&normalized_code))
                 || (is_comment_only && is_doc_comment));

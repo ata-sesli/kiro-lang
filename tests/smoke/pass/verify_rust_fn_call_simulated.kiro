@@ -1,4 +1,4 @@
-// Test that interpreter check mode simulates rust fn calls.
+// Test that a rust fn call has matching adjacent host glue.
 
 error NotFound = "File not found"
 

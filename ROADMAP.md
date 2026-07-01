@@ -121,10 +121,15 @@ Current embedded standard modules:
 Kiro already has:
 
 - `kiro file.kiro`
+- `kiro run file.kiro`
+- `kiro interpret file.kiro`
 - `kiro check file.kiro`
 - `kiro build file.kiro`
-- `--no-interpret`
+- `kiro lsp`
 - `--verbose`
+- Compiler-backed static diagnostics
+- Official formatter and editor format support
+- Zed language-server integration
 - VS Code syntax support
 - Hover documentation
 - A compact `learn-kiro` course
@@ -132,6 +137,15 @@ Kiro already has:
 
 The current learning path is intentionally small enough for an experienced
 programmer to understand the core concepts quickly.
+
+Current responsibility split:
+
+- The analyzer decides whether Kiro source is valid.
+- The compiler lowers valid Kiro to Rust.
+- `kiro run` and bare `kiro file.kiro` use the compiled Rust path.
+- `kiro interpret` is the explicit direct-execution path.
+- The interpreter is runtime infrastructure for direct execution, embedding,
+  simulation, parity tests, and a future REPL, not the default validity pass.
 
 ## Near-Term Roadmap
 

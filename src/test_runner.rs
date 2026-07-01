@@ -149,7 +149,7 @@ fn run_one_test(file: &Path, run_root: &Path) -> Result<std::process::Output, Ki
     })?;
     let arg = display_path(file, run_root);
     Command::new(binary)
-        .args(["run", &arg, "--no-interpret"])
+        .args(["run", &arg])
         .current_dir(run_root)
         .output()
         .map_err(|e| {
