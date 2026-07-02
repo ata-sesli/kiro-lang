@@ -1,3 +1,5 @@
+import io
+
 // Kiro Standard Library: IO
 // Terminal input/output helpers.
 
@@ -23,8 +25,8 @@ struct User {
 }
 
 fn main() {
-    print add(10, 20)
-    print "Docs parsed successfully!"
+    io.print(add(10, 20))
+    io.print("Docs parsed successfully!")
 }
 
 main()

@@ -1,3 +1,5 @@
+import io
+
 pure fn foo(x: String) -> String {
     // move is forbidden in pure fn
     var y = move x
@@ -5,6 +7,6 @@ pure fn foo(x: String) -> String {
 }
 
 fn main() {
-    print foo("test")
+    io.print(foo("test"))
 }
 main()

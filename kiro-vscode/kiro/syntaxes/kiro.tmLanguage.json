@@ -68,7 +68,7 @@
         },
         {
           "name": "support.function.kiro",
-          "match": "\\b(print|len)\\b"
+          "match": "\\b(len)\\b"
         }
       ]
     },

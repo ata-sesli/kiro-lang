@@ -1,3 +1,5 @@
+#![cfg(feature = "lsp")]
+
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -159,7 +161,11 @@ fn shutdown(mut child: Child, stdin: &mut ChildStdin, stdout: &mut BufReader<Chi
 fn static_check_validates_without_running_program() {
     let dir = temp_project("static_check");
     let file = dir.join("main.kiro");
-    fs::write(&file, "print \"should not run during check\"\n").expect("file should be written");
+    fs::write(
+        &file,
+        "import io\n\nio.print(\"should not run during check\")\n",
+    )
+    .expect("file should be written");
 
     let output = run_kiro(&["check", file.to_str().unwrap()], &dir);
 
@@ -190,8 +196,10 @@ fn static_check_catches_errors_in_uncalled_functions_and_unreached_branches() {
     fs::write(
         &uncalled,
         r#"
+import io
+
 fn bad() {
-    print missing_name
+    io.print(missing_name)
 }
 "#,
     )
@@ -238,9 +246,11 @@ fn static_check_collects_import_metadata_and_missing_glue() {
     fs::write(
         dir.join("main.kiro"),
         r#"
+import io
+
 import math
 
-print math.add(1)
+io.print(math.add(1))
 "#,
     )
     .expect("main should be written");
@@ -287,7 +297,7 @@ pure fn add(a: num, b: num) -> num {
 fn lsp_publishes_diagnostics_only_after_save_and_clears_after_fix() {
     let dir = temp_project("diagnostics");
     let file = dir.join("main.kiro");
-    fs::write(&file, "print \"initial\"\n").expect("file should be written");
+    fs::write(&file, "import io\n\nio.print(\"initial\")\n").expect("file should be written");
     let uri = file_uri(&file);
 
     let (child, mut stdin, mut stdout) = start_lsp(&dir);
@@ -303,7 +313,7 @@ fn lsp_publishes_diagnostics_only_after_save_and_clears_after_fix() {
                     "uri": uri,
                     "languageId": "kiro",
                     "version": 1,
-                    "text": "print missing_name\n"
+                    "text": "import io\n\nio.print(missing_name)\n"
                 }
             }
         }),
@@ -316,7 +326,7 @@ fn lsp_publishes_diagnostics_only_after_save_and_clears_after_fix() {
             "method": "textDocument/didSave",
             "params": {
                 "textDocument": { "uri": uri },
-                "text": "print missing_name\n"
+                "text": "import io\n\nio.print(missing_name)\n"
             }
         }),
     );
@@ -340,7 +350,7 @@ fn lsp_publishes_diagnostics_only_after_save_and_clears_after_fix() {
             "method": "textDocument/didChange",
             "params": {
                 "textDocument": { "uri": uri, "version": 2 },
-                "contentChanges": [{ "text": "print \"fixed\"\n" }]
+                "contentChanges": [{ "text": "import io\n\nio.print(\"fixed\")\n" }]
             }
         }),
     );
@@ -351,7 +361,7 @@ fn lsp_publishes_diagnostics_only_after_save_and_clears_after_fix() {
             "method": "textDocument/didSave",
             "params": {
                 "textDocument": { "uri": uri },
-                "text": "print \"fixed\"\n"
+                "text": "import io\n\nio.print(\"fixed\")\n"
             }
         }),
     );
@@ -367,16 +377,77 @@ fn lsp_publishes_diagnostics_only_after_save_and_clears_after_fix() {
 }
 
 #[test]
+fn lsp_reports_removed_print_statement_on_save() {
+    let dir = temp_project("removed_print_diagnostic");
+    let file = dir.join("main.kiro");
+    fs::write(&file, "print \"initial\"\n").expect("file should be written");
+    let uri = file_uri(&file);
+
+    let (child, mut stdin, mut stdout) = start_lsp(&dir);
+    initialize(&mut stdin, &mut stdout, &dir);
+
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kiro",
+                    "version": 1,
+                    "text": "print \"old\"\n"
+                }
+            }
+        }),
+    );
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didSave",
+            "params": {
+                "textDocument": { "uri": uri },
+                "text": "print \"old\"\n"
+            }
+        }),
+    );
+
+    let published = read_notification(&mut stdout, "textDocument/publishDiagnostics");
+    let diagnostics = published["params"]["diagnostics"]
+        .as_array()
+        .expect("diagnostics should be array");
+    assert_eq!(diagnostics.len(), 1, "unexpected publish: {}", published);
+    assert_eq!(diagnostics[0]["code"], "KIRO1002");
+    assert!(
+        diagnostics[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("'print' statement was removed.")
+    );
+    assert!(
+        diagnostics[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("use `import io` and `io.print(value)`")
+    );
+
+    shutdown(child, &mut stdin, &mut stdout);
+}
+
+#[test]
 fn lsp_format_hover_completion_and_symbols_work() {
     let dir = temp_project("features");
     let file = dir.join("main.kiro");
     fs::write(
         &file,
         r#"
+import io
+
 import math
 
 fn worker() {
-print "hi"
+io.print("hi")
 }
 
 worker()
@@ -436,7 +507,7 @@ pure fn add(a: num, b: num) -> num {
         edits[0]["newText"]
             .as_str()
             .unwrap()
-            .contains("    print \"hi\""),
+            .contains("    io.print(\"hi\")"),
         "formatted text should indent function body: {}",
         formatting
     );
@@ -449,7 +520,7 @@ pure fn add(a: num, b: num) -> num {
             "method": "textDocument/hover",
             "params": {
                 "textDocument": { "uri": uri },
-                "position": { "line": 3, "character": 0 }
+                "position": { "line": 5, "character": 0 }
             }
         }),
     );
@@ -491,6 +562,11 @@ pure fn add(a: num, b: num) -> num {
         "local function completion missing: {:?}",
         labels
     );
+    assert!(
+        !labels.contains(&"print"),
+        "removed print keyword should not be completed: {:?}",
+        labels
+    );
 
     send_lsp(
         &mut stdin,
@@ -500,7 +576,7 @@ pure fn add(a: num, b: num) -> num {
             "method": "textDocument/completion",
             "params": {
                 "textDocument": { "uri": uri },
-                "position": { "line": 8, "character": 5 }
+                "position": { "line": 10, "character": 5 }
             }
         }),
     );
@@ -757,6 +833,103 @@ pure fn add(a: num, b: num) -> num {
         .find(|item| item["name"] == "worker")
         .expect("worker symbol should exist");
     assert_eq!(worker["range"]["start"]["line"], 3);
+
+    shutdown(child, &mut stdin, &mut stdout);
+}
+
+#[test]
+fn lsp_knows_io_display_helpers() {
+    let dir = temp_project("io_helpers");
+    let main = dir.join("main.kiro");
+    fs::write(
+        &main,
+        r#"import io
+
+io.print(42)
+io.
+"#,
+    )
+    .expect("main file should be written");
+
+    let uri = file_uri(&main);
+    let (child, mut stdin, mut stdout) = start_lsp(&dir);
+    initialize(&mut stdin, &mut stdout, &dir);
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "kiro",
+                    "version": 1,
+                    "text": fs::read_to_string(&main).expect("source should read")
+                }
+            }
+        }),
+    );
+
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 26,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 3, "character": 3 }
+            }
+        }),
+    );
+    let completion = read_response(&mut stdout, 26);
+    let items = completion["result"]
+        .as_array()
+        .expect("completion should be array");
+    let print_item = items
+        .iter()
+        .find(|item| item["label"] == "print")
+        .expect("io.print completion should exist");
+    assert_eq!(print_item["detail"], "io.print(value) -> void");
+
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 27,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 2, "character": 5 }
+            }
+        }),
+    );
+    let hover = read_response(&mut stdout, 27);
+    let hover_text = hover["result"]["contents"].to_string();
+    assert!(
+        hover_text.contains("io.print(value) -> void"),
+        "hover should include io.print signature: {}",
+        hover
+    );
+
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 28,
+            "method": "textDocument/signatureHelp",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 2, "character": 10 }
+            }
+        }),
+    );
+    let signature = read_response(&mut stdout, 28);
+    assert_eq!(
+        signature["result"]["signatures"][0]["label"],
+        "io.print(value) -> void"
+    );
+    assert_eq!(signature["result"]["activeParameter"], 0);
 
     shutdown(child, &mut stdin, &mut stdout);
 }

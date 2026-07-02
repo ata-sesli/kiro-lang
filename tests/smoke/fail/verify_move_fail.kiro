@@ -1,7 +1,9 @@
+import io
+
 fn main() {
     var a = "Hello"
     var b = move a
 
-    print a // FAIL: Use after move
+    io.print(a) // FAIL: Use after move
 }
 main()

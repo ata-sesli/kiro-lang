@@ -44,7 +44,6 @@ module.exports = grammar({
       $.rest_statement,
       $.check_statement,
       $.import_statement,
-      $.print_statement,
       $.expression_statement,
     ),
 
@@ -199,8 +198,6 @@ module.exports = grammar({
     ),
 
     import_statement: $ => seq($.import_keyword, field("module", $.identifier)),
-
-    print_statement: $ => seq($.print_keyword, field("value", $.expression)),
 
     expression_statement: $ => $.expression,
 
@@ -405,7 +402,6 @@ module.exports = grammar({
     ref_keyword: _ => "ref",
     deref_keyword: _ => "deref",
     move_keyword: _ => "move",
-    print_keyword: _ => "print",
     len_keyword: _ => "len",
 
     num_type: _ => "num",

@@ -1,3 +1,5 @@
+import io
+
 struct Pilot {
     name: str
     energy: num
@@ -18,7 +20,7 @@ fn reporter(out: pipe str, who: str, level: num) {
 
 fn main() {
     title = "Kiro Showcase"
-    print title
+    io.print(title)
 
     var p = Pilot { name: "Astra", energy: 95 }
     var p_ref = ref p
@@ -27,13 +29,13 @@ fn main() {
 
     deref energy_ref = calibrate(energy_snapshot)
     p.energy = deref energy_ref
-    print "pilot=" + p_ref.name + ", energy=" + p.energy
+    io.print("pilot=" + p_ref.name + ", energy=" + p.energy)
 
     var channel = pipe str
     run reporter(channel, p.name, p.energy)
 
-    print take channel
-    print take channel
+    io.print(take channel)
+    io.print(take channel)
 }
 
 main()

@@ -18,6 +18,17 @@ fn matches_kiro_type(value: &RuntimeVal, ty: &grammar::KiroType) -> bool {
     }
 }
 
+fn std_io_display_call(func: &Expression) -> Option<(&str, &str)> {
+    if let Expression::FieldAccess(target, _, field) = func
+        && let Expression::Variable(module) = &**target
+        && crate::is_std_io_module_name(&module.value)
+        && crate::is_std_io_display_function(&field.value)
+    {
+        return Some((&module.value, &field.value));
+    }
+    None
+}
+
 impl Interpreter {
     pub fn eval_expr(&mut self, expr: Expression) -> Result<RuntimeVal, String> {
         self.tick()?;
@@ -378,6 +389,34 @@ impl Interpreter {
 
             // 1. Handle Standard Calls
             Expression::Call(func_var, _, args, _) => {
+                if let Some((module, function)) = std_io_display_call(&func_var)
+                    && self.env.contains_key(module)
+                {
+                    if self.in_pure_mode {
+                        return Err(format!(
+                            "Pure function cannot call impure/async function '{}.{}' inside a pure function.",
+                            module, function
+                        ));
+                    }
+                    if args.len() != 1 {
+                        return Err(format!(
+                            "Function '{}.{}' expects 1 args, got {}.",
+                            module,
+                            function,
+                            args.len()
+                        ));
+                    }
+                    let value = self.eval_expr(args[0].clone())?;
+                    match function {
+                        "print" => println!("{}", value),
+                        "write" => print!("{}", value),
+                        "eprint" => eprint!("{}", value),
+                        "eprintline" => eprintln!("{}", value),
+                        _ => unreachable!("std io display function checked before execution"),
+                    }
+                    return Ok(RuntimeVal::Void);
+                }
+
                 self.enter_call()?;
                 let result = (|| {
                     // A. Resolve the function

@@ -1,13 +1,16 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct BuildRequirements {
     pub uses_std_fs: bool,
     pub uses_std_time: bool,
     pub uses_std_net: bool,
     pub uses_pipes: bool,
+    pub uses_anyhow: bool,
+    pub skipped_module_imports: HashSet<String>,
 }
 
 impl BuildRequirements {
@@ -22,6 +25,18 @@ impl BuildRequirements {
 
     pub fn record_pipes(&mut self, uses_pipes: bool) {
         self.uses_pipes |= uses_pipes;
+    }
+
+    pub fn record_anyhow(&mut self, uses_anyhow: bool) {
+        self.uses_anyhow |= uses_anyhow;
+    }
+
+    pub fn skip_module_import(&mut self, module_name: impl Into<String>) {
+        self.skipped_module_imports.insert(module_name.into());
+    }
+
+    pub fn skips_module_import(&self, module_name: &str) -> bool {
+        self.skipped_module_imports.contains(module_name)
     }
 }
 
@@ -121,10 +136,12 @@ impl BuildManager {
                 r#"tokio = {{ version = "1.49.0", features = [{}] }}"#,
                 tokio_features
             ),
-            r#"anyhow = "1""#.to_string(),
             r#"kiro_runtime = { path = "../kiro_runtime" }"#.to_string(),
         ];
 
+        if requirements.uses_anyhow {
+            dependency_lines.push(r#"anyhow = "1""#.to_string());
+        }
         if requirements.uses_pipes {
             dependency_lines.push(r#"async-channel = "2.5.0""#.to_string());
         }

@@ -270,8 +270,6 @@ pub mod grammar {
 
         /// Expression as statement.
         ExprStmt(Expression),
-        /// Print statement: `print expr`.
-        Print(#[rust_sitter::leaf(text = "print")] (), Expression),
 
         /// Item preceded by one or more documentation comments (`///`).
         // Documented Item

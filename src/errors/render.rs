@@ -158,20 +158,20 @@ mod tests {
 
     #[test]
     fn miette_renderer_uses_full_source_span_when_available() {
-        let source = "var count = 1\nprint coutn\n";
+        let source = "var count = 1\nio.print(coutn)\n";
         let err = KiroError::new(
             ErrorCode::UnknownName,
             ErrorPhase::Compile,
             "Unknown variable 'coutn'.",
         )
-        .with_source_span("main.kiro", source, 2, 7, 5, "unknown variable")
+        .with_source_span("main.kiro", source, 2, 10, 5, "unknown variable")
         .with_suggestion("count");
 
         let rendered = render_error(&err);
 
         assert!(rendered.contains("[KIRO2004:compile] Unknown variable 'coutn'."));
-        assert!(rendered.contains("main.kiro:2:7"));
-        assert!(rendered.contains("print coutn"));
+        assert!(rendered.contains("main.kiro:2:10"));
+        assert!(rendered.contains("io.print(coutn)"));
         assert!(rendered.contains("unknown variable"));
         assert!(rendered.contains("help: did you mean 'count'?"));
     }

@@ -379,14 +379,6 @@ impl Interpreter {
                 }
                 Ok(StatementResult::Normal(RuntimeVal::Void))
             }
-            Statement::Print(_, expr) => {
-                if self.in_pure_mode {
-                    return Err("Pure Function Error: 'print' is forbidden.".to_string());
-                }
-                let val = self.eval_expr(expr)?;
-                println!("{}", val);
-                Ok(StatementResult::Normal(RuntimeVal::Void))
-            }
             Statement::ExprStmt(expr) => {
                 let val = self.eval_expr(expr)?;
                 Ok(StatementResult::Normal(val))
@@ -444,20 +436,24 @@ impl Interpreter {
                 let loaded = if let Some(loader) = &self.module_loader {
                     loader.load(&module_name, &self.current_dir)?
                 } else {
-                    let cache_key = if module_name.starts_with("std_") {
-                        format!("std://{}", module_name)
-                    } else {
-                        let filename = format!("{}.kiro", module_name);
-                        let full_path = self.current_dir.join(filename);
-                        std::fs::canonicalize(&full_path)
-                            .unwrap_or(full_path)
-                            .to_string_lossy()
-                            .to_string()
-                    };
+                    let cache_key =
+                        if let Some(canonical) = crate::canonical_std_module_name(&module_name) {
+                            format!("std://{}", canonical)
+                        } else {
+                            let filename = format!("{}.kiro", module_name);
+                            let full_path = self.current_dir.join(filename);
+                            std::fs::canonicalize(&full_path)
+                                .unwrap_or(full_path)
+                                .to_string_lossy()
+                                .to_string()
+                        };
 
-                    let (source, base_dir) = if module_name.starts_with("std_") {
-                        let key = &module_name[4..];
-                        let asset_path = format!("{}/{}.kiro", key, module_name);
+                    let (source, base_dir) = if let Some(canonical) =
+                        crate::canonical_std_module_name(&module_name)
+                    {
+                        let asset_path =
+                            crate::std_asset_path(&module_name, &format!("{}.kiro", canonical))
+                                .expect("known std module should have an asset path");
                         let content = crate::StdAssets::get(&asset_path)
                             .map(|f| std::str::from_utf8(f.data.as_ref()).unwrap().to_string())
                             .ok_or_else(|| {
@@ -467,6 +463,11 @@ impl Interpreter {
                                 )
                             })?;
                         (content, self.current_dir.clone())
+                    } else if module_name.starts_with("std_") {
+                        return Err(format!(
+                            "Standard library module '{}' not found in embedded assets",
+                            module_name
+                        ));
                     } else {
                         let filename = format!("{}.kiro", module_name);
                         let full_path = self.current_dir.join(&filename);
@@ -503,6 +504,12 @@ impl Interpreter {
                 println!("📦 Importing {}...", module_name);
 
                 // 2. Parse
+                if let Some(removed) = crate::removed_print_statement(&loaded.source) {
+                    return Err(format!(
+                        "'print' statement was removed in module '{}' at line {}. use `import io` and `io.print(value)`",
+                        module_name, removed.line
+                    ));
+                }
                 let prog = crate::grammar::parse(&loaded.source)
                     .map_err(|e| format!("Parse Error in module '{}': {:?}", module_name, e))?;
 

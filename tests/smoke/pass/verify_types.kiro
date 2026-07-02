@@ -1,5 +1,7 @@
+import io
+
 fn main() {
-    print "--- Type Compatibility Verification ---"
+    io.print("--- Type Compatibility Verification ---")
 
     // 1. Comparisons should return Bool (not float)
     var gt = 10 > 5
@@ -7,24 +9,24 @@ fn main() {
     var eq = 5 == 5
     var neq = 5 != 10
 
-    print "Gt: " + gt
-    print "Lt: " + lt
-    print "Eq: " + eq
-    print "Neq: " + neq
+    io.print("Gt: " + gt)
+    io.print("Lt: " + lt)
+    io.print("Eq: " + eq)
+    io.print("Neq: " + neq)
 
     // 2. Control flow should work with these bools
     on (gt) {
-        print "Control flow via Bool: OK"
+        io.print("Control flow via Bool: OK")
     } off {
-        print "Control flow via Bool: FAIL"
+        io.print("Control flow via Bool: FAIL")
     }
 
     // 3. Range support (newly added to Interpreter)
-    print "Range Test:"
+    io.print("Range Test:")
     loop i in 0..3 {
-        print "i: " + i
+        io.print("i: " + i)
     }
 
-    print "--- Verification Complete ---"
+    io.print("--- Verification Complete ---")
 }
 main()

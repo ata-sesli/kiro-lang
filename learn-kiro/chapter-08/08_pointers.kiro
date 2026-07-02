@@ -1,3 +1,5 @@
+import io
+
 // Chapter 8: Pointers
 
 var val = 100
@@ -5,17 +7,17 @@ var p = ref val
 
 // Reading
 var v = deref p
-print "Value via ptr: " + v
+io.print("Value via ptr: " + v)
 
 // Writing
 deref p = 200
 var updated = deref p
-print "Updated via p: " + updated
+io.print("Updated via p: " + updated)
 
 // Opaque managed handle (adr void)
 var any_ptr = adr void
 any_ptr = p
-print any_ptr
+io.print(any_ptr)
 
 // Struct Pointers
 struct Point { x: num y: num }
@@ -23,4 +25,4 @@ var pt = Point { x: 10, y: 20 }
 var pt_ref = ref pt
 
 // Auto-deref access
-print "Point X: " + pt_ref.x
+io.print("Point X: " + pt_ref.x)

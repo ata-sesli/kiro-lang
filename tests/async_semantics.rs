@@ -203,10 +203,12 @@ pure fn add(a: num, b: num) -> num {
     fs::write(
         &main_path,
         r#"
+import io
+
 import math
 
 fn main() {
-    print math.add(1, 2)
+    io.print(math.add(1, 2))
 }
 
 main()
@@ -255,10 +257,12 @@ fn add(a: num, b: num) -> num {
     fs::write(
         &main_path,
         r#"
+import io
+
 import math
 
 fn main() {
-    print math.add(1, 2)
+    io.print(math.add(1, 2))
 }
 
 main()
@@ -306,6 +310,8 @@ fn add(a: num, b: num) -> num {
     fs::write(
         &main_path,
         r#"
+import io
+
 import math
 
 pure fn calculate() -> num {
@@ -313,7 +319,7 @@ pure fn calculate() -> num {
 }
 
 fn main() {
-    print calculate()
+    io.print(calculate())
 }
 
 main()

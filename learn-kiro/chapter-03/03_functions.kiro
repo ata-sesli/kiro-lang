@@ -1,7 +1,9 @@
+import io
+
 // Chapter 3: Functions & Function References
 
 fn shout(msg: str) {
-    print msg + "!!!"
+    io.print(msg + "!!!")
 }
 
 pure fn multiply(a: num, b: num) -> num {
@@ -28,14 +30,14 @@ pure fn pick(up: bool) -> fn(num) -> num {
     }
 }
 
-print "--- Functions ---"
+io.print("--- Functions ---")
 shout("Kiro")
 
-print "--- Pure Func ---"
-print "3 * 4 = " + multiply(3, 4)
+io.print("--- Pure Func ---")
+io.print("3 * 4 = " + multiply(3, 4))
 
-print "--- Function Refs ---"
+io.print("--- Function Refs ---")
 f = ref inc
-print apply(10, f)
+io.print(apply(10, f))
 g = pick(false)
-print g(10)
+io.print(g(10))

@@ -123,7 +123,15 @@ fn root_manifest_keeps_future_deps_and_removes_generated_runtime_deps() {
         "miette should remain available for future root diagnostics:\n{}",
         manifest
     );
-    for removed in ["anyhow", "async-channel", "reqwest"] {
+    for removed in [
+        "anyhow",
+        "async-channel",
+        "reqwest",
+        "rust-embed",
+        "tree-sitter",
+        "serde",
+        "tokio",
+    ] {
         assert!(
             root_dependency_line(&manifest, removed).is_none(),
             "{} should not be a root dependency:\n{}",
@@ -132,22 +140,31 @@ fn root_manifest_keeps_future_deps_and_removes_generated_runtime_deps() {
         );
     }
 
-    let tokio_line =
-        root_dependency_line(&manifest, "tokio").expect("root manifest should depend on tokio");
-    for feature in ["macros", "rt-multi-thread"] {
+    assert!(
+        manifest.contains("[features]"),
+        "root manifest should define features:\n{}",
+        manifest
+    );
+    assert!(
+        manifest.contains(r#"default = ["lsp"]"#),
+        "lsp should be enabled by default:\n{}",
+        manifest
+    );
+    assert!(
+        manifest
+            .contains(r#"lsp = ["dep:lsp-server", "dep:lsp-types", "dep:serde_json", "dep:url"]"#),
+        "lsp feature should own LSP dependencies:\n{}",
+        manifest
+    );
+    for dependency in ["lsp-server", "lsp-types", "serde_json", "url"] {
+        let line = root_dependency_line(&manifest, dependency).unwrap_or_else(|| {
+            panic!("{} should be present as an optional dependency", dependency)
+        });
         assert!(
-            tokio_line.contains(&format!(r#""{}""#, feature)),
-            "root tokio feature '{}' should remain in:\n{}",
-            feature,
-            tokio_line
-        );
-    }
-    for feature in ["fs", "time", "sync"] {
-        assert!(
-            !tokio_line.contains(&format!(r#""{}""#, feature)),
-            "root tokio feature '{}' should be removed from:\n{}",
-            feature,
-            tokio_line
+            line.contains("optional = true"),
+            "{} should be optional:\n{}",
+            dependency,
+            line
         );
     }
 }
@@ -157,7 +174,8 @@ fn unchanged_generated_files_are_not_rewritten_on_second_build() {
     let _guard = KIRO_BUILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = temp_project("unchanged_mtimes");
     link_runtime(&dir);
-    fs::write(dir.join("main.kiro"), "print \"stable\"\n").expect("source should be written");
+    fs::write(dir.join("main.kiro"), "import io\n\nio.print(\"stable\")\n")
+        .expect("source should be written");
 
     for build_number in 1..=2 {
         let output = Command::new(env!("CARGO_BIN_EXE_kiro-lang"))
@@ -223,7 +241,12 @@ fn unchanged_generated_files_are_not_rewritten_on_second_build() {
 
 #[test]
 fn plain_script_uses_minimal_async_dependencies() {
-    let (cargo_toml, main_rs) = build_source("plain", r#"print "hello""#);
+    let (cargo_toml, main_rs) = build_source(
+        "plain",
+        r#"import io
+
+io.print("hello")"#,
+    );
 
     assert_tokio_features(
         &cargo_toml,
@@ -241,6 +264,11 @@ fn plain_script_uses_minimal_async_dependencies() {
         cargo_toml
     );
     assert!(
+        !cargo_toml.contains("anyhow"),
+        "plain script should not depend on anyhow:\n{}",
+        cargo_toml
+    );
+    assert!(
         !main_rs.contains("use async_channel;"),
         "plain script should not import async_channel:\n{}",
         main_rs
@@ -253,8 +281,57 @@ fn plain_script_uses_minimal_async_dependencies() {
 }
 
 #[test]
+fn generated_anyhow_is_kept_when_error_values_need_it() {
+    let (cargo_toml, main_rs) = build_source(
+        "error_def",
+        r#"
+import io
+
+error Bad = "bad"
+
+io.print("ok")
+"#,
+    );
+
+    assert!(
+        cargo_toml.contains("anyhow"),
+        "error definitions still need anyhow in generated dependencies:\n{}",
+        cargo_toml
+    );
+    assert!(
+        main_rs.contains("anyhow::"),
+        "error definitions should still generate anyhow usage:\n{}",
+        main_rs
+    );
+}
+
+#[test]
+fn std_net_header_reuses_one_reqwest_client() {
+    let header = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/kiro_std/net/header.rs"),
+    )
+    .expect("std_net header should be readable");
+
+    assert!(
+        header.contains("OnceLock<reqwest::Client>"),
+        "std_net should keep one reusable reqwest client:\n{}",
+        header
+    );
+    assert!(
+        !header.contains("reqwest::get("),
+        "std_net should route get/status through the shared client:\n{}",
+        header
+    );
+}
+
+#[test]
 fn generated_main_uses_runtime_helpers_instead_of_inlining_them() {
-    let (_, main_rs) = build_source("runtime_helpers", r#"print "hello""#);
+    let (_, main_rs) = build_source(
+        "runtime_helpers",
+        r#"import io
+
+io.print("hello")"#,
+    );
 
     assert!(
         main_rs.contains("use kiro_runtime::*;"),
@@ -281,11 +358,13 @@ fn std_fs_import_enables_tokio_fs_only() {
     let (cargo_toml, _) = build_source(
         "std_fs",
         r#"
+import io
+
 import std_fs
 
 fn main() {
     var exists = std_fs.exists("missing.txt")
-    print exists
+    io.print(exists)
 }
 
 main()
@@ -309,10 +388,12 @@ fn std_time_import_enables_tokio_time_only() {
     let (cargo_toml, _) = build_source(
         "std_time",
         r#"
+import io
+
 import std_time
 
 fn main() {
-    print std_time.now()
+    io.print(std_time.now())
 }
 
 main()
@@ -336,10 +417,12 @@ fn std_net_import_enables_reqwest_without_direct_fs_or_time_features() {
     let (cargo_toml, _) = build_source(
         "std_net",
         r#"
+import io
+
 import std_net
 
 fn main() {
-    print std_net.body("cached")
+    io.print(std_net.body("cached"))
 }
 
 main()
@@ -363,10 +446,12 @@ fn pipe_operations_enable_async_channel_and_kiro_pipe() {
     let (cargo_toml, main_rs) = build_source(
         "pipe_ops",
         r#"
+import io
+
 fn main() {
     var ch = pipe num
     give ch 7
-    print take ch
+    io.print(take ch)
 }
 
 main()
@@ -391,16 +476,48 @@ main()
 }
 
 #[test]
+fn io_alias_print_accepts_displayable_values() {
+    let (cargo_toml, main_rs) = build_source(
+        "io_alias_print",
+        r#"
+import io
+
+io.print(42)
+io.print(true)
+io.write("done")
+"#,
+    );
+
+    assert!(
+        cargo_toml.contains("tokio"),
+        "generated Cargo.toml should still contain tokio for async main:\n{}",
+        cargo_toml
+    );
+    assert!(
+        main_rs.contains("println!(\"{}\", (42.0).clone());"),
+        "io.print should lower to stdout newline display:\n{}",
+        main_rs
+    );
+    assert!(
+        main_rs.contains("print!(\"{}\", (String::from(\"done\")).clone());"),
+        "io.write should lower to stdout display without newline:\n{}",
+        main_rs
+    );
+}
+
+#[test]
 fn pipe_type_only_enables_async_channel_and_kiro_pipe() {
     let (cargo_toml, main_rs) = build_source(
         "pipe_type",
         r#"
+import io
+
 fn worker(ch: pipe num) {
-    print "ok"
+    io.print("ok")
 }
 
 fn main() {
-    print "ready"
+    io.print("ready")
 }
 
 main()

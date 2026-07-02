@@ -5,13 +5,15 @@ Once logic is clear, data modeling becomes the next major design step. Kiro give
 A struct represents one entity with named fields:
 
 ```kiro
+import io
+
 struct User {
     name: str
     age: num
 }
 
 var user = User { name: "Kiro", age: 10 }
-print user.name
+io.print(user.name)
 ```
 
 Use structs whenever fields belong together conceptually.
@@ -19,21 +21,25 @@ Use structs whenever fields belong together conceptually.
 A list stores ordered values of one type:
 
 ```kiro
+import io
+
 var nums = list num { 1, 2, 3 }
 nums push 4
-print (nums at 0)
-print nums
+io.print((nums at 0))
+io.print(nums)
 ```
 
 A map stores values by key, useful for lookups:
 
 ```kiro
+import io
+
 var scores = map str num {
     "Alice" 10,
     "Bob" 5
 }
 
-print (scores at "Alice")
+io.print((scores at "Alice"))
 ```
 
 The practical rule is simple: choose `struct` for one thing with many fields, `list` for many items in order, and `map` for fast access by key.

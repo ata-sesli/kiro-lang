@@ -83,10 +83,6 @@
         },
         {
           "type": "SYMBOL",
-          "name": "print_statement"
-        },
-        {
-          "type": "SYMBOL",
           "name": "expression_statement"
         }
       ]
@@ -943,23 +939,6 @@
           "content": {
             "type": "SYMBOL",
             "name": "identifier"
-          }
-        }
-      ]
-    },
-    "print_statement": {
-      "type": "SEQ",
-      "members": [
-        {
-          "type": "SYMBOL",
-          "name": "print_keyword"
-        },
-        {
-          "type": "FIELD",
-          "name": "value",
-          "content": {
-            "type": "SYMBOL",
-            "name": "expression"
           }
         }
       ]
@@ -2481,10 +2460,6 @@
     "move_keyword": {
       "type": "STRING",
       "value": "move"
-    },
-    "print_keyword": {
-      "type": "STRING",
-      "value": "print"
     },
     "len_keyword": {
       "type": "STRING",

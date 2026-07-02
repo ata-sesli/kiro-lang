@@ -1,11 +1,13 @@
 # Chapter 1: The Basics
 
-Kiro programs are easiest to understand when you see them as a sequence of explicit statements. You write values, combine them with operations, and print or return the result. This chapter introduces that rhythm so every later feature feels natural rather than abstract.
+Kiro programs are easiest to understand when you see them as a sequence of explicit statements. You write values, combine them with operations, and display or return the result. This chapter introduces that rhythm so every later feature feels natural rather than abstract.
 
 Begin with the smallest possible script:
 
 ```kiro
-print "Hello, Kiro!"
+import io
+
+io.print("Hello, Kiro!")
 ```
 
 Run it with:
@@ -27,10 +29,12 @@ is_active = true
 By default, these bindings are immutable. If you need to change a value later, declare it with `var`:
 
 ```kiro
+import io
+
 var count = 0
 count = count + 1
 count = count + 1
-print count
+io.print(count)
 ```
 
 This design encourages stable values by default and explicit mutability only when necessary.

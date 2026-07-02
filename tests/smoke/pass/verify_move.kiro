@@ -1,8 +1,10 @@
+import io
+
 fn main() {
-    print "--- Move Test ---"
+    io.print("--- Move Test ---")
     var a = "Hello"
     var b = move a
 
-    print "b: " + b
+    io.print("b: " + b)
 }
 main()

@@ -84,8 +84,11 @@ fn assert_success(output: &std::process::Output, context: &str) {
 fn run_uses_compiled_path_without_interpreter_prepass() {
     let dir = temp_project("run_compiled");
     link_runtime(&dir);
-    fs::write(dir.join("main.kiro"), "print \"compiled only\"\n")
-        .expect("main module should be written");
+    fs::write(
+        dir.join("main.kiro"),
+        "import io\n\nio.print(\"compiled only\")\n",
+    )
+    .expect("main module should be written");
 
     let output = run_kiro(&["run", "main.kiro"], &dir);
 
@@ -108,8 +111,11 @@ fn run_uses_compiled_path_without_interpreter_prepass() {
 fn bare_file_invocation_uses_compiled_path_without_interpreter_prepass() {
     let dir = temp_project("bare_compiled");
     link_runtime(&dir);
-    fs::write(dir.join("main.kiro"), "print \"bare compiled\"\n")
-        .expect("main module should be written");
+    fs::write(
+        dir.join("main.kiro"),
+        "import io\n\nio.print(\"bare compiled\")\n",
+    )
+    .expect("main module should be written");
 
     let output = run_kiro(&["main.kiro"], &dir);
 
@@ -169,8 +175,11 @@ fn no_interpret_flag_is_removed_from_bare_invocation() {
 #[test]
 fn interpret_executes_with_existing_interpreter() {
     let dir = temp_project("interpret");
-    fs::write(dir.join("main.kiro"), "print \"interpreted\"\n")
-        .expect("main module should be written");
+    fs::write(
+        dir.join("main.kiro"),
+        "import io\n\nio.print(\"interpreted\")\n",
+    )
+    .expect("main module should be written");
 
     let output = run_kiro(&["interpret", "main.kiro"], &dir);
 
@@ -186,8 +195,11 @@ fn interpret_executes_with_existing_interpreter() {
 fn interpret_without_file_uses_manifest_entry() {
     let dir = temp_project("interpret_manifest");
     write_manifest(&dir, "main.kiro");
-    fs::write(dir.join("main.kiro"), "print \"manifest interpreted\"\n")
-        .expect("main module should be written");
+    fs::write(
+        dir.join("main.kiro"),
+        "import io\n\nio.print(\"manifest interpreted\")\n",
+    )
+    .expect("main module should be written");
 
     let output = run_kiro(&["interpret"], &dir);
 
@@ -205,11 +217,13 @@ fn interpret_rejects_static_errors_before_execution() {
     fs::write(
         dir.join("main.kiro"),
         r#"
+import io
+
 fn bad() {
-    print missing_name
+    io.print(missing_name)
 }
 
-print "must not run"
+io.print("must not run")
 "#,
     )
     .expect("main module should be written");
@@ -238,11 +252,13 @@ fn run_rejects_static_errors_before_execution_or_rust_build() {
     fs::write(
         dir.join("main.kiro"),
         r#"
+import io
+
 fn bad() {
-    print missing_name
+    io.print(missing_name)
 }
 
-print "must not run"
+io.print("must not run")
 "#,
     )
     .expect("main module should be written");

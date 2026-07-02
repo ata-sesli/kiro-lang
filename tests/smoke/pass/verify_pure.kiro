@@ -1,3 +1,5 @@
+import io
+
 pure fn add_pure(a: num, b: num) -> num {
     return a + b
 }
@@ -10,27 +12,27 @@ pure fn check_scope(val: num) -> num {
 }
 
 fn main() {
-    print "--- Pure Verification ---"
+    io.print("--- Pure Verification ---")
 
     // 1. Immutable Declaration
     x = 10
-    print x
+    io.print(x)
 
     // 2. Mutable Declaration
     var y = 20
     y = 21 // Mutation allowed
-    print y
+    io.print(y)
 
     // 3. Pure Call with Immutable (x)
-    print add_pure(x, 15)
+    io.print(add_pure(x, 15))
 
     // 4. Pure Call with Literal (Immutable)
-    print add_pure(100, 200)
+    io.print(add_pure(100, 200))
 
     // 5. Pure Scope check
-    print check_scope(5)
+    io.print(check_scope(5))
 
-    print "--- Passed ---"
+    io.print("--- Passed ---")
 }
 
 main()

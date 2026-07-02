@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use crate::compiler::{Compiler, FunctionInfo};
 use crate::errors::{ErrorCode, ErrorPhase, KiroError};
 use crate::grammar::{self, grammar as ast};
-use crate::{StdAssets, unsupported_let_line};
+use crate::{
+    StdAssets, is_reserved_std_module_name, removed_print_statement, std_asset_path,
+    unsupported_let_line,
+};
 
 pub type SourceOverlays = HashMap<PathBuf, String>;
 
@@ -92,6 +95,14 @@ impl AnalysisCtx {
                 "let",
             ));
         }
+        if let Some(removed) = removed_print_statement(&source) {
+            return Err(KiroError::removed_print_statement(
+                &file_name_for(&path),
+                &source,
+                removed.line,
+                removed.column,
+            ));
+        }
         let program = grammar::parse(&source)
             .map_err(|e| KiroError::parse_failed(&file_name_for(&path), &format!("{:?}", e)))?;
 
@@ -101,7 +112,7 @@ impl AnalysisCtx {
         }
 
         let rust_decls = rust_decl_names(&program);
-        if !name.starts_with("std_") && !rust_decls.is_empty() {
+        if !is_reserved_std_module_name(name) && !rust_decls.is_empty() {
             let glue_path = path.with_extension("rs");
             if !glue_path.exists() {
                 let mut missing = rust_decls.into_iter().collect::<Vec<_>>();
@@ -117,7 +128,7 @@ impl AnalysisCtx {
         }
 
         for import in imports(&program) {
-            let import_dir = if import.starts_with("std_") {
+            let import_dir = if is_reserved_std_module_name(&import) {
                 PathBuf::from(".")
             } else {
                 path.parent()
@@ -146,13 +157,23 @@ impl AnalysisCtx {
         base_dir: &Path,
         explicit_path: Option<PathBuf>,
     ) -> Result<(PathBuf, String), KiroError> {
-        if name.starts_with("std_") {
-            let module_name = &name[4..];
-            let asset_path = format!("{}/{}.kiro", module_name, name);
+        if explicit_path.is_none()
+            && let Some(asset_path) = std_asset_path(
+                name,
+                &format!(
+                    "{}.kiro",
+                    crate::canonical_std_module_name(name).unwrap_or(name)
+                ),
+            )
+        {
             let source = StdAssets::get(&asset_path)
                 .map(|f| std::str::from_utf8(f.data.as_ref()).unwrap().to_string())
                 .ok_or_else(|| KiroError::file_not_found(&format!("{}.kiro", name)))?;
-            return Ok((PathBuf::from(format!("{}.kiro", name)), source));
+            let canonical = crate::canonical_std_module_name(name).unwrap_or(name);
+            return Ok((PathBuf::from(format!("{}.kiro", canonical)), source));
+        }
+        if explicit_path.is_none() && name.starts_with("std_") {
+            return Err(KiroError::file_not_found(&format!("{}.kiro", name)));
         }
 
         let path = explicit_path.unwrap_or_else(|| base_dir.join(format!("{}.kiro", name)));

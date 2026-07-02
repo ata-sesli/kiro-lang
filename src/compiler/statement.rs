@@ -49,7 +49,11 @@ impl Compiler {
             // 6. Import Statement
             Statement::Import { module_name, .. } => {
                 self.imported_modules.insert(module_name.clone());
-                format!("pub mod {};", module_name)
+                if self.options.skipped_module_imports.contains(&module_name) {
+                    String::new()
+                } else {
+                    format!("pub mod {};", module_name)
+                }
             }
             // 1. Variable Declaration
             Statement::VarDecl { ident, value, .. } => {
@@ -118,13 +122,6 @@ impl Compiler {
                         format!("{}.kiro_assign({});", lhs_str, rhs_str)
                     }
                 }
-            }
-            Statement::Print(_, expr) => {
-                if self.in_pure_context {
-                    panic!("Pure Function Error: 'print' is forbidden.");
-                }
-                let val = self.compile_expr(expr);
-                format!("println!(\"{{}}\", {});", val)
             }
             Statement::On {
                 condition,

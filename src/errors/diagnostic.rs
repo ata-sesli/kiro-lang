@@ -113,6 +113,28 @@ impl KiroError {
         .with_help("Use 'var x = ...' (mutable) or 'x = ...' (immutable).")
     }
 
+    pub fn removed_print_statement(
+        file_or_module: &str,
+        source: &str,
+        line: usize,
+        column: usize,
+    ) -> Self {
+        Self::new(
+            ErrorCode::UnsupportedKeyword,
+            ErrorPhase::Parse,
+            "'print' statement was removed.",
+        )
+        .with_source_span(
+            file_or_module,
+            source,
+            line,
+            column,
+            "print".len(),
+            "removed print statement",
+        )
+        .with_help("use `import io` and `io.print(value)`")
+    }
+
     pub fn parse_failed(file_or_module: &str, details: &str) -> Self {
         Self::new(
             ErrorCode::ParseFailed,

@@ -7,7 +7,10 @@ use kiro_lang::grammar;
 use kiro_lang::interpreter;
 use kiro_lang::project;
 use kiro_lang::test_runner;
-use kiro_lang::{StdAssets, unsupported_let_line};
+use kiro_lang::{
+    StdAssets, canonical_std_module_name, removed_print_statement, std_asset_path,
+    unsupported_let_line,
+};
 
 use std::collections::HashMap;
 use std::fs;
@@ -108,7 +111,12 @@ entry = "main.kiro"
         project_name
     );
 
-    let main_kiro_content = format!(r#"print "Hello from {}!""#, project_name);
+    let main_kiro_content = format!(
+        r#"import io
+
+io.print("Hello from {}!")"#,
+        project_name
+    );
 
     if let Err(e) = fs::write(path.join("kiro.toml"), toml_content) {
         eprintln!("Error creating kiro.toml: {}", e);
@@ -159,12 +167,14 @@ fn handle_add(dep: &str) {
     }
 
     // 1. Check for Reserved Prefix (std_)
-    let embedded_path = if dep.starts_with("std_") {
-        let key = dep.trim_start_matches("std_");
-        format!("{}/header.rs", key)
-    } else {
-        format!("{}/header.rs", dep)
-    };
+    let embedded_path = std_asset_path(dep, "header.rs").unwrap_or_else(|| {
+        if dep.starts_with("std_") {
+            let key = dep.trim_start_matches("std_");
+            format!("{}/header.rs", key)
+        } else {
+            format!("{}/header.rs", dep)
+        }
+    });
 
     if dep.starts_with("std_") {
         if StdAssets::get(&embedded_path).is_none() {
@@ -261,8 +271,7 @@ fn handle_remove(dep: &str) {
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let cli = Cli::parse();
 
     match &cli.command {
@@ -296,8 +305,21 @@ async fn main() {
             }
         }
         Some(Commands::Lsp) => {
+            #[cfg(feature = "lsp")]
             if let Err(e) = kiro_lang::lsp::run() {
                 emit_error(&e);
+                std::process::exit(1);
+            }
+            #[cfg(not(feature = "lsp"))]
+            {
+                emit_error(
+                    &KiroError::new(
+                        errors::ErrorCode::BuildGraphFailed,
+                        errors::ErrorPhase::Cli,
+                        "The 'lsp' subcommand is unavailable because this binary was built without the 'lsp' feature.",
+                    )
+                    .with_help("rebuild with `--features lsp` or use the default feature set"),
+                );
                 std::process::exit(1);
             }
         }
@@ -556,6 +578,15 @@ fn run_interpreter(filename: &str) -> bool {
         emit_error(&KiroError::unsupported_keyword(filename, line, "let"));
         return false;
     }
+    if let Some(removed) = removed_print_statement(&source) {
+        emit_error(&KiroError::removed_print_statement(
+            filename,
+            &source,
+            removed.line,
+            removed.column,
+        ));
+        return false;
+    }
 
     let prog = match grammar::parse(&source) {
         Ok(p) => p,
@@ -601,7 +632,7 @@ fn run_compiler(
     }
 
     let requirements = build_requirements(&analysis.modules);
-    let header = build_header_content(&analysis.modules);
+    let header = build_header_content(&analysis.modules, &requirements);
     let root_name = module_name_from_path(&analysis.root)?;
     let module_functions = analysis.module_functions.clone();
     let mut modules = analysis.modules;
@@ -614,6 +645,9 @@ fn run_compiler(
     module_names.sort();
 
     for name in module_names {
+        if requirements.skips_module_import(&name) {
+            continue;
+        }
         if let Some(module) = modules.remove(&name) {
             compile_analyzed_module(module, false, &module_functions, &requirements, &pm)?;
         }
@@ -672,25 +706,45 @@ fn execute_binary(path: PathBuf) -> Result<(), String> {
 
 fn build_requirements(modules: &HashMap<String, analysis::AnalyzedModule>) -> BuildRequirements {
     let mut requirements = BuildRequirements::default();
+    let std_io_module_needed = modules
+        .values()
+        .any(|module| compiler::program_uses_std_io_module(&module.program));
     for module in modules.values() {
-        requirements.record_module(&module.name);
+        let module_name = canonical_std_module_name(&module.name).unwrap_or(&module.name);
+        if module_name == "std_io" && !std_io_module_needed {
+            requirements.skip_module_import(module.name.clone());
+            continue;
+        }
+        requirements.record_module(module_name);
         requirements.record_pipes(compiler::program_uses_pipes(&module.program));
+        requirements.record_anyhow(compiler::program_uses_anyhow(&module.program));
     }
     requirements
 }
 
-fn build_header_content(modules: &HashMap<String, analysis::AnalyzedModule>) -> String {
+fn build_header_content(
+    modules: &HashMap<String, analysis::AnalyzedModule>,
+    requirements: &BuildRequirements,
+) -> String {
     let mut header = BuildManager::header_preamble().to_string();
     let mut module_names: Vec<String> = modules.keys().cloned().collect();
     module_names.sort();
+    let mut embedded_headers = std::collections::HashSet::new();
 
     for name in module_names {
         let Some(module) = modules.get(&name) else {
             continue;
         };
-        if name.starts_with("std_") {
-            let module_suffix = &name[4..];
-            let header_path = format!("{}/header.rs", module_suffix);
+        if requirements.skips_module_import(&module.name) {
+            continue;
+        }
+        if let Some(canonical) = canonical_std_module_name(&name) {
+            if !embedded_headers.insert(canonical.to_string()) {
+                continue;
+            }
+            let Some(header_path) = std_asset_path(canonical, "header.rs") else {
+                continue;
+            };
             if let Some(file) = StdAssets::get(&header_path) {
                 let header_content = std::str::from_utf8(file.data.as_ref()).unwrap();
                 let content = header_content
@@ -737,6 +791,7 @@ fn compile_analyzed_module(
         module_functions.clone(),
         compiler::CompilerOptions {
             uses_pipes: requirements.uses_pipes,
+            skipped_module_imports: requirements.skipped_module_imports.clone(),
         },
     );
     let code = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

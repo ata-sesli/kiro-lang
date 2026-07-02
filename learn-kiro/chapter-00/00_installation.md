@@ -28,7 +28,9 @@ cd kiro-playground
 Create a first program file named `hello.kiro`:
 
 ```kiro
-print "Hello, Kiro!"
+import io
+
+io.print("Hello, Kiro!")
 ```
 
 Run it:

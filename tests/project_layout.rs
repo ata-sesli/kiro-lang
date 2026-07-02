@@ -75,7 +75,11 @@ fn no_file_run_uses_manifest_entry() {
     let dir = temp_project("run_entry");
     link_runtime(&dir);
     write_manifest(&dir, "main.kiro");
-    fs::write(dir.join("main.kiro"), "print \"manifest run\"\n").expect("entry should be written");
+    fs::write(
+        dir.join("main.kiro"),
+        "import io\n\nio.print(\"manifest run\")\n",
+    )
+    .expect("entry should be written");
 
     let output = run_kiro(&["run"], &dir);
 
@@ -97,8 +101,11 @@ fn no_file_build_and_check_use_manifest_entry() {
     let dir = temp_project("build_check_entry");
     link_runtime(&dir);
     write_manifest(&dir, "main.kiro");
-    fs::write(dir.join("main.kiro"), "print \"manifest command\"\n")
-        .expect("entry should be written");
+    fs::write(
+        dir.join("main.kiro"),
+        "import io\n\nio.print(\"manifest command\")\n",
+    )
+    .expect("entry should be written");
 
     let build = run_kiro(&["build"], &dir);
     assert!(
@@ -129,7 +136,11 @@ fn bare_kiro_uses_manifest_entry_from_subdirectory() {
     let nested = dir.join("tasks/nested");
     fs::create_dir_all(&nested).expect("nested dir should be created");
     write_manifest(&dir, "main.kiro");
-    fs::write(dir.join("main.kiro"), "print \"walked up\"\n").expect("entry should be written");
+    fs::write(
+        dir.join("main.kiro"),
+        "import io\n\nio.print(\"walked up\")\n",
+    )
+    .expect("entry should be written");
 
     let output = run_kiro(&[], &nested);
 
@@ -151,9 +162,16 @@ fn explicit_file_overrides_manifest_entry() {
     let dir = temp_project("explicit_override");
     link_runtime(&dir);
     write_manifest(&dir, "main.kiro");
-    fs::write(dir.join("main.kiro"), "print \"manifest\"\n").expect("entry should be written");
-    fs::write(dir.join("other.kiro"), "print \"explicit\"\n")
-        .expect("other file should be written");
+    fs::write(
+        dir.join("main.kiro"),
+        "import io\n\nio.print(\"manifest\")\n",
+    )
+    .expect("entry should be written");
+    fs::write(
+        dir.join("other.kiro"),
+        "import io\n\nio.print(\"explicit\")\n",
+    )
+    .expect("other file should be written");
 
     let output = run_kiro(&["run", "other.kiro"], &dir);
 
@@ -245,9 +263,11 @@ fn local_modules_remain_sibling_flat_modules() {
     fs::write(
         dir.join("main.kiro"),
         r#"
+import io
+
 import math
 
-print math.add(2, 3)
+io.print(math.add(2, 3))
 "#,
     )
     .expect("main should be written");

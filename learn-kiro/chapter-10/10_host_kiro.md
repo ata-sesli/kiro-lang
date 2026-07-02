@@ -13,14 +13,16 @@ This declaration is a contract between Kiro code and Rust code. Name, parameter 
 Calling the function is no different from calling a regular Kiro function:
 
 ```kiro
+import io
+
 error FileNotFound = "File not found"
 
 var content = read_file("data.txt")
 
 on (content == FileNotFound) {
-    print "Missing file"
+    io.print("Missing file")
 } off {
-    print content
+    io.print(content)
 }
 ```
 

@@ -1,5 +1,7 @@
+import io
+
 struct A {
     x: num
 }
 var a = A { x: 10 }
-print a.x
+io.print(a.x)

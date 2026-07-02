@@ -1,42 +1,44 @@
+import io
+
 // Test for std net module
 import std_net
 
 fn main() {
-    print "=== Testing std_net ==="
+    io.print("=== Testing std_net ===")
 
     // Test get
-    print "Testing get..."
+    io.print("Testing get...")
     var get_result = std_net.get("https://httpbin.org/get")
     on (get_result) {
-        print "get: received response"
+        io.print("get: received response")
     } error {
-        print "get: Error"
+        io.print("get: Error")
     }
 
     // Test status
-    print "Testing status..."
+    io.print("Testing status...")
     var status_result = std_net.status("https://httpbin.org/status/200")
     on (status_result) {
-        print status_result
+        io.print(status_result)
     } error {
-        print "status: Error"
+        io.print("status: Error")
     }
 
     // Test post
-    print "Testing post..."
+    io.print("Testing post...")
     var post_result = std_net.post("https://httpbin.org/post", "test body")
     on (post_result) {
-        print "post: received response"
+        io.print("post: received response")
     } error {
-        print "post: Error"
+        io.print("post: Error")
     }
 
     // Test body (passthrough)
-    print "Testing body..."
+    io.print("Testing body...")
     var body_result = std_net.body("test string")
-    print body_result
+    io.print(body_result)
 
-    print "=== std_net tests complete ==="
+    io.print("=== std_net tests complete ===")
 }
 
 main()

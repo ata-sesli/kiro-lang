@@ -5,11 +5,13 @@ As programs grow, structure matters more than syntax. Functions let you name beh
 A Kiro function declares inputs and output type explicitly:
 
 ```kiro
+import io
+
 fn add(a: num, b: num) -> num {
     return a + b
 }
 
-print add(2, 3)
+io.print(add(2, 3))
 ```
 
 That signature is a contract. Readers immediately understand what the function accepts and what it returns.
@@ -40,20 +42,24 @@ Function references are now supported for named pure functions. This lets you pa
 A function reference is created with `ref` and a function name:
 
 ```kiro
+import io
+
 pure fn inc(x: num) -> num { return x + 1 }
 
 f = ref inc
-print f(10)
+io.print(f(10))
 ```
 
 You can type function parameters with `fn(...) -> ...`:
 
 ```kiro
+import io
+
 pure fn apply(x: num, f: fn(num) -> num) -> num {
     return f(x)
 }
 
-print apply(5, ref inc)
+io.print(apply(5, ref inc))
 ```
 
 You can also return function references:
@@ -87,8 +93,10 @@ pure fn pi() -> num {
 `main.kiro`:
 
 ```kiro
+import io
+
 import mylib
-print mylib.pi()
+io.print(mylib.pi())
 ```
 
 This module boundary is the foundation for larger projects. A project can add an optional `kiro.toml` at the root:

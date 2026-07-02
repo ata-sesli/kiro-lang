@@ -1,38 +1,40 @@
+import io
+
 // Test for std env module
 import std_env
 
 fn main() {
-    print "=== Testing std_env ==="
+    io.print("=== Testing std_env ===")
 
     // Test set
-    print "Testing set..."
+    io.print("Testing set...")
     std_env.set("KIRO_TEST_VAR", "hello_kiro")
-    print "set: KIRO_TEST_VAR = hello_kiro"
+    io.print("set: KIRO_TEST_VAR = hello_kiro")
 
     // Test get
-    print "Testing get..."
+    io.print("Testing get...")
     var get_result = std_env.get("KIRO_TEST_VAR")
     on (get_result) {
-        print "get: " + get_result
+        io.print("get: " + get_result)
     } error {
-        print "get: Error"
+        io.print("get: Error")
     }
 
     // Test get non-existent
-    print "Testing get non-existent..."
+    io.print("Testing get non-existent...")
     var missing = std_env.get("KIRO_NONEXISTENT_VAR_12345")
     on (missing) {
-        print "unexpected: found " + missing
+        io.print("unexpected: found " + missing)
     } error {
-        print "get non-existent: Error (expected)"
+        io.print("get non-existent: Error (expected)")
     }
 
     // Test args
-    print "Testing args..."
+    io.print("Testing args...")
     var args_list = std_env.args()
-    print "args: received argument list"
+    io.print("args: received argument list")
 
-    print "=== std_env tests complete ==="
+    io.print("=== std_env tests complete ===")
 }
 
 main()

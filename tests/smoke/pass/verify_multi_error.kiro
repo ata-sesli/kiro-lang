@@ -1,20 +1,22 @@
 import std_fs
+import io
+
 
 fn main() {
-    print "Testing multi-error..."
+    io.print("Testing multi-error...")
     var res = std_fs.read("non_existent_file_xyz")
 
     // Test: Should skip PermissionDenied and match NotFound
     on (res) {
-        print "Should not be here"
+        io.print("Should not be here")
     } error PermissionDenied {
-        print "Caught PermissionDenied (Unexpected)"
+        io.print("Caught PermissionDenied (Unexpected)")
     } error NotFound {
-        print "Caught NotFound (Expected)"
+        io.print("Caught NotFound (Expected)")
     } error {
-        print "Caught generic (Unexpected)"
+        io.print("Caught generic (Unexpected)")
     }
 
-    print "Done"
+    io.print("Done")
 }
 main()

@@ -1,3 +1,5 @@
+import io
+
 fn get_message() -> str {
     return "Hello Generics"
 }
@@ -11,18 +13,18 @@ fn entry() -> num {
     var p = ref "Current Status"
     var c = pipe bool
 
-    print deref p
+    io.print(deref p)
     give c true
 
     var res = take c
     on (res) {
-        print "Pipe worked!"
+        io.print("Pipe worked!")
     } off {
-        print "Pipe failed"
+        io.print("Pipe failed")
     }
 
-    print get_message()
+    io.print(get_message())
     return 0
 }
 
-print entry()
+io.print(entry())

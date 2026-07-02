@@ -12,7 +12,10 @@ use crate::interpreter::values::RuntimeVal as InterpreterRuntimeVal;
 use crate::interpreter::{
     HostCallCtx as InterpreterHostCallCtx, HostFnHandler, Interpreter, InterpreterLimits,
 };
-use crate::{StdAssets, unsupported_let_line};
+use crate::{
+    StdAssets, canonical_std_module_name, removed_print_statement, std_asset_path,
+    unsupported_let_line,
+};
 
 pub use crate::interpreter::HostMode;
 
@@ -191,9 +194,9 @@ pub struct DefaultModuleLoader;
 
 impl ModuleLoader for DefaultModuleLoader {
     fn load(&self, module_name: &str, from_dir: &Path) -> Result<LoadedModule, EngineError> {
-        if module_name.starts_with("std_") {
-            let key = &module_name[4..];
-            let asset_path = format!("{}/{}.kiro", key, module_name);
+        if let Some(canonical) = canonical_std_module_name(module_name) {
+            let asset_path = std_asset_path(module_name, &format!("{}.kiro", canonical))
+                .expect("known std module should have an asset path");
             let source = StdAssets::get(&asset_path)
                 .map(|f| std::str::from_utf8(f.data.as_ref()).unwrap().to_string())
                 .ok_or_else(|| {
@@ -204,10 +207,16 @@ impl ModuleLoader for DefaultModuleLoader {
                 })?;
 
             return Ok(LoadedModule {
-                cache_key: format!("std://{}", module_name),
+                cache_key: format!("std://{}", canonical),
                 source,
                 base_dir: from_dir.to_path_buf(),
             });
+        }
+        if module_name.starts_with("std_") {
+            return Err(EngineError::Load(format!(
+                "Standard library module '{}' not found in embedded assets",
+                module_name
+            )));
         }
 
         let filename = format!("{}.kiro", module_name);
@@ -357,6 +366,12 @@ impl Engine {
             return Err(EngineError::Parse(format!(
                 "Unsupported keyword 'let' in module '{}' at line {}.",
                 module_name, line
+            )));
+        }
+        if let Some(removed) = removed_print_statement(source) {
+            return Err(EngineError::Parse(format!(
+                "'print' statement was removed in module '{}' at line {}. use `import io` and `io.print(value)`",
+                module_name, removed.line
             )));
         }
 

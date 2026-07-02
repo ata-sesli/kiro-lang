@@ -1,3 +1,5 @@
+import io
+
 x = 100 // External variable
 
 pure fn add(a: num, b: num) -> num {
@@ -5,6 +7,6 @@ pure fn add(a: num, b: num) -> num {
 }
 
 fn main() {
-    print add(10, 20)
+    io.print(add(10, 20))
 }
 main()

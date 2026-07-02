@@ -253,10 +253,6 @@
           "named": true
         },
         {
-          "type": "print_statement",
-          "named": true
-        },
-        {
           "type": "rest_statement",
           "named": true
         },
@@ -1328,32 +1324,6 @@
     }
   },
   {
-    "type": "print_statement",
-    "named": true,
-    "fields": {
-      "value": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "expression",
-            "named": true
-          }
-        ]
-      }
-    },
-    "children": {
-      "multiple": false,
-      "required": true,
-      "types": [
-        {
-          "type": "print_keyword",
-          "named": true
-        }
-      ]
-    }
-  },
-  {
     "type": "push_expression",
     "named": true,
     "fields": {
@@ -1628,10 +1598,6 @@
         },
         {
           "type": "on_statement",
-          "named": true
-        },
-        {
-          "type": "print_statement",
           "named": true
         },
         {
@@ -2068,10 +2034,6 @@
   },
   {
     "type": "plus_operator",
-    "named": true
-  },
-  {
-    "type": "print_keyword",
     "named": true
   },
   {

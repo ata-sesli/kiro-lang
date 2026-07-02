@@ -1,3 +1,5 @@
+import io
+
 // Chapter 4: Data Structures
 
 // 1. Structs
@@ -7,23 +9,23 @@ struct Item {
 }
 
 var apple = Item { name: "Apple", price: 0.5 }
-print "Item: " + apple.name + " Cost: " + apple.price
+io.print("Item: " + apple.name + " Cost: " + apple.price)
 
 // 2. Lists
-print "\n--- Lists ---"
+io.print("\n--- Lists ---")
 var items = list Item {}
 items push apple
 items push Item { name: "Banana", price: 0.8 }
 
 loop i in items {
-    print "- " + i.name
+    io.print("- " + i.name)
 }
 
 // 3. Maps
-print "\n--- Maps ---"
+io.print("\n--- Maps ---")
 var stock = map str num {
     "Apple" 100,
     "Banana" 50
 }
 var val = stock at "Apple"
-print "Apple Stock: " + val
+io.print("Apple Stock: " + val)

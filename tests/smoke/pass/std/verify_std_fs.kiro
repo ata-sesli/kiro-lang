@@ -1,47 +1,49 @@
+import io
+
 // Test for std fs module
 import std_fs
 
 fn main() {
-    print "=== Testing std_fs ==="
+    io.print("=== Testing std_fs ===")
 
     // Test write
-    print "Testing write..."
+    io.print("Testing write...")
     var write_result = std_fs.write("test_file.txt", "Hello from Kiro!")
     on (write_result) {
-        print "write: Success"
+        io.print("write: Success")
     } error {
-        print "write: Error"
+        io.print("write: Error")
     }
 
     // Test exists
-    print "Testing exists..."
+    io.print("Testing exists...")
     var exists_result = std_fs.exists("test_file.txt")
-    print exists_result
+    io.print(exists_result)
 
     // Test read
-    print "Testing read..."
+    io.print("Testing read...")
     var read_result = std_fs.read("test_file.txt")
     on (read_result) {
-        print read_result
+        io.print(read_result)
     } error {
-        print "read: Error"
+        io.print("read: Error")
     }
 
     // Test remove
-    print "Testing remove..."
+    io.print("Testing remove...")
     var remove_result = std_fs.remove("test_file.txt")
     on (remove_result) {
-        print "remove: Success"
+        io.print("remove: Success")
     } error {
-        print "remove: Error"
+        io.print("remove: Error")
     }
 
     // Verify file is gone
-    print "Testing exists after remove..."
+    io.print("Testing exists after remove...")
     var exists_after = std_fs.exists("test_file.txt")
-    print exists_after
+    io.print(exists_after)
 
-    print "=== std_fs tests complete ==="
+    io.print("=== std_fs tests complete ===")
 }
 
 main()

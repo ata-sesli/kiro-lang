@@ -1,5 +1,7 @@
+import io
+
 fn do_nothing() {
-    print "Doing nothing"
+    io.print("Doing nothing")
 }
 
 fn signal() -> void {
@@ -12,15 +14,15 @@ fn main() -> num {
     // Check if we can assign later
     ptr = ref "Now I exist"
 
-    print deref ptr
+    io.print(deref ptr)
 
     do_nothing()
     signal()
 
     var v_ptr = adr void
-    print v_ptr
+    io.print(v_ptr)
 
     return 0
 }
 
-print main()
+io.print(main())

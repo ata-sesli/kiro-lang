@@ -28,15 +28,17 @@ fn check(val: num) -> str! {
 At the call site, handle outcomes explicitly:
 
 ```kiro
+import io
+
 var res = check(55)
 
 on (res == TooSmall) {
-    print "Too small"
+    io.print("Too small")
 } off {
     on (res == TooBig) {
-        print "Too big"
+        io.print("Too big")
     } off {
-        print "Success: " + res
+        io.print("Success: " + res)
     }
 }
 ```

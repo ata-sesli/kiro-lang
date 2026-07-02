@@ -5,12 +5,14 @@ A useful program does not just execute lines blindly. It branches when condition
 Conditional branching uses `on` and `off`:
 
 ```kiro
+import io
+
 score = 85
 
 on (score >= 90) {
-    print "Grade A"
+    io.print("Grade A")
 } off {
-    print "Not A"
+    io.print("Not A")
 }
 ```
 
@@ -19,9 +21,11 @@ Read this as: run the first block when the condition is true, otherwise run the 
 For repeated execution based on a condition, use `loop on (...)`:
 
 ```kiro
+import io
+
 var i = 0
 loop on (i < 3) {
-    print i
+    io.print(i)
     i = i + 1
 }
 ```
@@ -29,24 +33,30 @@ loop on (i < 3) {
 When you already know a numeric interval, range loops are cleaner:
 
 ```kiro
+import io
+
 loop x in 0..5 {
-    print x
+    io.print(x)
 }
 ```
 
 You can step through ranges with `per`:
 
 ```kiro
+import io
+
 loop n in 0..10 per 2 {
-    print n
+    io.print(n)
 }
 ```
 
 And you can filter iterations with `on` inside range loops:
 
 ```kiro
+import io
+
 loop n in 0..10 on (n > 5) {
-    print n
+    io.print(n)
 }
 ```
 

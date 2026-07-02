@@ -1,3 +1,5 @@
+import io
+
 /// Adds two numbers.
 /// Returns the sum.
 pure fn add(a: num, b: num) -> num {
@@ -11,7 +13,7 @@ struct User {
 }
 
 fn main() {
-    print add(10, 20)
-    print "Docs parsed successfully!"
+    io.print(add(10, 20))
+    io.print("Docs parsed successfully!")
 }
 main()

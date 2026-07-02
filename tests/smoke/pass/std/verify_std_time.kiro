@@ -1,28 +1,30 @@
+import io
+
 // Test for std time module
 import std_time
 
 fn main() {
-    print "=== Testing std_time ==="
+    io.print("=== Testing std_time ===")
 
     // Test now
-    print "Testing now..."
+    io.print("Testing now...")
     var timestamp = std_time.now()
-    print timestamp
+    io.print(timestamp)
 
     // Test monotonic
-    print "Testing monotonic..."
+    io.print("Testing monotonic...")
     var mono = std_time.monotonic()
-    print mono
+    io.print(mono)
 
     // Test sleep
-    print "Testing sleep (100ms)..."
+    io.print("Testing sleep (100ms)...")
     var before = std_time.now()
     std_time.sleep(100)
     var after = std_time.now()
     var elapsed = after - before
-    print elapsed
+    io.print(elapsed)
 
-    print "=== std_time tests complete ==="
+    io.print("=== std_time tests complete ===")
 }
 
 main()

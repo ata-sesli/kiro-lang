@@ -81,6 +81,7 @@ fn server_capabilities() -> ServerCapabilities {
 #[derive(Default)]
 struct LspState {
     documents: HashMap<Uri, OpenDocument>,
+    symbol_cache: HashMap<PathBuf, SymbolIndex>,
 }
 
 #[derive(Clone)]
@@ -158,6 +159,7 @@ impl LspState {
                             version: Some(params.text_document.version),
                         },
                     );
+                    self.clear_symbol_cache();
                 }
             }
             "textDocument/didChange" => {
@@ -168,6 +170,7 @@ impl LspState {
                 {
                     document.text = change.text;
                     document.version = Some(params.text_document.version);
+                    self.clear_symbol_cache();
                 }
             }
             "textDocument/didSave" => {
@@ -178,12 +181,14 @@ impl LspState {
                 {
                     document.text = text;
                 }
+                self.clear_symbol_cache();
                 self.publish_diagnostics(connection, &params.text_document.uri)?;
             }
             "textDocument/didClose" => {
                 let params: DidCloseTextDocumentParams =
                     serde_json::from_value(notification.params).map_err(lsp_error)?;
                 self.documents.remove(&params.text_document.uri);
+                self.clear_symbol_cache();
                 publish(connection, params.text_document.uri, Vec::new(), None)?;
             }
             _ => {}
@@ -218,7 +223,7 @@ impl LspState {
         serde_json::to_value(edits).map_err(lsp_error)
     }
 
-    fn definition(&self, params: Value) -> Result<Value, KiroError> {
+    fn definition(&mut self, params: Value) -> Result<Value, KiroError> {
         let params: GotoDefinitionParams = serde_json::from_value(params).map_err(lsp_error)?;
         let doc = params.text_document_position_params;
         let Some((path, source)) = self.source_for_uri(&doc.text_document.uri) else {
@@ -231,7 +236,7 @@ impl LspState {
         serde_json::to_value(location).map_err(lsp_error)
     }
 
-    fn hover(&self, params: Value) -> Result<Value, KiroError> {
+    fn hover(&mut self, params: Value) -> Result<Value, KiroError> {
         let params: HoverParams = serde_json::from_value(params).map_err(lsp_error)?;
         let doc = params.text_document_position_params;
         let Some((path, source)) = self.source_for_uri(&doc.text_document.uri) else {
@@ -252,7 +257,7 @@ impl LspState {
         serde_json::to_value(hover).map_err(lsp_error)
     }
 
-    fn completion(&self, params: Value) -> Result<Value, KiroError> {
+    fn completion(&mut self, params: Value) -> Result<Value, KiroError> {
         let params: lsp_types::CompletionParams =
             serde_json::from_value(params).map_err(lsp_error)?;
         let doc = params.text_document_position;
@@ -283,7 +288,7 @@ impl LspState {
         serde_json::to_value(items).map_err(lsp_error)
     }
 
-    fn signature_help(&self, params: Value) -> Result<Value, KiroError> {
+    fn signature_help(&mut self, params: Value) -> Result<Value, KiroError> {
         let params: SignatureHelpParams = serde_json::from_value(params).map_err(lsp_error)?;
         let doc = params.text_document_position_params;
         let Some((path, source)) = self.source_for_uri(&doc.text_document.uri) else {
@@ -296,7 +301,7 @@ impl LspState {
         serde_json::to_value(help).map_err(lsp_error)
     }
 
-    fn document_symbols(&self, params: Value) -> Result<Value, KiroError> {
+    fn document_symbols(&mut self, params: Value) -> Result<Value, KiroError> {
         let params: DocumentSymbolParams = serde_json::from_value(params).map_err(lsp_error)?;
         let Some((path, source)) = self.source_for_uri(&params.text_document.uri) else {
             return serde_json::to_value(Vec::<DocumentSymbol>::new()).map_err(lsp_error);
@@ -321,16 +326,30 @@ impl LspState {
             .collect()
     }
 
-    fn symbol_index_for(&self, path: &Path, source: &str) -> SymbolIndex {
+    fn symbol_index_for(&mut self, path: &Path, source: &str) -> SymbolIndex {
+        if let Some(index) = self.symbol_cache.get(path) {
+            return index.clone();
+        }
         let mut overlays = self.source_overlays();
         overlays.insert(path.to_path_buf(), source.to_string());
-        SymbolIndex::build(path, &overlays)
+        let index = SymbolIndex::build(path, &overlays);
+        self.symbol_cache.insert(path.to_path_buf(), index.clone());
+        index
     }
 
-    fn index_for_sibling_module(&self, path: &Path, module: &str) -> Option<SymbolIndex> {
+    fn index_for_sibling_module(&mut self, path: &Path, module: &str) -> Option<SymbolIndex> {
         let module_path = path.parent()?.join(format!("{}.kiro", module));
+        if let Some(index) = self.symbol_cache.get(&module_path) {
+            return Some(index.clone());
+        }
         let overlays = self.source_overlays();
-        Some(SymbolIndex::build(&module_path, &overlays))
+        let index = SymbolIndex::build(&module_path, &overlays);
+        self.symbol_cache.insert(module_path, index.clone());
+        Some(index)
+    }
+
+    fn clear_symbol_cache(&mut self) {
+        self.symbol_cache.clear();
     }
 }
 
@@ -411,7 +430,7 @@ fn general_completion_items(index: &SymbolIndex, path: &Path) -> Vec<CompletionI
 }
 
 fn module_completion_items(index: &SymbolIndex, module: &str) -> Vec<CompletionItem> {
-    index
+    let mut items = index
         .module_functions(module)
         .into_iter()
         .map(|decl| {
@@ -421,7 +440,17 @@ fn module_completion_items(index: &SymbolIndex, module: &str) -> Vec<CompletionI
                 &completion_detail(decl),
             )
         })
-        .collect()
+        .collect::<Vec<_>>();
+    if crate::is_std_io_module_name(module) {
+        for name in ["print", "write", "eprint", "eprintline"] {
+            if !items.iter().any(|item| item.label == name) {
+                let detail = lsp_symbols::std_io_display_signature_label(module, name)
+                    .unwrap_or_else(|| "std io display function".to_string());
+                items.push(completion_item(name, CompletionItemKind::FUNCTION, &detail));
+            }
+        }
+    }
+    items
 }
 
 fn completion_kind(kind: &IndexedKind) -> CompletionItemKind {
@@ -508,19 +537,19 @@ fn hover_doc(word: &str) -> Option<&'static str> {
         "on" => Some("Starts a condition or error-handling block."),
         "off" => Some("Runs the alternative branch for an on block."),
         "import" => Some("Imports a sibling Kiro module or embedded std module."),
-        "std_fs" => Some("Standard filesystem host module."),
-        "std_io" => Some("Standard input/output host module."),
-        "std_time" => Some("Standard time host module."),
-        "std_net" => Some("Standard network host module."),
-        "std_env" => Some("Standard environment host module."),
+        "fs" | "std_fs" => Some("Standard filesystem host module."),
+        "io" | "std_io" => Some("Standard input/output host module."),
+        "time" | "std_time" => Some("Standard time host module."),
+        "net" | "std_net" => Some("Standard network host module."),
+        "env" | "std_env" => Some("Standard environment host module."),
         _ => None,
     }
 }
 
 const KEYWORDS: &[&str] = &[
     "adr", "break", "check", "close", "continue", "error", "fn", "give", "import", "in", "loop",
-    "map", "move", "off", "on", "pipe", "print", "pure", "rest", "return", "run", "rust", "struct",
-    "take", "var",
+    "map", "move", "off", "on", "pipe", "pure", "rest", "return", "run", "rust", "struct", "take",
+    "var",
 ];
 
 fn uri_to_path(uri: &Uri) -> Option<PathBuf> {

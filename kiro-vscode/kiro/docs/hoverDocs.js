@@ -1,15 +1,10 @@
 'use strict';
 
 const keywordDocs = {
-  print: {
-    signature: 'print <expr>',
-    detail: 'Prints the evaluated expression to stdout.',
-    example: 'print "Hello"'
-  },
   on: {
     signature: 'on (<condition>) { ... }',
     detail: 'Runs the block when condition is truthy.',
-    example: 'on (x > 0) { print x }'
+    example: 'on (x > 0) { io.print(x) }'
   },
   off: {
     signature: 'off { ... }',
@@ -19,17 +14,17 @@ const keywordDocs = {
   loop: {
     signature: 'loop on (...) { ... } | loop x in iterable { ... }',
     detail: 'Repeats execution either by condition or by iteration.',
-    example: 'loop i in 0..10 per 2 { print i }'
+    example: 'loop i in 0..10 per 2 { io.print(i) }'
   },
   in: {
     signature: 'loop x in <iterable>',
     detail: 'Introduces iterator source in `loop`.',
-    example: 'loop item in items { print item }'
+    example: 'loop item in items { io.print(item) }'
   },
   per: {
     signature: 'loop x in range per <step>',
     detail: 'Sets iteration step for range loops.',
-    example: 'loop i in 0..10 per 2 { print i }'
+    example: 'loop i in 0..10 per 2 { io.print(i) }'
   },
   var: {
     signature: 'var name = <expr>',
@@ -119,7 +114,7 @@ const keywordDocs = {
   deref: {
     signature: 'deref expr',
     detail: 'Reads value through pointer.',
-    example: 'print (deref p)'
+    example: 'io.print(deref p)'
   },
   move: {
     signature: 'move var',
@@ -129,7 +124,7 @@ const keywordDocs = {
   len: {
     signature: 'len expr',
     detail: 'Returns length of string/list/map.',
-    example: 'print (len items)'
+    example: 'io.print(len items)'
   },
   push: {
     signature: 'list push value',
@@ -139,7 +134,7 @@ const keywordDocs = {
   at: {
     signature: 'collection at key',
     detail: 'Indexes list/map by key/index.',
-    example: 'print (nums at 0)'
+    example: 'io.print(nums at 0)'
   },
   num: { signature: 'num', detail: 'Numeric type.', example: 'x: num' },
   str: { signature: 'str', detail: 'String/text type.', example: 'name: str' },
@@ -235,15 +230,47 @@ const moduleDocs = {
       example: 'start = std_time.monotonic()'
     }
   },
-  std_io: {
+  io: {
+    print: {
+      signature: 'io.print(value) -> void',
+      detail: 'Writes a displayable Kiro value to stdout with a newline.',
+      example: 'io.print("hello")'
+    },
+    write: {
+      signature: 'io.write(value) -> void',
+      detail: 'Writes a displayable Kiro value to stdout without a newline.',
+      example: 'io.write("loading...")'
+    },
     eprint: {
-      signature: 'std_io.eprint(msg: str) -> void',
-      detail: 'Writes to stderr without newline.',
+      signature: 'io.eprint(value) -> void',
+      detail: 'Writes a displayable Kiro value to stderr without a newline.',
+      example: 'io.eprint("debug")'
+    },
+    eprintline: {
+      signature: 'io.eprintline(value) -> void',
+      detail: 'Writes a displayable Kiro value to stderr with a newline.',
+      example: 'io.eprintline("debug")'
+    }
+  },
+  std_io: {
+    print: {
+      signature: 'std_io.print(value) -> void',
+      detail: 'Compatibility spelling for io.print.',
+      example: 'std_io.print("hello")'
+    },
+    write: {
+      signature: 'std_io.write(value) -> void',
+      detail: 'Compatibility spelling for io.write.',
+      example: 'std_io.write("loading...")'
+    },
+    eprint: {
+      signature: 'std_io.eprint(value) -> void',
+      detail: 'Compatibility spelling for io.eprint.',
       example: 'std_io.eprint("debug")'
     },
     eprintline: {
-      signature: 'std_io.eprintline(msg: str) -> void',
-      detail: 'Writes to stderr with newline.',
+      signature: 'std_io.eprintline(value) -> void',
+      detail: 'Compatibility spelling for io.eprintline.',
       example: 'std_io.eprintline("debug")'
     },
     read_line: {

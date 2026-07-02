@@ -20,9 +20,10 @@ pub struct FunctionInfo {
     pub doc: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct CompilerOptions {
     pub uses_pipes: bool,
+    pub skipped_module_imports: HashSet<String>,
 }
 
 pub struct Compiler {
@@ -137,9 +138,7 @@ fn collect_calls_from_statement(
             collect_calls_from_expr(ch, local_functions, calls);
             collect_calls_from_expr(val, local_functions, calls);
         }
-        grammar::Statement::Close(_, ch) | grammar::Statement::Print(_, ch) => {
-            collect_calls_from_expr(ch, local_functions, calls)
-        }
+        grammar::Statement::Close(_, ch) => collect_calls_from_expr(ch, local_functions, calls),
         grammar::Statement::Return(_, expr) => {
             if let Some(expr) = expr {
                 collect_calls_from_expr(expr, local_functions, calls);
@@ -248,8 +247,24 @@ pub fn program_uses_pipes(program: &grammar::Program) -> bool {
     program.statements.iter().any(statement_uses_pipes)
 }
 
+pub fn program_uses_anyhow(program: &grammar::Program) -> bool {
+    program.statements.iter().any(statement_uses_anyhow)
+}
+
+pub fn program_uses_std_io_module(program: &grammar::Program) -> bool {
+    program.statements.iter().any(statement_uses_std_io_module)
+}
+
 fn block_uses_pipes(block: &grammar::Block) -> bool {
     block.statements.iter().any(statement_uses_pipes)
+}
+
+fn block_uses_anyhow(block: &grammar::Block) -> bool {
+    block.statements.iter().any(statement_uses_anyhow)
+}
+
+fn block_uses_std_io_module(block: &grammar::Block) -> bool {
+    block.statements.iter().any(statement_uses_std_io_module)
 }
 
 fn error_clauses_use_pipes(clauses: &grammar::ErrorClauseList) -> bool {
@@ -261,11 +276,44 @@ fn error_clauses_use_pipes(clauses: &grammar::ErrorClauseList) -> bool {
             .unwrap_or(false)
 }
 
+fn error_clauses_use_anyhow(clauses: &grammar::ErrorClauseList) -> bool {
+    block_uses_anyhow(&clauses.first.body)
+        || clauses
+            .rest
+            .as_deref()
+            .map(error_clauses_use_anyhow)
+            .unwrap_or(false)
+}
+
+fn error_clauses_use_std_io_module(clauses: &grammar::ErrorClauseList) -> bool {
+    block_uses_std_io_module(&clauses.first.body)
+        || clauses
+            .rest
+            .as_deref()
+            .map(error_clauses_use_std_io_module)
+            .unwrap_or(false)
+}
+
 fn item_uses_pipes(item: &grammar::AnnotatableItem) -> bool {
     match item {
         grammar::AnnotatableItem::StructDef(def) => struct_uses_pipes(def),
         grammar::AnnotatableItem::FunctionDef(def) => function_uses_pipes(def),
         grammar::AnnotatableItem::RustFnDecl(def) => rust_fn_uses_pipes(def),
+    }
+}
+
+fn item_uses_anyhow(item: &grammar::AnnotatableItem) -> bool {
+    match item {
+        grammar::AnnotatableItem::StructDef(_) => false,
+        grammar::AnnotatableItem::FunctionDef(def) => function_uses_anyhow(def),
+        grammar::AnnotatableItem::RustFnDecl(def) => rust_fn_uses_anyhow(def),
+    }
+}
+
+fn item_uses_std_io_module(item: &grammar::AnnotatableItem) -> bool {
+    match item {
+        grammar::AnnotatableItem::StructDef(_) | grammar::AnnotatableItem::RustFnDecl(_) => false,
+        grammar::AnnotatableItem::FunctionDef(def) => block_uses_std_io_module(&def.body),
     }
 }
 
@@ -325,11 +373,147 @@ fn statement_uses_pipes(stmt: &grammar::Statement) -> bool {
         grammar::Statement::Give(_, _, _) | grammar::Statement::Close(_, _) => true,
         grammar::Statement::Return(_, expr) => expr.as_ref().map(expr_uses_pipes).unwrap_or(false),
         grammar::Statement::Check(_, condition, _) => expr_uses_pipes(condition),
-        grammar::Statement::ExprStmt(expr) | grammar::Statement::Print(_, expr) => {
-            expr_uses_pipes(expr)
-        }
+        grammar::Statement::ExprStmt(expr) => expr_uses_pipes(expr),
         grammar::Statement::Documented { item, .. } => item_uses_pipes(item),
         grammar::Statement::ErrorDef { .. }
+        | grammar::Statement::Break(_)
+        | grammar::Statement::Continue(_)
+        | grammar::Statement::Rest(_)
+        | grammar::Statement::Import { .. } => false,
+    }
+}
+
+fn statement_uses_anyhow(stmt: &grammar::Statement) -> bool {
+    match stmt {
+        grammar::Statement::ErrorDef { .. } => true,
+        grammar::Statement::FunctionDef(def) => function_uses_anyhow(def),
+        grammar::Statement::RustFnDecl(def) => rust_fn_uses_anyhow(def),
+        grammar::Statement::VarDecl { value, .. } => expr_uses_anyhow(value),
+        grammar::Statement::AssignStmt { lhs, rhs, .. } => {
+            expr_uses_anyhow(lhs) || expr_uses_anyhow(rhs)
+        }
+        grammar::Statement::On {
+            condition,
+            body,
+            else_clause,
+            error_clauses,
+            ..
+        } => {
+            expr_uses_anyhow(condition)
+                || block_uses_anyhow(body)
+                || else_clause
+                    .as_ref()
+                    .map(|clause| block_uses_anyhow(&clause.body))
+                    .unwrap_or(false)
+                || error_clauses
+                    .as_ref()
+                    .map(error_clauses_use_anyhow)
+                    .unwrap_or(false)
+        }
+        grammar::Statement::LoopOn {
+            condition, body, ..
+        } => expr_uses_anyhow(condition) || block_uses_anyhow(body),
+        grammar::Statement::LoopIter {
+            iterable,
+            step,
+            filter,
+            body,
+            else_clause,
+            ..
+        } => {
+            expr_uses_anyhow(iterable)
+                || step
+                    .as_ref()
+                    .map(|step| expr_uses_anyhow(&step.value))
+                    .unwrap_or(false)
+                || filter
+                    .as_ref()
+                    .map(|filter| expr_uses_anyhow(&filter.condition))
+                    .unwrap_or(false)
+                || block_uses_anyhow(body)
+                || else_clause
+                    .as_ref()
+                    .map(|clause| block_uses_anyhow(&clause.body))
+                    .unwrap_or(false)
+        }
+        grammar::Statement::Give(_, ch, val) => expr_uses_anyhow(ch) || expr_uses_anyhow(val),
+        grammar::Statement::Close(_, ch) => expr_uses_anyhow(ch),
+        grammar::Statement::Return(_, expr) => expr.as_ref().map(expr_uses_anyhow).unwrap_or(false),
+        grammar::Statement::Check(_, condition, _) => expr_uses_anyhow(condition),
+        grammar::Statement::ExprStmt(expr) => expr_uses_anyhow(expr),
+        grammar::Statement::Documented { item, .. } => item_uses_anyhow(item),
+        grammar::Statement::StructDef(_)
+        | grammar::Statement::Break(_)
+        | grammar::Statement::Continue(_)
+        | grammar::Statement::Rest(_)
+        | grammar::Statement::Import { .. } => false,
+    }
+}
+
+fn statement_uses_std_io_module(stmt: &grammar::Statement) -> bool {
+    match stmt {
+        grammar::Statement::FunctionDef(def) => block_uses_std_io_module(&def.body),
+        grammar::Statement::VarDecl { value, .. } => expr_uses_std_io_module(value),
+        grammar::Statement::AssignStmt { lhs, rhs, .. } => {
+            expr_uses_std_io_module(lhs) || expr_uses_std_io_module(rhs)
+        }
+        grammar::Statement::On {
+            condition,
+            body,
+            else_clause,
+            error_clauses,
+            ..
+        } => {
+            expr_uses_std_io_module(condition)
+                || block_uses_std_io_module(body)
+                || else_clause
+                    .as_ref()
+                    .map(|clause| block_uses_std_io_module(&clause.body))
+                    .unwrap_or(false)
+                || error_clauses
+                    .as_ref()
+                    .map(error_clauses_use_std_io_module)
+                    .unwrap_or(false)
+        }
+        grammar::Statement::LoopOn {
+            condition, body, ..
+        } => expr_uses_std_io_module(condition) || block_uses_std_io_module(body),
+        grammar::Statement::LoopIter {
+            iterable,
+            step,
+            filter,
+            body,
+            else_clause,
+            ..
+        } => {
+            expr_uses_std_io_module(iterable)
+                || step
+                    .as_ref()
+                    .map(|step| expr_uses_std_io_module(&step.value))
+                    .unwrap_or(false)
+                || filter
+                    .as_ref()
+                    .map(|filter| expr_uses_std_io_module(&filter.condition))
+                    .unwrap_or(false)
+                || block_uses_std_io_module(body)
+                || else_clause
+                    .as_ref()
+                    .map(|clause| block_uses_std_io_module(&clause.body))
+                    .unwrap_or(false)
+        }
+        grammar::Statement::Give(_, ch, val) => {
+            expr_uses_std_io_module(ch) || expr_uses_std_io_module(val)
+        }
+        grammar::Statement::Close(_, ch) => expr_uses_std_io_module(ch),
+        grammar::Statement::Return(_, expr) => {
+            expr.as_ref().map(expr_uses_std_io_module).unwrap_or(false)
+        }
+        grammar::Statement::Check(_, condition, _) => expr_uses_std_io_module(condition),
+        grammar::Statement::ExprStmt(expr) => expr_uses_std_io_module(expr),
+        grammar::Statement::Documented { item, .. } => item_uses_std_io_module(item),
+        grammar::Statement::StructDef(_)
+        | grammar::Statement::RustFnDecl(_)
+        | grammar::Statement::ErrorDef { .. }
         | grammar::Statement::Break(_)
         | grammar::Statement::Continue(_)
         | grammar::Statement::Rest(_)
@@ -355,11 +539,19 @@ fn function_uses_pipes(def: &grammar::FunctionDef) -> bool {
         || block_uses_pipes(&def.body)
 }
 
+fn function_uses_anyhow(def: &grammar::FunctionDef) -> bool {
+    block_uses_anyhow(&def.body)
+}
+
 fn rust_fn_uses_pipes(def: &grammar::RustFnDecl) -> bool {
     def.params
         .iter()
         .any(|param| type_uses_pipes(&param.command_type))
         || type_uses_pipes(&def.return_type)
+}
+
+fn rust_fn_uses_anyhow(def: &grammar::RustFnDecl) -> bool {
+    def.can_error.is_some()
 }
 
 fn expr_uses_pipes(expr: &grammar::Expression) -> bool {
@@ -407,6 +599,103 @@ fn expr_uses_pipes(expr: &grammar::Expression) -> bool {
         | grammar::Expression::Variable(_)
         | grammar::Expression::MoveExpr(_, _)
         | grammar::Expression::ErrorRef(_) => false,
+    }
+}
+
+fn expr_uses_anyhow(expr: &grammar::Expression) -> bool {
+    match expr {
+        grammar::Expression::ErrorRef(_) => true,
+        grammar::Expression::ListInit(_, _, _, items, _) => items.iter().any(expr_uses_anyhow),
+        grammar::Expression::MapInit(_, _, _, _, pairs, _) => pairs
+            .iter()
+            .any(|pair| expr_uses_anyhow(&pair.key) || expr_uses_anyhow(&pair.value)),
+        grammar::Expression::StructInit(_, _, fields, _) => {
+            fields.iter().any(|field| expr_uses_anyhow(&field.value))
+        }
+        grammar::Expression::FieldAccess(target, _, _)
+        | grammar::Expression::Ref(_, target)
+        | grammar::Expression::Deref(_, target)
+        | grammar::Expression::Len(_, target)
+        | grammar::Expression::RunCall(_, target)
+        | grammar::Expression::Take(_, target) => expr_uses_anyhow(target),
+        grammar::Expression::At(target, _, index) | grammar::Expression::Push(target, _, index) => {
+            expr_uses_anyhow(target) || expr_uses_anyhow(index)
+        }
+        grammar::Expression::Call(func, _, args, _) => {
+            expr_uses_anyhow(func) || args.iter().any(expr_uses_anyhow)
+        }
+        grammar::Expression::Add(lhs, _, rhs)
+        | grammar::Expression::Sub(lhs, _, rhs)
+        | grammar::Expression::Mul(lhs, _, rhs)
+        | grammar::Expression::Div(lhs, _, rhs)
+        | grammar::Expression::Eq(lhs, _, rhs)
+        | grammar::Expression::Neq(lhs, _, rhs)
+        | grammar::Expression::Gt(lhs, _, rhs)
+        | grammar::Expression::Lt(lhs, _, rhs)
+        | grammar::Expression::Geq(lhs, _, rhs)
+        | grammar::Expression::Leq(lhs, _, rhs)
+        | grammar::Expression::Range(lhs, _, rhs) => expr_uses_anyhow(lhs) || expr_uses_anyhow(rhs),
+        grammar::Expression::Variable(_)
+        | grammar::Expression::Number(_)
+        | grammar::Expression::StringLit(_)
+        | grammar::Expression::BoolLit(_)
+        | grammar::Expression::MoveExpr(_, _)
+        | grammar::Expression::AdrInit(_, _)
+        | grammar::Expression::PipeInit(_, _, _) => false,
+    }
+}
+
+fn expr_uses_std_io_module(expr: &grammar::Expression) -> bool {
+    match expr {
+        grammar::Expression::FieldAccess(target, _, field) => {
+            if let grammar::Expression::Variable(module) = &**target
+                && crate::is_std_io_module_name(&module.value)
+            {
+                return !crate::is_std_io_display_function(&field.value);
+            }
+            expr_uses_std_io_module(target)
+        }
+        grammar::Expression::ListInit(_, _, _, items, _) => {
+            items.iter().any(expr_uses_std_io_module)
+        }
+        grammar::Expression::MapInit(_, _, _, _, pairs, _) => pairs
+            .iter()
+            .any(|pair| expr_uses_std_io_module(&pair.key) || expr_uses_std_io_module(&pair.value)),
+        grammar::Expression::StructInit(_, _, fields, _) => fields
+            .iter()
+            .any(|field| expr_uses_std_io_module(&field.value)),
+        grammar::Expression::Ref(_, target)
+        | grammar::Expression::Deref(_, target)
+        | grammar::Expression::Len(_, target)
+        | grammar::Expression::RunCall(_, target)
+        | grammar::Expression::Take(_, target) => expr_uses_std_io_module(target),
+        grammar::Expression::At(target, _, index) | grammar::Expression::Push(target, _, index) => {
+            expr_uses_std_io_module(target) || expr_uses_std_io_module(index)
+        }
+        grammar::Expression::Call(func, _, args, _) => {
+            expr_uses_std_io_module(func) || args.iter().any(expr_uses_std_io_module)
+        }
+        grammar::Expression::Add(lhs, _, rhs)
+        | grammar::Expression::Sub(lhs, _, rhs)
+        | grammar::Expression::Mul(lhs, _, rhs)
+        | grammar::Expression::Div(lhs, _, rhs)
+        | grammar::Expression::Eq(lhs, _, rhs)
+        | grammar::Expression::Neq(lhs, _, rhs)
+        | grammar::Expression::Gt(lhs, _, rhs)
+        | grammar::Expression::Lt(lhs, _, rhs)
+        | grammar::Expression::Geq(lhs, _, rhs)
+        | grammar::Expression::Leq(lhs, _, rhs)
+        | grammar::Expression::Range(lhs, _, rhs) => {
+            expr_uses_std_io_module(lhs) || expr_uses_std_io_module(rhs)
+        }
+        grammar::Expression::Variable(_)
+        | grammar::Expression::Number(_)
+        | grammar::Expression::StringLit(_)
+        | grammar::Expression::BoolLit(_)
+        | grammar::Expression::MoveExpr(_, _)
+        | grammar::Expression::ErrorRef(_)
+        | grammar::Expression::AdrInit(_, _)
+        | grammar::Expression::PipeInit(_, _, _) => false,
     }
 }
 
@@ -735,9 +1024,8 @@ impl Compiler {
             output.push_str("}\n");
         } else {
             // If not main, everything (including body) is usually just statements in the file.
-            // But valid Rust modules can't have loose statements (print calls) at top level.
+            // But valid Rust modules can't have loose statements at top level.
             // Kiro modules usually contain functions/structs.
-            // If a user puts `print` in a module, it will generate `println!` at top level -> Rust Compile Error.
             // We accept this limitation for now: Modules = Structs + Fns + Imports.
             // But we should still output the body in case it's valid items (like Fns).
             output.push_str(&body);

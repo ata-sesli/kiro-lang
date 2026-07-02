@@ -1,3 +1,5 @@
+import io
+
 // Chapter 5: Error Handling
 
 error TooSmall = "Number is too small"
@@ -14,15 +16,15 @@ var inputs = list num { 5, 50, 150 }
 
 loop val in inputs {
     var res = analyze(val)
-    print "Analyzing " + val + "..."
+    io.print("Analyzing " + val + "...")
 
     on (res == TooSmall) {
-        print " -> Error: Too Small!"
+        io.print(" -> Error: Too Small!")
     } off {
         on (res == TooBig) {
-            print " -> Error: Too Big!"
+            io.print(" -> Error: Too Big!")
         } off {
-            print " -> Result: " + res
+            io.print(" -> Result: " + res)
         }
     }
 }

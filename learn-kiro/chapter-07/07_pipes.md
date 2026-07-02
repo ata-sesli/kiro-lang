@@ -11,6 +11,8 @@ var p = pipe num
 Now pair a producer with a consumer:
 
 ```kiro
+import io
+
 fn producer(c: pipe num) {
     give c 10
     give c 20
@@ -20,8 +22,8 @@ fn producer(c: pipe num) {
 var p = pipe num
 run producer(p)
 
-print (take p)
-print (take p)
+io.print((take p))
+io.print((take p))
 ```
 
 `give` sends values into the channel, `take` receives them, and `close` signals completion when no more values will be sent.
@@ -29,8 +31,10 @@ print (take p)
 Because `run` is fire-and-forget, use a `pipe void` when the main flow needs to wait for a worker:
 
 ```kiro
+import io
+
 fn worker(done: pipe void) {
-    print "done"
+    io.print("done")
     give done
 }
 

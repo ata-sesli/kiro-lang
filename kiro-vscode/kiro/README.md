@@ -57,14 +57,16 @@ If you want to distribute/test as a package:
 Create any file with the `.kiro` extension:
 
 ```kiro
+import io
+
 fn main() -> void {
-    print "Hello, Kiro!"
+    io.print("Hello, Kiro!")
 
     var x = 10
     on (x > 5) {
-        print "Greater than 5"
+        io.print("Greater than 5")
     } off {
-        print "5 or less"
+        io.print("5 or less")
     }
 }
 ```

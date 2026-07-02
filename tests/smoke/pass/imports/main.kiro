@@ -1,12 +1,14 @@
 import math
+import io
+
 
 fn main() {
-    print "Testing Imports..."
+    io.print("Testing Imports...")
     var sum = math.add(10, 20)
-    print sum
+    io.print(sum)
 
     var diff = math.sub(sum, 5)
-    print diff
+    io.print(diff)
     loop num in 0..100 per 2.5 {
     }
 }

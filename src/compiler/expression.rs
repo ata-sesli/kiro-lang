@@ -2,7 +2,51 @@ use super::Compiler;
 
 use crate::grammar::grammar::{self, Expression};
 
+fn std_io_display_call(func: &Expression) -> Option<(&str, &str)> {
+    if let Expression::FieldAccess(target, _, field) = func
+        && let Expression::Variable(module) = &**target
+        && crate::is_std_io_module_name(&module.value)
+        && crate::is_std_io_display_function(&field.value)
+    {
+        return Some((&module.value, &field.value));
+    }
+    None
+}
+
 impl Compiler {
+    fn compile_std_io_display_call(
+        &mut self,
+        module: &str,
+        function: &str,
+        args: &[Expression],
+    ) -> String {
+        if !self.imported_modules.contains(module) {
+            panic!("Compiler Error: Module '{}' is not imported.", module);
+        }
+        if self.in_pure_context {
+            panic!(
+                "Compiler Error: Pure function cannot call impure/async function '{}.{}' inside a pure function.",
+                module, function
+            );
+        }
+        if args.len() != 1 {
+            panic!(
+                "Compiler Error: Function '{}.{}' expects 1 argument, got {}.",
+                module,
+                function,
+                args.len()
+            );
+        }
+        let value = format!("({}).clone()", self.compile_expr(args[0].clone()));
+        match function {
+            "print" => format!("println!(\"{{}}\", {})", value),
+            "write" => format!("print!(\"{{}}\", {})", value),
+            "eprint" => format!("eprint!(\"{{}}\", {})", value),
+            "eprintline" => format!("eprintln!(\"{{}}\", {})", value),
+            _ => unreachable!("std io display function checked before codegen"),
+        }
+    }
+
     pub fn compile_expr(&mut self, expr: Expression) -> String {
         match expr {
             Expression::MoveExpr(_, ident) => {
@@ -262,6 +306,10 @@ impl Compiler {
                 format!("(({} as i64)..({} as i64))", start_str, end_str)
             }
             Expression::Call(func, _, args, _) => {
+                if let Some((module, function)) = std_io_display_call(&func) {
+                    return self.compile_std_io_display_call(module, function, &args);
+                }
+
                 let call_info = self.call_function_info(&func);
                 let call_name = self.call_name(&func);
                 // Determine if we need .await (Access func by reference BEFORE move)
@@ -339,6 +387,11 @@ impl Compiler {
                 // This is a bit tricky. Let's handle it manually:
 
                 if let Expression::Call(func, _, args, _) = *call_expr {
+                    if let Some((module, function)) = std_io_display_call(&func) {
+                        let call = self.compile_std_io_display_call(module, function, &args);
+                        return format!("tokio::spawn(async move {{ {} }})", call);
+                    }
+
                     let call_info = self.call_function_info(&func);
                     // Check if target is pure (Sync)
                     let is_pure_target = if let Expression::Variable(v) = &*func {

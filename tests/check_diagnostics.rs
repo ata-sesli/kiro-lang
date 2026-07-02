@@ -206,11 +206,13 @@ fn wrong_argument_count_fails_before_rust_build() {
     fs::write(
         &main_path,
         r#"
+import io
+
 pure fn add(a: num, b: num) -> num {
     return a + b
 }
 
-print add(1)
+io.print(add(1))
 "#,
     )
     .expect("main module should be written");
@@ -230,6 +232,150 @@ print add(1)
     assert!(
         stderr.contains("wrong argument count"),
         "diagnostic should label the bad call:\n{}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("error[E"),
+        "diagnostic should not leak Rust compiler errors:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn removed_print_statement_reports_migration_diagnostic() {
+    let dir = temp_project("removed_print_statement");
+    let main_path = dir.join("main.kiro");
+    fs::write(
+        &main_path,
+        r#"
+print "hello"
+"#,
+    )
+    .expect("main module should be written");
+
+    let output = run_kiro(
+        &["build", main_path.to_str().unwrap()],
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "old print statement should fail");
+    assert!(
+        stderr.contains("[KIRO1002:parse] 'print' statement was removed."),
+        "unexpected stderr:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("help: use `import io` and `io.print(value)`"),
+        "diagnostic should explain the migration:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn print_call_is_an_ordinary_unknown_function_call() {
+    let dir = temp_project("print_call_ordinary");
+    let main_path = dir.join("main.kiro");
+    fs::write(
+        &main_path,
+        r#"
+print("hello")
+"#,
+    )
+    .expect("main module should be written");
+
+    let output = run_kiro(
+        &["build", main_path.to_str().unwrap()],
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "unknown function should fail");
+    assert!(
+        stderr.contains("Unknown function 'print'."),
+        "print(...) should not use the removed statement diagnostic:\n{}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("'print' statement was removed"),
+        "print(...) should remain an ordinary call:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn io_print_is_forbidden_inside_pure_function() {
+    let dir = temp_project("io_print_pure");
+    let main_path = dir.join("main.kiro");
+    fs::write(
+        &main_path,
+        r#"
+import io
+
+pure fn noisy() -> num {
+    io.print(1)
+    return 1
+}
+"#,
+    )
+    .expect("main module should be written");
+
+    let output = run_kiro(
+        &["build", main_path.to_str().unwrap()],
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "io.print in pure fn should fail");
+    assert!(
+        stderr.contains(
+            "Pure function cannot call impure/async function 'io.print' inside a pure function."
+        ),
+        "unexpected stderr:\n{}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("error[E"),
+        "diagnostic should not leak Rust compiler errors:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn short_std_module_names_are_reserved_and_cannot_be_shadowed() {
+    let dir = temp_project("reserved_std_alias");
+    let main_path = dir.join("main.kiro");
+    fs::write(
+        &main_path,
+        r#"
+import io
+
+io.fake()
+"#,
+    )
+    .expect("main module should be written");
+    fs::write(
+        dir.join("io.kiro"),
+        r#"
+fn fake() {
+}
+"#,
+    )
+    .expect("shadow module should be written");
+
+    let output = run_kiro(
+        &["build", main_path.to_str().unwrap()],
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "reserved std alias should not load sibling io.kiro"
+    );
+    assert!(
+        stderr.contains("Unknown function 'io.fake'."),
+        "reserved std alias should resolve to std io, not local io.kiro:\n{}",
         stderr
     );
     assert!(
@@ -277,7 +423,9 @@ fn unknown_variable_fails_before_rust_build() {
     fs::write(
         &main_path,
         r#"
-print missing
+import io
+
+io.print(missing)
 "#,
     )
     .expect("main module should be written");
@@ -308,8 +456,10 @@ fn unknown_variable_diagnostic_shows_source_location_and_label() {
     fs::write(
         &main_path,
         r#"
+import io
+
 var count = 1
-print coutn
+io.print(coutn)
 "#,
     )
     .expect("main module should be written");
@@ -322,12 +472,12 @@ print coutn
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "unknown variable should fail");
     assert!(
-        stderr.contains("main.kiro:3:7"),
+        stderr.contains("main.kiro:5:10"),
         "diagnostic should include file, line, and column:\n{}",
         stderr
     );
     assert!(
-        stderr.contains("3 | print coutn"),
+        stderr.contains("5 | io.print(coutn)"),
         "diagnostic should include the source line:\n{}",
         stderr
     );
@@ -350,8 +500,10 @@ fn unknown_function_diagnostic_suggests_known_function() {
     fs::write(
         &main_path,
         r#"
+import io
+
 fn print_total() {
-    print "ok"
+    io.print("ok")
 }
 
 pritn_total()
@@ -452,8 +604,10 @@ fn pure_violation_fails_before_rust_build() {
     fs::write(
         &main_path,
         r#"
+import io
+
 pure fn log() {
-    print "nope"
+    io.print("nope")
 }
 "#,
     )
@@ -467,12 +621,14 @@ pure fn log() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "pure violation should fail");
     assert!(
-        stderr.contains("Pure Function Error: 'print' is forbidden."),
+        stderr.contains(
+            "Pure function cannot call impure/async function 'io.print' inside a pure function."
+        ),
         "unexpected stderr:\n{}",
         stderr
     );
     assert!(
-        stderr.contains("forbidden in pure fn"),
+        stderr.contains("impure call"),
         "diagnostic should label the pure violation:\n{}",
         stderr
     );
@@ -536,9 +692,11 @@ pure fn add(a: num, b: num) -> num {
     fs::write(
         &main_path,
         r#"
+import io
+
 import math
 
-print math.missing(1)
+io.print(math.missing(1))
 "#,
     )
     .expect("main module should be written");
@@ -581,9 +739,11 @@ pure fn read(a: num) -> num {
     fs::write(
         &main_path,
         r#"
+import io
+
 import math
 
-print math.raed(1)
+io.print(math.raed(1))
 "#,
     )
     .expect("main module should be written");
@@ -599,7 +759,7 @@ print math.raed(1)
         "unknown imported function should fail"
     );
     assert!(
-        stderr.contains("main.kiro:4:7"),
+        stderr.contains("main.kiro:6:10"),
         "diagnostic should include call-site location:\n{}",
         stderr
     );
@@ -650,7 +810,9 @@ fn bad_collection_use_fails_before_rust_build() {
     fs::write(
         &main_path,
         r#"
-print 1 at 0
+import io
+
+io.print(1 at 0)
 "#,
     )
     .expect("main module should be written");
@@ -686,9 +848,11 @@ fn list_index_type_mismatch_fails_before_rust_build() {
     fs::write(
         &main_path,
         r#"
+import io
+
 fn main() {
     var xs = list num { 1 }
-    print xs at "zero"
+    io.print(xs at "zero")
 }
 
 main()
@@ -722,9 +886,11 @@ fn map_key_type_mismatch_fails_before_rust_build() {
     fs::write(
         &main_path,
         r#"
+import io
+
 fn main() {
     var scores = map str num { "ada" 1 }
-    print scores at 0
+    io.print(scores at 0)
 }
 
 main()
@@ -829,9 +995,11 @@ fn runtime_take_on_closed_pipe_reports_kiro_diagnostic() {
     fs::write(
         &main_path,
         r#"
+import io
+
 var p = pipe num
 close p
-print take p
+io.print(take p)
 "#,
     )
     .expect("main module should be written");
@@ -885,8 +1053,10 @@ fn runtime_list_index_out_of_bounds_reports_kiro_diagnostic() {
     fs::write(
         &main_path,
         r#"
+import io
+
 var xs = list num { 1, 2, 3 }
-print xs at 5
+io.print(xs at 5)
 "#,
     )
     .expect("main module should be written");
@@ -912,8 +1082,10 @@ fn runtime_missing_map_key_reports_kiro_diagnostic() {
     fs::write(
         &main_path,
         r#"
+import io
+
 var users = map str num { "alice" 1 }
-print users at "user_id"
+io.print(users at "user_id")
 "#,
     )
     .expect("main module should be written");
@@ -939,8 +1111,10 @@ fn runtime_empty_address_deref_reports_kiro_diagnostic() {
     fs::write(
         &main_path,
         r#"
+import io
+
 var p = adr num
-print deref p
+io.print(deref p)
 "#,
     )
     .expect("main module should be written");
@@ -971,9 +1145,11 @@ fn runtime_host_function_failure_reports_kiro_diagnostic() {
     fs::write(
         &main_path,
         r#"
+import io
+
 rust fn fail() -> str
 
-print fail()
+io.print(fail())
 "#,
     )
     .expect("main module should be written");
@@ -1051,6 +1227,8 @@ fn failable_host_error_still_matches_by_name() {
     fs::write(
         &main_path,
         r#"
+import io
+
 error NotFound = "missing"
 
 rust fn read_file(path: str) -> str!
@@ -1058,9 +1236,9 @@ rust fn read_file(path: str) -> str!
 fn main() {
     var result = read_file("missing.txt")
     on (result) {
-        print result
+        io.print(result)
     } error NotFound {
-        print "caught"
+        io.print("caught")
     }
 }
 
@@ -1101,8 +1279,10 @@ fn missing_return_fails_before_rust_build() {
     fs::write(
         &main_path,
         r#"
+import io
+
 fn score() -> num {
-    print "not enough"
+    var value = 1
 }
 "#,
     )
@@ -1167,11 +1347,13 @@ fn wrong_argument_type_fails_before_rust_build() {
     fs::write(
         &main_path,
         r#"
+import io
+
 pure fn add(a: num, b: num) -> num {
     return a + b
 }
 
-print add("one", 2)
+io.print(add("one", 2))
 "#,
     )
     .expect("main module should be written");
@@ -1227,9 +1409,11 @@ fn unknown_struct_field_fails_before_rust_build() {
     fs::write(
         &main_path,
         r#"
+import io
+
 struct User { name: str age: num }
 var user = User { name: "Ada", age: 36 }
-print user.email
+io.print(user.email)
 "#,
     )
     .expect("main module should be written");
@@ -1255,9 +1439,11 @@ fn forward_declared_struct_field_fails_before_rust_build() {
     fs::write(
         &main_path,
         r#"
+import io
+
 fn show() {
     var user = User { name: "Ada", age: 36 }
-    print user.email
+    io.print(user.email)
 }
 
 struct User { name: str age: num }
@@ -1327,8 +1513,10 @@ fn adr_void_deref_fails_before_rust_build() {
     fs::write(
         &main_path,
         r#"
+import io
+
 var p = adr void
-print deref p
+io.print(deref p)
 "#,
     )
     .expect("main module should be written");

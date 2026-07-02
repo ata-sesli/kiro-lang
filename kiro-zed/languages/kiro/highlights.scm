@@ -109,5 +109,4 @@
 ((identifier) @constant.builtin
   (#match? @constant.builtin "^std_(fs|env|io|net|time)$"))
 
-(print_keyword) @function.builtin
 (len_keyword) @function.builtin

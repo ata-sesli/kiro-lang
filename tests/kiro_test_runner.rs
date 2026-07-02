@@ -188,8 +188,11 @@ fn failing_check_marks_file_failed_and_runner_continues() {
 fn compile_error_marks_file_failed_and_runner_continues() {
     let dir = temp_project("compile_error");
     link_runtime(&dir);
-    fs::write(dir.join("a_bad_test.kiro"), "print missing_name\n")
-        .expect("bad test should be written");
+    fs::write(
+        dir.join("a_bad_test.kiro"),
+        "import io\n\nio.print(missing_name)\n",
+    )
+    .expect("bad test should be written");
     fs::write(dir.join("b_good_test.kiro"), "check true, \"ok\"\n")
         .expect("good test should be written");
 

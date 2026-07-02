@@ -1,3 +1,5 @@
+import io
+
 // Test that a rust fn call has matching adjacent host glue.
 
 error NotFound = "File not found"
@@ -5,12 +7,12 @@ error NotFound = "File not found"
 rust fn read_file(path: str) -> str!
 
 fn main() {
-    print "Testing interpreter simulation of rust fn calls..."
+    io.print("Testing interpreter simulation of rust fn calls...")
 
     var content = read_file("test.txt")
-    print content
+    io.print(content)
 
-    print "Simulator call completed"
+    io.print("Simulator call completed")
 }
 
 main()

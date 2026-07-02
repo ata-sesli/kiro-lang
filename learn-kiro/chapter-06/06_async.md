@@ -5,12 +5,14 @@ Concurrency in Kiro begins with one idea: start independent work without blockin
 A simple example shows the model:
 
 ```kiro
+import io
+
 fn worker() {
-    print "Working in background..."
+    io.print("Working in background...")
 }
 
 run worker()
-print "Main flow continues"
+io.print("Main flow continues")
 ```
 
 `run worker()` starts fire-and-forget background work and immediately returns control to the next statement. This means output order between worker and main flow is not guaranteed, and the worker may not finish if the program exits first.
@@ -18,8 +20,10 @@ print "Main flow continues"
 Arguments are passed normally:
 
 ```kiro
+import io
+
 fn log(msg: str) {
-    print "Log: " + msg
+    io.print("Log: " + msg)
 }
 
 run log("Async message")

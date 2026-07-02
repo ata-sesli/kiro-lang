@@ -154,11 +154,13 @@ fn add(a: num, b: num) {
 **`main.kiro`**:
 
 ```kiro
+import io
+
 import math
 
 fn main() {
     var result = math.add(10, 20)
-    print result
+    io.print(result)
 }
 main()
 ```
@@ -197,16 +199,20 @@ Kiro features strictly typed lists and maps with command-style operations.
 #### Lists
 
 ```kiro
+import io
+
 var numbers = list num { 10, 20, 30 }
-print numbers at 0
+io.print(numbers at 0)
 numbers push 40
 ```
 
 #### Maps
 
 ```kiro
+import io
+
 var scores = map str num { "Alice" 100, "Bob" 90 }
-print scores at "Alice"
+io.print(scores at "Alice")
 ```
 
 ### 5. Control Flow
@@ -214,10 +220,12 @@ print scores at "Alice"
 #### Conditionals (`on` / `off`)
 
 ```kiro
+import io
+
 on (x > 10) {
-    print "High"
+    io.print("High")
 } off {
-    print "Low"
+    io.print("Low")
 }
 ```
 
@@ -262,10 +270,12 @@ Kiro abstractly manages memory while giving you pointer-like behavior. Reference
 Pointers are declared with `adr <type>`. If initialized without a value, they are "lazy" (empty).
 
 ```kiro
+import io
+
 var x = 10
 var ptr = ref x
 deref ptr = 20 // Mutate 'x' via pointer
-print x // Returns 20
+io.print(x // Returns 20)
 
 var lazy_ptr = adr str // Uninitialized pointer
 lazy_ptr = ref "Now I exist"
@@ -276,10 +286,12 @@ lazy_ptr = ref "Now I exist"
 Use `adr void` to store a raw memory address without type information. This is useful for passing handles or legacy pointers.
 
 ```kiro
+import io
+
 var x = 10
 var raw = adr void
 raw = ref x // Address is extracted as a usize
-print raw   // Prints the raw address (e.g. 5829058176)
+io.print(raw   // Prints the raw address (e.g. 5829058176))
 ```
 
 **Auto-Deref**: Struct fields can be accessed directly on typed references: `ptr.name` instead of `(deref ptr).name`.
@@ -328,12 +340,14 @@ take done
 Functions are declared with `fn`. Arguments and return types are explicit.
 
 ```kiro
+import io
+
 fn add(a: num, b: num) -> num {
     return a + b
 }
 
 fn do_nothing() -> void {
-    print "Working..."
+    io.print("Working...")
     return // Optional for void
 }
 
@@ -349,12 +363,14 @@ do_nothing()
 Use the `pure` keyword to declare side-effect free functions. Pure functions are enforced at both the Interpreter and Transpiler levels.
 
 ```kiro
+import io
+
 pure fn add(a: num, b: num) -> num {
     return a + b
 }
 
 fn main() {
-    print add(10, 20)
+    io.print(add(10, 20))
 }
 ```
 
@@ -398,18 +414,20 @@ fn maybe_fail(code: num) -> str! {
 Use the `on` statement to branch based on success or failure.
 
 ```kiro
+import io
+
 var result = maybe_fail(1)
 
 on (result) {
     // Smart Casting: 'result' is shadowed here as a 'str'
-    print "Success: " + result
+    io.print("Success: " + result)
 } error PermissionDenied {
-    print "Error: Access denied."
+    io.print("Error: Access denied.")
 } error NotFound {
-    print "Error: File was not found."
+    io.print("Error: File was not found.")
 } error {
     // Catch-all block
-    print "An unknown error occurred."
+    io.print("An unknown error occurred.")
 }
 ```
 

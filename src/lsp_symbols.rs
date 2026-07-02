@@ -11,7 +11,9 @@ use url::Url;
 use crate::analysis::{self, AnalysisResult, SourceOverlays};
 use crate::grammar::{self, grammar as ast};
 
-pub const STD_MODULES: &[&str] = &["std_fs", "std_io", "std_time", "std_net", "std_env"];
+pub const STD_MODULES: &[&str] = &[
+    "env", "fs", "io", "net", "time", "std_env", "std_fs", "std_io", "std_net", "std_time",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IndexedKind {
@@ -114,6 +116,9 @@ impl SymbolIndex {
 
     pub fn hover_at(&self, path: &Path, source: &str, position: Position) -> Option<String> {
         if let Some((module, member)) = member_access_at(source, position) {
+            if let Some(text) = std_io_display_hover(&module, &member) {
+                return Some(text);
+            }
             return self.find_module_member(&module, &member).map(hover_text);
         }
 
@@ -135,6 +140,16 @@ impl SymbolIndex {
         position: Position,
     ) -> Option<SignatureHelp> {
         let ctx = call_context_at(source, position)?;
+        if let Some((module, member)) = ctx.call_name.split_once('.')
+            && let Some(signature) = std_io_display_signature_label(module, member)
+        {
+            return signature_help(
+                signature,
+                vec!["value".to_string()],
+                Some(std_io_display_doc(member).to_string()),
+                ctx.active_parameter,
+            );
+        }
         let decl = if let Some((module, member)) = ctx.call_name.split_once('.') {
             self.find_module_member(module, member)?
         } else {
@@ -144,36 +159,12 @@ impl SymbolIndex {
                 .iter()
                 .find(|decl| decl.name == ctx.call_name && decl.signature.is_some())?
         };
-        let signature = decl.signature.clone()?;
-        let parameters = if decl.params.is_empty() {
-            None
-        } else {
-            Some(
-                decl.params
-                    .iter()
-                    .cloned()
-                    .map(|param| ParameterInformation {
-                        label: ParameterLabel::Simple(param),
-                        documentation: None,
-                    })
-                    .collect(),
-            )
-        };
-        let active_parameter = ctx
-            .active_parameter
-            .min(decl.params.len().saturating_sub(1))
-            .try_into()
-            .ok();
-        Some(SignatureHelp {
-            signatures: vec![SignatureInformation {
-                label: signature,
-                documentation: decl.doc.clone().map(Documentation::String),
-                parameters,
-                active_parameter: None,
-            }],
-            active_signature: Some(0),
-            active_parameter,
-        })
+        signature_help(
+            decl.signature.clone()?,
+            decl.params.clone(),
+            decl.doc.clone(),
+            ctx.active_parameter,
+        )
     }
 
     fn from_analysis(result: AnalysisResult) -> Self {
@@ -223,6 +214,65 @@ impl SymbolIndex {
                 && matches!(decl.kind, IndexedKind::Function | IndexedKind::RustFunction)
         })
     }
+}
+
+pub fn std_io_display_signature_label(module: &str, member: &str) -> Option<String> {
+    if crate::is_std_io_module_name(module) && crate::is_std_io_display_function(member) {
+        Some(format!("{}.{}(value) -> void", module, member))
+    } else {
+        None
+    }
+}
+
+fn std_io_display_hover(module: &str, member: &str) -> Option<String> {
+    let signature = std_io_display_signature_label(module, member)?;
+    Some(format!("{}\n\n{}", signature, std_io_display_doc(member)))
+}
+
+fn std_io_display_doc(member: &str) -> &'static str {
+    match member {
+        "print" => "Writes a displayable Kiro value to stdout with a newline.",
+        "write" => "Writes a displayable Kiro value to stdout without a newline.",
+        "eprint" => "Writes a displayable Kiro value to stderr without a newline.",
+        "eprintline" => "Writes a displayable Kiro value to stderr with a newline.",
+        _ => "Displays a Kiro value.",
+    }
+}
+
+fn signature_help(
+    signature: String,
+    params: Vec<String>,
+    doc: Option<String>,
+    active_parameter: usize,
+) -> Option<SignatureHelp> {
+    let parameters = if params.is_empty() {
+        None
+    } else {
+        Some(
+            params
+                .iter()
+                .cloned()
+                .map(|param| ParameterInformation {
+                    label: ParameterLabel::Simple(param),
+                    documentation: None,
+                })
+                .collect(),
+        )
+    };
+    let active_parameter = active_parameter
+        .min(params.len().saturating_sub(1))
+        .try_into()
+        .ok();
+    Some(SignatureHelp {
+        signatures: vec![SignatureInformation {
+            label: signature,
+            documentation: doc.map(Documentation::String),
+            parameters,
+            active_parameter: None,
+        }],
+        active_signature: Some(0),
+        active_parameter,
+    })
 }
 
 pub fn sibling_and_std_modules(path: &Path) -> Vec<String> {

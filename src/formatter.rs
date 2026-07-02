@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::errors::KiroError;
-use crate::{grammar, unsupported_let_line};
+use crate::{grammar, removed_print_statement, unsupported_let_line};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TokenKind {
@@ -23,6 +23,14 @@ pub fn format_source(source: &str) -> Result<String, KiroError> {
 pub fn format_source_for_file(source: &str, file: &str) -> Result<String, KiroError> {
     if let Some(line) = unsupported_let_line(source) {
         return Err(KiroError::unsupported_keyword(file, line, "let"));
+    }
+    if let Some(removed) = removed_print_statement(source) {
+        return Err(KiroError::removed_print_statement(
+            file,
+            source,
+            removed.line,
+            removed.column,
+        ));
     }
     grammar::parse(source).map_err(|e| KiroError::parse_failed(file, &format!("{:?}", e)))?;
     Ok(format_lines(source))

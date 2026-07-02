@@ -5,23 +5,27 @@ This optional chapter connects features you already learned into one coherent de
 Pointers (`adr`, `ref`, `deref`) give reference semantics when sharing or mutating existing values is necessary:
 
 ```kiro
+import io
+
 var x = 10
 var p = ref x
-print (deref p)
+io.print((deref p))
 deref p = 20
-print x
+io.print(x)
 ```
 
 Concurrency (`run`) helps independent work proceed without blocking, while pipes keep communication explicit:
 
 ```kiro
+import io
+
 fn worker(out: pipe str) {
     give out "done"
 }
 
 var ch = pipe str
 run worker(ch)
-print (take ch)
+io.print((take ch))
 ```
 
 Host declarations (`rust fn`) extend Kiro with Rust implementations where system-level integration or specialized libraries are needed:

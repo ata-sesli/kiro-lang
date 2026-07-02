@@ -1,5 +1,9 @@
 // Kiro Standard Library: IO
 // Terminal input/output helpers.
+//
+// `io.print(value)` and `io.write(value)` are compiler-known display helpers
+// so they can accept ordinary displayable Kiro values such as num, bool, and str
+// without adding custom generics to user code.
 
 error IoError = "I/O error"
 error ParseNumError = "Failed to parse number"

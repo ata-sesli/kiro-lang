@@ -14,7 +14,9 @@ The pointer type is `adr num`, meaning "managed address handle to a number".
 Read and write through the pointer using `deref`:
 
 ```kiro
-print (deref ptr)
+import io
+
+io.print((deref ptr))
 deref ptr = 20
 ```
 
@@ -23,13 +25,15 @@ deref ptr = 20
 When you need an untyped handle, use `adr void`. This is an opaque managed handle, not a raw numeric memory address:
 
 ```kiro
+import io
+
 var x = 42
 var p = ref x
 
 var h = adr void
 h = p
 
-print h        // handle display
+io.print(h        // handle display)
 ```
 
 `adr void` is useful as an opaque transport/identity handle. Keep typed access through `adr T` pointers when you need `deref` reads/writes.
@@ -37,13 +41,15 @@ print h        // handle display
 For structs, field access is ergonomic because pointer field use is auto-dereferenced:
 
 ```kiro
+import io
+
 struct User {
     name: str
 }
 
 var user = User { name: "Kiro" }
 var up = ref user
-print up.name
+io.print(up.name)
 ```
 
 Use pointers when reference semantics simplify your design. If plain values already express the behavior clearly, keep the simpler option.

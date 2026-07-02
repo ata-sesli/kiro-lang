@@ -290,18 +290,6 @@ impl<'a> SemanticCtx<'a> {
                     }
                 }
             }
-            grammar::Statement::Print(_, expr) => {
-                if self.in_pure {
-                    return Err(self.error_at(
-                        ErrorCode::PureViolation,
-                        "Pure Function Error: 'print' is forbidden.",
-                        "print",
-                        "forbidden in pure fn",
-                    ));
-                }
-                self.infer_expr(expr)?;
-                Ok(())
-            }
             grammar::Statement::Check(_, condition, _) => {
                 let ty = self.infer_expr(condition)?;
                 if !matches!(ty, Some(grammar::KiroType::Bool)) {
@@ -848,6 +836,38 @@ impl<'a> SemanticCtx<'a> {
                 Ok(None)
             }
             grammar::Expression::Call(func, _, args, _) => {
+                if let Some((module, function)) = std_io_display_call(func)
+                    && self.imports.contains(module)
+                {
+                    let call_name = format!("{}.{}", module, function);
+                    if args.len() != 1 {
+                        return Err(self.error_at_last_with_help(
+                            ErrorCode::WrongArgumentCount,
+                            format!(
+                                "Wrong argument count for '{}': expected 1, got {}.",
+                                call_name,
+                                args.len()
+                            ),
+                            &format!("{}(", call_name),
+                            "wrong argument count",
+                            format!("{} expects (value)", call_name),
+                        ));
+                    }
+                    if self.in_pure {
+                        return Err(self.error_at_last(
+                            ErrorCode::PureViolation,
+                            format!(
+                                "Pure function cannot call impure/async function '{}' inside a pure function.",
+                                call_name
+                            ),
+                            &format!("{}(", call_name),
+                            "impure call",
+                        ));
+                    }
+                    self.infer_expr(&args[0])?;
+                    return Ok(Some(grammar::KiroType::Void));
+                }
+
                 let (call_name, info) = self.lookup_call(func)?;
                 if args.len() != info.params.len() {
                     let help = if info.params.is_empty() {
@@ -1114,6 +1134,17 @@ fn type_name(ty: &grammar::KiroType) -> String {
         }
         grammar::KiroType::Custom(name) => name.value.clone(),
     }
+}
+
+fn std_io_display_call(func: &grammar::Expression) -> Option<(&str, &str)> {
+    if let grammar::Expression::FieldAccess(target, _, field) = func
+        && let grammar::Expression::Variable(module) = &**target
+        && crate::is_std_io_module_name(&module.value)
+        && crate::is_std_io_display_function(&field.value)
+    {
+        return Some((&module.value, &field.value));
+    }
+    None
 }
 
 fn suggest_name(input: &str, candidates: Vec<String>) -> Option<String> {

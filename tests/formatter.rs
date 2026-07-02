@@ -31,8 +31,10 @@ fn run_kiro(args: &[&str], current_dir: &Path) -> std::process::Output {
 #[test]
 fn format_source_fixes_indentation_and_basic_spacing() {
     let input = r#"
+import io
+
 fn worker(){
-print "hello"
+io.print("hello")
 on (true){
 rest
 }
@@ -43,8 +45,10 @@ rest
 
     assert_eq!(
         formatted,
-        r#"fn worker() {
-    print "hello"
+        r#"import io
+
+fn worker() {
+    io.print("hello")
     on (true) {
         rest
     }
@@ -87,18 +91,18 @@ fn worker() {
 #[test]
 fn format_source_normalizes_top_level_blank_lines_and_is_idempotent() {
     let input = r#"
-import std_io
+import io
 
 
 
 fn first(){
-print "one"
+io.print("one")
 }
 
 
 fn second(){
 
-print "two"
+io.print("two")
 
 
 }
@@ -110,15 +114,15 @@ print "two"
     assert_eq!(formatted, formatted_again);
     assert_eq!(
         formatted,
-        r#"import std_io
+        r#"import io
 
 fn first() {
-    print "one"
+    io.print("one")
 }
 
 fn second() {
 
-    print "two"
+    io.print("two")
 
 }
 "#
@@ -152,11 +156,13 @@ fn second() {
 #[test]
 fn format_source_keeps_ranges_and_failable_returns_tight() {
     let input = r#"
+import io
+
 rust fn read(path:str)->str!
 
 fn main(){
 loop x in 1..4{
-print x
+io.print(x)
 }
 }
 "#;
@@ -165,11 +171,13 @@ print x
 
     assert_eq!(
         formatted,
-        r#"rust fn read(path: str) -> str!
+        r#"import io
+
+rust fn read(path: str) -> str!
 
 fn main() {
     loop x in 1..4 {
-        print x
+        io.print(x)
     }
 }
 "#
@@ -180,7 +188,8 @@ fn main() {
 fn cli_fmt_rewrites_file_in_place() {
     let dir = temp_project("rewrite");
     let file = dir.join("main.kiro");
-    fs::write(&file, "fn main(){\nprint \"hi\"\n}\n").expect("source should be written");
+    fs::write(&file, "import io\n\nfn main(){\nio.print(\"hi\")\n}\n")
+        .expect("source should be written");
 
     let output = run_kiro(&["fmt", file.to_str().unwrap()], &dir);
 
@@ -192,7 +201,7 @@ fn cli_fmt_rewrites_file_in_place() {
     );
     assert_eq!(
         fs::read_to_string(&file).expect("formatted source should be readable"),
-        "fn main() {\n    print \"hi\"\n}\n"
+        "import io\n\nfn main() {\n    io.print(\"hi\")\n}\n"
     );
 }
 
@@ -200,7 +209,8 @@ fn cli_fmt_rewrites_file_in_place() {
 fn cli_fmt_check_reports_unformatted_files_without_writing() {
     let dir = temp_project("check_dirty");
     let file = dir.join("main.kiro");
-    fs::write(&file, "fn main(){\nprint \"hi\"\n}\n").expect("source should be written");
+    fs::write(&file, "import io\n\nfn main(){\nio.print(\"hi\")\n}\n")
+        .expect("source should be written");
 
     let output = run_kiro(&["fmt", "--check", file.to_str().unwrap()], &dir);
 
@@ -210,7 +220,7 @@ fn cli_fmt_check_reports_unformatted_files_without_writing() {
     );
     assert_eq!(
         fs::read_to_string(&file).expect("source should be unchanged"),
-        "fn main(){\nprint \"hi\"\n}\n"
+        "import io\n\nfn main(){\nio.print(\"hi\")\n}\n"
     );
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("Would format"),
@@ -223,7 +233,8 @@ fn cli_fmt_check_reports_unformatted_files_without_writing() {
 fn cli_fmt_check_passes_after_formatting() {
     let dir = temp_project("check_clean");
     let file = dir.join("main.kiro");
-    fs::write(&file, "fn main(){\nprint \"hi\"\n}\n").expect("source should be written");
+    fs::write(&file, "import io\n\nfn main(){\nio.print(\"hi\")\n}\n")
+        .expect("source should be written");
 
     let write_output = run_kiro(&["fmt", file.to_str().unwrap()], &dir);
     assert!(write_output.status.success(), "initial fmt should succeed");
@@ -245,7 +256,8 @@ fn cli_fmt_discovers_project_files_and_skips_cache_dirs() {
     let cache_dir = dir.join("kiro_build_cache");
     fs::create_dir_all(&nested_dir).expect("nested dir should be created");
     fs::create_dir_all(&cache_dir).expect("cache dir should be created");
-    fs::write(&main, "fn main(){\nprint \"main\"\n}\n").expect("main source should be written");
+    fs::write(&main, "import io\n\nfn main(){\nio.print(\"main\")\n}\n")
+        .expect("main source should be written");
     fs::write(nested_dir.join("task.kiro"), "fn task(){\nrest\n}\n")
         .expect("nested source should be written");
     fs::write(
@@ -264,7 +276,7 @@ fn cli_fmt_discovers_project_files_and_skips_cache_dirs() {
     );
     assert_eq!(
         fs::read_to_string(&main).expect("main source should be readable"),
-        "fn main() {\n    print \"main\"\n}\n"
+        "import io\n\nfn main() {\n    io.print(\"main\")\n}\n"
     );
     assert_eq!(
         fs::read_to_string(nested_dir.join("task.kiro")).expect("nested source should be readable"),
@@ -281,7 +293,8 @@ fn cli_fmt_discovers_project_files_and_skips_cache_dirs() {
 fn cli_fmt_invalid_source_reports_parse_error_without_writing() {
     let dir = temp_project("invalid");
     let file = dir.join("main.kiro");
-    fs::write(&file, "fn main( {\nprint \"hi\"\n}\n").expect("source should be written");
+    fs::write(&file, "import io\n\nfn main( {\nio.print(\"hi\")\n}\n")
+        .expect("source should be written");
 
     let output = run_kiro(&["fmt", file.to_str().unwrap()], &dir);
 
@@ -291,11 +304,40 @@ fn cli_fmt_invalid_source_reports_parse_error_without_writing() {
     );
     assert_eq!(
         fs::read_to_string(&file).expect("invalid source should be unchanged"),
-        "fn main( {\nprint \"hi\"\n}\n"
+        "import io\n\nfn main( {\nio.print(\"hi\")\n}\n"
     );
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("[KIRO1003:parse]"),
         "stderr should contain Kiro parse diagnostic:\n{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn cli_fmt_removed_print_statement_reports_migration_diagnostic_without_writing() {
+    let dir = temp_project("removed_print_statement");
+    let file = dir.join("main.kiro");
+    fs::write(&file, "print \"hi\"\n").expect("source should be written");
+
+    let output = run_kiro(&["fmt", file.to_str().unwrap()], &dir);
+
+    assert!(
+        !output.status.success(),
+        "removed print statement should fail formatting"
+    );
+    assert_eq!(
+        fs::read_to_string(&file).expect("source should be unchanged"),
+        "print \"hi\"\n"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("[KIRO1002:parse] 'print' statement was removed."),
+        "stderr should contain Kiro migration diagnostic:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("help: use `import io` and `io.print(value)`"),
+        "stderr should contain migration help:\n{}",
+        stderr
     );
 }
