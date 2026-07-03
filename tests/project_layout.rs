@@ -236,6 +236,201 @@ fn missing_manifest_entry_file_is_a_kiro_diagnostic() {
 }
 
 #[test]
+fn table_dependency_specs_are_rejected_in_v1() {
+    let dir = temp_project("table_dep");
+    fs::write(
+        dir.join("kiro.toml"),
+        r#"[package]
+name = "demo"
+entry = "main.kiro"
+
+[dependencies.reqwest]
+version = "0.12"
+"#,
+    )
+    .expect("manifest should be written");
+    fs::write(dir.join("main.kiro"), "check true\n").expect("entry should be written");
+
+    let output = run_kiro(&["check"], &dir);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success(), "table dependency should fail");
+    assert!(
+        stderr.contains("table spec") && stderr.contains("V1 only supports"),
+        "unexpected stderr:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn non_string_dependency_specs_are_rejected() {
+    let dir = temp_project("non_string_dep");
+    fs::write(
+        dir.join("kiro.toml"),
+        r#"[package]
+name = "demo"
+entry = "main.kiro"
+
+[dependencies]
+image = 25
+"#,
+    )
+    .expect("manifest should be written");
+    fs::write(dir.join("main.kiro"), "check true\n").expect("entry should be written");
+
+    let output = run_kiro(&["check"], &dir);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "non-string dependency should fail"
+    );
+    assert!(
+        stderr.contains("must use a string version"),
+        "unexpected stderr:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn empty_dependency_versions_are_rejected() {
+    let dir = temp_project("empty_dep_version");
+    fs::write(
+        dir.join("kiro.toml"),
+        r#"[package]
+name = "demo"
+entry = "main.kiro"
+
+[dependencies]
+image = ""
+"#,
+    )
+    .expect("manifest should be written");
+    fs::write(dir.join("main.kiro"), "check true\n").expect("entry should be written");
+
+    let output = run_kiro(&["check"], &dir);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "empty dependency version should fail"
+    );
+    assert!(
+        stderr.contains("version must not be empty"),
+        "unexpected stderr:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn invalid_dependency_names_are_rejected_before_cargo() {
+    let dir = temp_project("invalid_dep_name");
+    fs::write(
+        dir.join("kiro.toml"),
+        r#"[package]
+name = "demo"
+entry = "main.kiro"
+
+[dependencies]
+"bad name" = "1"
+"#,
+    )
+    .expect("manifest should be written");
+    fs::write(dir.join("main.kiro"), "check true\n").expect("entry should be written");
+
+    let output = run_kiro(&["check"], &dir);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "invalid dependency name should fail"
+    );
+    assert!(
+        stderr.contains("Invalid dependency name 'bad name'"),
+        "unexpected stderr:\n{}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("error[E") && !stderr.contains(".kiro/build"),
+        "invalid manifest dependency should fail before Cargo/build output:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn std_module_dependency_names_are_rejected() {
+    let dir = temp_project("std_name_dep");
+    fs::write(
+        dir.join("kiro.toml"),
+        r#"[package]
+name = "demo"
+entry = "main.kiro"
+
+[dependencies]
+io = "1"
+"#,
+    )
+    .expect("manifest should be written");
+    fs::write(dir.join("main.kiro"), "check true\n").expect("entry should be written");
+
+    let output = run_kiro(&["check"], &dir);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success(), "reserved dependency should fail");
+    assert!(
+        stderr.contains("conflicts with a reserved Kiro std module name"),
+        "unexpected stderr:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn kiro_add_and_remove_edit_manifest_only() {
+    let dir = temp_project("add_remove");
+    write_manifest(&dir, "main.kiro");
+
+    let add_versioned = run_kiro(&["add", "image@0.25"], &dir);
+    assert!(
+        add_versioned.status.success(),
+        "kiro add image@0.25 should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&add_versioned.stdout),
+        String::from_utf8_lossy(&add_versioned.stderr)
+    );
+    let add_star = run_kiro(&["add", "csv"], &dir);
+    assert!(
+        add_star.status.success(),
+        "kiro add csv should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&add_star.stdout),
+        String::from_utf8_lossy(&add_star.stderr)
+    );
+
+    let manifest = fs::read_to_string(dir.join("kiro.toml")).expect("manifest should be readable");
+    assert!(
+        manifest.contains(r#"image = "0.25""#) && manifest.contains(r#"csv = "*""#),
+        "add should write simple Cargo dependency specs:\n{}",
+        manifest
+    );
+    assert!(
+        !dir.join(".kiro/build/Cargo.toml").exists(),
+        "kiro add should not run Cargo or refresh generated files"
+    );
+
+    let remove = run_kiro(&["remove", "image"], &dir);
+    assert!(
+        remove.status.success(),
+        "kiro remove image should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&remove.stdout),
+        String::from_utf8_lossy(&remove.stderr)
+    );
+    let manifest = fs::read_to_string(dir.join("kiro.toml")).expect("manifest should be readable");
+    assert!(
+        !manifest.contains("image") && manifest.contains(r#"csv = "*""#),
+        "remove should delete only the named dependency:\n{}",
+        manifest
+    );
+}
+
+#[test]
 fn no_file_without_manifest_prints_helpful_message() {
     let dir = temp_project("no_manifest");
 

@@ -64,12 +64,48 @@ fn build_source(name: &str, source: &str) -> (String, String) {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let cargo_toml = fs::read_to_string(dir.join("kiro_build_cache/Cargo.toml"))
+    let cargo_toml = fs::read_to_string(dir.join(".kiro/build/Cargo.toml"))
         .expect("generated Cargo.toml should exist");
-    let main_rs = fs::read_to_string(dir.join("kiro_build_cache/src/main.rs"))
+    let main_rs = fs::read_to_string(dir.join(".kiro/build/src/main.rs"))
         .expect("generated main.rs should exist");
 
     (cargo_toml, main_rs)
+}
+
+fn build_project(name: &str, manifest_deps: &str, source: &str) -> PathBuf {
+    let _guard = KIRO_BUILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = temp_project(name);
+    link_runtime(&dir);
+    fs::write(
+        dir.join("kiro.toml"),
+        format!(
+            r#"[package]
+name = "{}"
+entry = "main.kiro"
+
+[dependencies]
+{}
+"#,
+            name, manifest_deps
+        ),
+    )
+    .expect("manifest should be written");
+    fs::write(dir.join("main.kiro"), source).expect("source should be written");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kiro-lang"))
+        .args(["build"])
+        .current_dir(&dir)
+        .output()
+        .expect("kiro-lang build should run");
+
+    assert!(
+        output.status.success(),
+        "project build should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    dir
 }
 
 fn assert_tokio_features(cargo_toml: &str, expected: &[&str], unexpected: &[&str]) {
@@ -170,6 +206,102 @@ fn root_manifest_keeps_future_deps_and_removes_generated_runtime_deps() {
 }
 
 #[test]
+fn manifest_dependencies_are_written_to_generated_cargo_toml() {
+    let dir = build_project(
+        "manifest_deps",
+        r#"csv = "1"
+image = "0.25"
+"#,
+        "import io\n\nio.print(\"deps\")\n",
+    );
+
+    let cargo_toml = fs::read_to_string(dir.join(".kiro/build/Cargo.toml"))
+        .expect("generated Cargo.toml should exist");
+    assert!(
+        cargo_toml.contains(r#"csv = "1""#) && cargo_toml.contains(r#"image = "0.25""#),
+        "manifest dependencies should appear in generated Cargo.toml:\n{}",
+        cargo_toml
+    );
+    assert!(
+        cargo_toml.find(r#"csv = "1""#) < cargo_toml.find(r#"image = "0.25""#),
+        "manifest dependencies should be sorted stably:\n{}",
+        cargo_toml
+    );
+}
+
+#[test]
+fn cargo_lock_is_owned_by_generated_cargo_project() {
+    let dir = build_project("cargo_lock", "", "import io\n\nio.print(\"lock\")\n");
+
+    assert!(
+        dir.join(".kiro/build/Cargo.lock").exists(),
+        "Cargo should produce .kiro/build/Cargo.lock"
+    );
+    assert!(
+        !dir.join("kiro.lock").exists(),
+        "Kiro should not create a kiro.lock"
+    );
+}
+
+#[test]
+fn host_glue_can_use_manifest_dependency() {
+    let dir = temp_project("host_manifest_dep");
+    link_runtime(&dir);
+    fs::write(
+        dir.join("kiro.toml"),
+        r#"[package]
+name = "host_manifest_dep"
+entry = "main.kiro"
+
+[dependencies]
+itoa = "1"
+"#,
+    )
+    .expect("manifest should be written");
+    fs::write(
+        dir.join("main.kiro"),
+        r#"import io
+
+rust fn format_num(value: num) -> str
+
+io.print(format_num(42))
+"#,
+    )
+    .expect("source should be written");
+    fs::write(
+        dir.join("main.rs"),
+        r#"use kiro_runtime::{HostResult, RuntimeVal};
+
+pub async fn format_num(args: Vec<RuntimeVal>) -> HostResult {
+    RuntimeVal::expect_arity(&args, 1, "format_num")?;
+    let value = args[0].as_num()? as i64;
+    let mut buffer = itoa::Buffer::new();
+    Ok(RuntimeVal::from(buffer.format(value)))
+}
+"#,
+    )
+    .expect("glue should be written");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kiro-lang"))
+        .args(["run"])
+        .current_dir(&dir)
+        .output()
+        .expect("kiro-lang run should run");
+
+    assert!(
+        output.status.success(),
+        "host glue should compile against manifest dependency\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("42"),
+        "stdout should include host glue result:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
 fn unchanged_generated_files_are_not_rewritten_on_second_build() {
     let _guard = KIRO_BUILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = temp_project("unchanged_mtimes");
@@ -197,9 +329,9 @@ fn unchanged_generated_files_are_not_rewritten_on_second_build() {
     }
 
     let generated = [
-        dir.join("kiro_build_cache/Cargo.toml"),
-        dir.join("kiro_build_cache/src/main.rs"),
-        dir.join("kiro_build_cache/src/header.rs"),
+        dir.join(".kiro/build/Cargo.toml"),
+        dir.join(".kiro/build/src/main.rs"),
+        dir.join(".kiro/build/src/header.rs"),
     ];
     let first_mtimes: Vec<SystemTime> = generated
         .iter()

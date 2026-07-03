@@ -141,7 +141,11 @@ name = "my_app"
 entry = "main.kiro"
 
 [dependencies]
+image = "0.25"
+csv = "1"
 ```
+
+`[dependencies]` is Cargo-backed dependency intent for Rust host glue. V1 supports simple string versions only (`crate = "version"`). Kiro generates the real Cargo project under `.kiro/build/`; Cargo owns `.kiro/build/Cargo.lock`, dependency resolution, native builds, and caching. Kiro does not create a `kiro.lock` and does not provide a Kiro-native registry.
 
 **`math.kiro`**:
 
@@ -470,7 +474,7 @@ The logic lives in an adjacent Rust glue file. A user module `mylib.kiro` uses `
 - **ABI v2**: Host functions are async and return `kiro_runtime::HostResult`.
 - **Handles**: Use `RuntimeVal::handle("Name", value)` to return an opaque handle and `as_handle("Name")` to decode one.
 - **Missing Glue**: If a module declares `rust fn` but the matching `.rs` file is absent, Kiro reports a compile diagnostic before Rust build.
-- **Generated dependencies**: Kiro only adds runtime dependencies required by Kiro source (`std_*` imports and pipes). User glue should not assume crates such as `reqwest` or Tokio feature modules are available unless the build system explicitly includes them.
+- **Generated dependencies**: Kiro writes the generated Cargo project under `.kiro/build/`. It includes Kiro runtime dependencies, language-required dependencies (`std_*` imports and pipes), and simple user `[dependencies]` from `kiro.toml`. Use `kiro add image@0.25` or edit `kiro.toml`; Kiro refreshes generated Cargo files during build/run/test.
 
 ```rust
 // Example Glue Implementation
@@ -548,7 +552,7 @@ Kiro keeps validation, code generation, and direct execution separate:
 - `src/project.rs`: Kiro project discovery and manifest entry resolution.
 - `src/lsp.rs`: Lightweight Language Server Protocol implementation.
 - `src/kiro_std/`: Standard library source code (Embedded in binary).
-- `src/build_manager.rs`: Cargo project lifecycle management.
+- `src/build_manager.rs`: Generated `.kiro/build` Cargo project lifecycle management.
 - `main.kiro`: Entry point script.
 
 ---

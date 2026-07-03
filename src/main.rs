@@ -1,5 +1,5 @@
 use kiro_lang::analysis::{self, SourceOverlays};
-use kiro_lang::build_manager::{BuildManager, BuildRequirements};
+use kiro_lang::build_manager::{BuildManager, BuildRequirements, GENERATED_BUILD_DIR};
 use kiro_lang::compiler;
 use kiro_lang::errors::{self, KiroError, emit_error, panic_payload_to_string};
 use kiro_lang::formatter;
@@ -9,8 +9,8 @@ use kiro_lang::ir::IrModule;
 use kiro_lang::project;
 use kiro_lang::test_runner;
 use kiro_lang::{
-    StdAssets, canonical_std_module_name, removed_print_statement, std_asset_path,
-    unsupported_let_statement,
+    StdAssets, canonical_std_module_name, is_reserved_std_module_name, removed_print_statement,
+    std_asset_path, unsupported_let_statement,
 };
 
 use std::collections::HashMap;
@@ -129,118 +129,44 @@ io.print("Hello from {}!")"#,
         std::process::exit(1);
     }
 
-    // Initialize Cargo Project in .kiro/
+    // Reserve generated state space. Kiro creates .kiro/build during build/run.
     let dot_kiro_path = path.join(".kiro");
     if let Err(e) = fs::create_dir(&dot_kiro_path) {
         eprintln!("Error creating .kiro directory: {}", e);
         std::process::exit(1);
     }
 
-    // Run cargo init --bin
-    println!("Initializing Cargo project in .kiro/ ...");
-    let status = Command::new("cargo")
-        .args(["init", "--bin", "--name", project_name, "--edition", "2021"])
-        .current_dir(&dot_kiro_path)
-        .status();
-
-    match status {
-        Ok(s) => {
-            if !s.success() {
-                eprintln!("Warning: 'cargo init' failed. You may need to initialize it manually.");
-            }
-        }
-        Err(e) => {
-            eprintln!(
-                "Warning: Failed to run 'cargo init': {}. Is cargo installed?",
-                e
-            );
-        }
-    }
-
     println!("✨ Created new Kiro project: {}", project_name);
 }
 
 fn handle_add(dep: &str) {
-    let kiro_toml_path = "kiro.toml";
-    if !std::path::Path::new(kiro_toml_path).exists() {
-        eprintln!("Error: kiro.toml not found. Are you in a Kiro project?");
+    let Some((kiro_toml_path, dep_name, dep_version)) = add_remove_context(dep, true) else {
         std::process::exit(1);
-    }
+    };
 
-    // 1. Check for Reserved Prefix (std_)
-    let embedded_path = std_asset_path(dep, "header.rs").unwrap_or_else(|| {
-        if dep.starts_with("std_") {
-            let key = dep.trim_start_matches("std_");
-            format!("{}/header.rs", key)
-        } else {
-            format!("{}/header.rs", dep)
-        }
-    });
-
-    if dep.starts_with("std_") {
-        if StdAssets::get(&embedded_path).is_none() {
-            eprintln!(
-                "Error: Module '{}' starts with reserved prefix 'std_' but is not part of the Kiro Standard Library.",
-                dep
-            );
-            std::process::exit(1);
-        }
-    }
-
-    // 2. Read and Parse kiro.toml
-    let content = fs::read_to_string(kiro_toml_path).unwrap();
+    let content = fs::read_to_string(&kiro_toml_path).unwrap();
     let mut doc = content
         .parse::<DocumentMut>()
         .expect("Invalid kiro.toml format");
 
-    // 3. Determine Dependency Type
-    let is_embedded = StdAssets::get(&embedded_path).is_some();
-
-    // 4. Update kiro.toml
     if !doc.as_table().contains_key("dependencies") {
         doc["dependencies"] = Item::Table(Table::new());
     }
 
-    if is_embedded {
-        doc["dependencies"][dep] = value("*");
-        println!("➕ Added embedded dependency '{}' to kiro.toml", dep);
-    } else {
-        // External or Manual
-        // If it starts with kiro_ but not embedded, maybe manual?
-        // For now, we treat standard cargo crates as default unless manual specified (user can edit later)
-        // But for this command, we assume external crate if not embedded.
-        doc["dependencies"][dep] = value("*");
-        println!("➕ Added external dependency '{}' to kiro.toml", dep);
-
-        // 5. Run cargo add (only for external)
-        let dot_kiro = std::path::Path::new(".kiro");
-        if dot_kiro.exists() {
-            println!("📦 Running 'cargo add {}' in .kiro/...", dep);
-            let status = Command::new("cargo")
-                .args(["add", dep])
-                .current_dir(dot_kiro)
-                .status();
-
-            if let Ok(s) = status {
-                if !s.success() {
-                    eprintln!("Warning: 'cargo add' failed.");
-                }
-            }
-        }
-    }
-
-    fs::write(kiro_toml_path, doc.to_string()).unwrap();
+    doc["dependencies"][&dep_name] = value(dep_version.as_str());
+    fs::write(&kiro_toml_path, doc.to_string()).unwrap();
+    println!(
+        "➕ Added Cargo dependency '{}' = \"{}\" to kiro.toml",
+        dep_name, dep_version
+    );
 }
 
 fn handle_remove(dep: &str) {
-    let kiro_toml_path = "kiro.toml";
-    if !std::path::Path::new(kiro_toml_path).exists() {
-        eprintln!("Error: kiro.toml not found. Are you in a Kiro project?");
+    let Some((kiro_toml_path, dep_name, _)) = add_remove_context(dep, false) else {
         std::process::exit(1);
-    }
+    };
 
-    // 1. Remove from kiro.toml
-    let content = fs::read_to_string(kiro_toml_path).unwrap();
+    let content = fs::read_to_string(&kiro_toml_path).unwrap();
     let mut doc = content
         .parse::<DocumentMut>()
         .expect("Invalid kiro.toml format");
@@ -249,26 +175,72 @@ fn handle_remove(dep: &str) {
         .get_mut("dependencies")
         .and_then(|d| d.as_table_like_mut())
     {
-        if deps.remove(dep).is_some() {
-            println!("➖ Removed '{}' from kiro.toml", dep);
+        if deps.remove(&dep_name).is_some() {
+            println!("➖ Removed '{}' from kiro.toml", dep_name);
         } else {
-            eprintln!("Warning: Dependency '{}' not found in kiro.toml", dep);
+            eprintln!("Warning: Dependency '{}' not found in kiro.toml", dep_name);
         }
     }
 
-    fs::write(kiro_toml_path, doc.to_string()).unwrap();
+    fs::write(&kiro_toml_path, doc.to_string()).unwrap();
+}
 
-    // 2. Run cargo remove (if applicable, though we assume we just try it)
-    let dot_kiro = std::path::Path::new(".kiro");
-    if dot_kiro.exists() {
-        // We only really need to remove if it was an external crate, but cargo remove is safe to run even if not present usually?
-        // Or we can check if it exists in Cargo.toml.
-        // Simple approach: try cargo remove, ignore failure if not found.
-        println!("📦 Running 'cargo remove {}' in .kiro/...", dep);
-        let _ = Command::new("cargo")
-            .args(["remove", dep])
-            .current_dir(dot_kiro)
-            .status();
+fn add_remove_context(dep: &str, parse_version: bool) -> Option<(PathBuf, String, String)> {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("Error reading current directory: {}", e);
+            return None;
+        }
+    };
+    let project = match project::find_project(cwd) {
+        Ok(Some(project)) => project,
+        Ok(None) => {
+            eprintln!("Error: kiro.toml not found. Are you in a Kiro project?");
+            return None;
+        }
+        Err(e) => {
+            emit_error(&e);
+            return None;
+        }
+    };
+
+    let (name, version) = if parse_version {
+        parse_dependency_spec(dep)?
+    } else {
+        (dep.to_string(), "*".to_string())
+    };
+
+    if !project::is_valid_cargo_dependency_name(&name) {
+        eprintln!("Error: Invalid dependency name '{}'.", name);
+        return None;
+    }
+    if version.trim().is_empty() {
+        eprintln!("Error: Dependency version must not be empty.");
+        return None;
+    }
+    if is_reserved_std_module_name(&name) {
+        eprintln!(
+            "Error: Dependency '{}' conflicts with a reserved Kiro std module name.",
+            name
+        );
+        return None;
+    }
+
+    Some((project.manifest_path, name, version))
+}
+
+fn parse_dependency_spec(spec: &str) -> Option<(String, String)> {
+    if let Some((name, version)) = spec.split_once('@') {
+        let name = name.trim();
+        let version = version.trim();
+        if name.is_empty() || version.is_empty() {
+            eprintln!("Error: use `kiro add crate@version` or `kiro add crate`.");
+            return None;
+        }
+        Some((name.to_string(), version.to_string()))
+    } else {
+        Some((spec.trim().to_string(), "*".to_string()))
     }
 }
 
@@ -653,7 +625,7 @@ fn run_compiler(
     _emit_rust: bool,
     verbose: bool,
 ) -> Result<PathBuf, KiroError> {
-    let pm = BuildManager::new("kiro_build_cache");
+    let pm = BuildManager::new(GENERATED_BUILD_DIR);
     if let Err(e) = pm.init() {
         return Err(KiroError::new(
             errors::ErrorCode::BuildGraphFailed,
@@ -663,6 +635,9 @@ fn run_compiler(
     }
 
     let requirements = build_requirements(&analysis.modules);
+    let project_dependencies = project::find_project(&analysis.root)?
+        .map(|project| project.dependencies)
+        .unwrap_or_default();
     let header = build_header_content(&analysis.modules, &requirements);
     let root_name = module_name_from_path(&analysis.root)?;
     let module_functions = analysis.module_functions.clone();
@@ -701,13 +676,7 @@ fn run_compiler(
         ));
     }
 
-    if let Err(e) = pm.write_cargo_toml(&requirements) {
-        return Err(KiroError::new(
-            errors::ErrorCode::BuildGraphFailed,
-            errors::ErrorPhase::Compile,
-            format!("Cargo.toml error: {}", e),
-        ));
-    }
+    pm.write_cargo_toml(&requirements, &project_dependencies)?;
 
     match pm.build(verbose) {
         Ok(output_path) => Ok(output_path),

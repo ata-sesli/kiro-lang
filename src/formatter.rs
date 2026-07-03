@@ -103,7 +103,7 @@ fn should_skip_dir(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
-    name == ".git" || name == "target" || name == "kiro_build_cache" || name.starts_with('.')
+    name == ".git" || name == "target" || name == ".kiro" || name.starts_with('.')
 }
 
 fn format_lines(source: &str) -> String {

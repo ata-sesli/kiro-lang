@@ -230,8 +230,8 @@ main()
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let generated = fs::read_to_string("kiro_build_cache/src/main.rs")
-        .expect("generated main Rust should exist");
+    let generated =
+        fs::read_to_string(".kiro/build/src/main.rs").expect("generated main Rust should exist");
     assert!(
         generated.contains("math::add")
             && !generated.contains("math::add((1.0).clone(), (2.0).clone()).await"),
@@ -284,8 +284,8 @@ main()
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let generated = fs::read_to_string("kiro_build_cache/src/main.rs")
-        .expect("generated main Rust should exist");
+    let generated =
+        fs::read_to_string(".kiro/build/src/main.rs").expect("generated main Rust should exist");
     assert!(
         generated.contains("math::add((1.0).clone(), (2.0).clone()).await"),
         "imported effectful call should be awaited:\n{}",

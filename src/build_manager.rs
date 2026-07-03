@@ -1,7 +1,12 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+
+use crate::errors::{ErrorCode, ErrorPhase, KiroError};
+use crate::project::CargoDependency;
+
+pub const GENERATED_BUILD_DIR: &str = ".kiro/build";
 
 #[derive(Clone, Debug, Default)]
 pub struct BuildRequirements {
@@ -116,7 +121,11 @@ impl BuildManager {
         }
     }
 
-    pub fn write_cargo_toml(&self, requirements: &BuildRequirements) -> Result<(), String> {
+    pub fn write_cargo_toml(
+        &self,
+        requirements: &BuildRequirements,
+        project_dependencies: &[CargoDependency],
+    ) -> Result<(), KiroError> {
         let mut tokio_features = vec!["macros", "rt-multi-thread"];
         if requirements.uses_std_fs {
             tokio_features.push("fs");
@@ -131,24 +140,52 @@ impl BuildManager {
             .collect::<Vec<_>>()
             .join(", ");
 
-        let mut dependency_lines = vec![
+        let mut generated_dependencies = BTreeMap::new();
+        generated_dependencies.insert(
+            "tokio".to_string(),
             format!(
                 r#"tokio = {{ version = "1.49.0", features = [{}] }}"#,
                 tokio_features
             ),
-            r#"kiro_runtime = { path = "../kiro_runtime" }"#.to_string(),
-        ];
+        );
+        generated_dependencies.insert(
+            "kiro_runtime".to_string(),
+            r#"kiro_runtime = { path = "../../kiro_runtime" }"#.to_string(),
+        );
 
         if requirements.uses_anyhow {
-            dependency_lines.push(r#"anyhow = "1""#.to_string());
+            generated_dependencies.insert("anyhow".to_string(), r#"anyhow = "1""#.to_string());
         }
         if requirements.uses_pipes {
-            dependency_lines.push(r#"async-channel = "2.5.0""#.to_string());
+            generated_dependencies.insert(
+                "async-channel".to_string(),
+                r#"async-channel = "2.5.0""#.to_string(),
+            );
         }
         if requirements.uses_std_net {
-            dependency_lines.push(
+            generated_dependencies.insert(
+                "reqwest".to_string(),
                 r#"reqwest = { version = "0.13.1", features = ["gzip", "json"] }"#.to_string(),
             );
+        }
+
+        for dep in project_dependencies {
+            if generated_dependencies.contains_key(&dep.name) {
+                return Err(KiroError::new(
+                    ErrorCode::BuildGraphFailed,
+                    ErrorPhase::Compile,
+                    format!(
+                        "Dependency '{}' is already managed by Kiro's generated runtime dependencies.",
+                        dep.name
+                    ),
+                )
+                .with_help("remove it from kiro.toml or avoid the Kiro feature that requires it"));
+            }
+        }
+
+        let mut dependency_lines = generated_dependencies.into_values().collect::<Vec<_>>();
+        for dep in project_dependencies {
+            dependency_lines.push(format!(r#"{} = "{}""#, dep.name, dep.version));
         }
 
         let content = format!(
@@ -163,7 +200,15 @@ edition = "2021"
 "#,
             dependency_lines.join("\n")
         );
-        write_if_changed(format!("{}/Cargo.toml", self.build_dir), &content).map(|_| ())
+        write_if_changed(format!("{}/Cargo.toml", self.build_dir), &content)
+            .map(|_| ())
+            .map_err(|e| {
+                KiroError::new(
+                    ErrorCode::BuildGraphFailed,
+                    ErrorPhase::Compile,
+                    format!("Cargo.toml error: {}", e),
+                )
+            })
     }
 }
 

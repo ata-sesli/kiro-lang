@@ -253,7 +253,7 @@ fn cli_fmt_discovers_project_files_and_skips_cache_dirs() {
     let dir = temp_project("discover");
     let main = dir.join("main.kiro");
     let nested_dir = dir.join("scripts");
-    let cache_dir = dir.join("kiro_build_cache");
+    let cache_dir = dir.join(".kiro/build");
     fs::create_dir_all(&nested_dir).expect("nested dir should be created");
     fs::create_dir_all(&cache_dir).expect("cache dir should be created");
     fs::write(&main, "import io\n\nfn main(){\nio.print(\"main\")\n}\n")
