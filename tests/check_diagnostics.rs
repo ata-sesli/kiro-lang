@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use kiro_lang::compiler::Compiler;
 use kiro_lang::grammar;
-use kiro_lang::interpreter::Interpreter;
+use kiro_lang::interpreter::legacy::Interpreter;
 
 static KIRO_BUILD_LOCK: Mutex<()> = Mutex::new(());
 
@@ -38,6 +38,25 @@ fn run_kiro(args: &[&str], current_dir: &PathBuf) -> std::process::Output {
         .current_dir(current_dir)
         .output()
         .expect("kiro-lang command should run")
+}
+
+fn build_stderr_for_source(test_name: &str, source: &str) -> String {
+    let dir = temp_project(test_name);
+    let main_path = dir.join("main.kiro");
+    fs::write(&main_path, source).expect("main module should be written");
+
+    let output = run_kiro(
+        &["build", main_path.to_str().unwrap()],
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+    );
+
+    assert!(
+        !output.status.success(),
+        "source should fail\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stderr).to_string()
 }
 
 #[test]
@@ -242,6 +261,63 @@ io.print(add(1))
 }
 
 #[test]
+fn wrong_argument_count_location_ignores_later_same_text_inside_string() {
+    let stderr = build_stderr_for_source(
+        "wrong_arg_count_exact_span",
+        "pure fn add(a: num, b: num) -> num { return a + b }\n\nadd(1)\nvar later = \"add(\"\n",
+    );
+
+    assert!(
+        stderr.contains("main.kiro:3:1"),
+        "diagnostic should point at the bad call, not later string text:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("3 | add(1)"),
+        "diagnostic should show the bad call source line:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn final_expression_wrong_return_location_ignores_later_function_name_string() {
+    let stderr = build_stderr_for_source(
+        "final_expression_wrong_return_exact_span",
+        "import io\n\nfn f() -> num {\n    \"wrong\"\n}\n\nio.print(\"f\")\n",
+    );
+
+    assert!(
+        stderr.contains("main.kiro:4:5"),
+        "diagnostic should point at the wrong final expression, not later string text:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("4 |     \"wrong\""),
+        "diagnostic should show the wrong final expression source line:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn missing_return_location_ignores_later_function_name_string() {
+    let stderr = build_stderr_for_source(
+        "missing_return_exact_span",
+        "import io\n\nfn f() -> num {\n    var x = 1\n}\n\nio.print(\"f\")\n",
+    );
+
+    assert!(
+        stderr.contains("main.kiro:3:4"),
+        "diagnostic should point at the function name, not later string text:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("3 | fn f() -> num {"),
+        "diagnostic should show the function declaration source line:\n{}",
+        stderr
+    );
+}
+
+#[test]
 fn removed_print_statement_reports_migration_diagnostic() {
     let dir = temp_project("removed_print_statement");
     let main_path = dir.join("main.kiro");
@@ -268,6 +344,54 @@ print "hello"
     assert!(
         stderr.contains("help: use `import io` and `io.print(value)`"),
         "diagnostic should explain the migration:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn unsupported_let_reports_source_span() {
+    let stderr = build_stderr_for_source(
+        "unsupported_let_source_span",
+        "import io\n\nio.print(\"let\")\nlet x = 1\n",
+    );
+
+    assert!(
+        stderr.contains("main.kiro:4:1"),
+        "diagnostic should point at the unsupported keyword, not string contents:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("4 | let x = 1"),
+        "diagnostic should show the unsupported keyword source line:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn parse_error_reports_source_location_and_label() {
+    let stderr = build_stderr_for_source(
+        "parse_error_source_span",
+        "import io\n\nfn main( {\nio.print(\"hi\")\n}\n",
+    );
+
+    assert!(
+        stderr.contains("[KIRO1003:parse]"),
+        "stderr should contain parse diagnostic:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("main.kiro:3:"),
+        "parse diagnostic should include file and line:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("3 | fn main( {"),
+        "parse diagnostic should show the invalid source line:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("parse error"),
+        "parse diagnostic should label the failing span:\n{}",
         stderr
     );
 }
@@ -494,6 +618,44 @@ io.print(coutn)
 }
 
 #[test]
+fn unknown_variable_location_ignores_same_text_inside_string() {
+    let stderr = build_stderr_for_source(
+        "unknown_variable_exact_span",
+        "import io\n\nio.print(\"coutn\")\nio.print(coutn)\n",
+    );
+
+    assert!(
+        stderr.contains("main.kiro:4:10"),
+        "diagnostic should point at the variable use, not the earlier string:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("4 | io.print(coutn)"),
+        "diagnostic should show the variable-use source line:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn immutable_mutation_location_ignores_later_same_text_inside_string() {
+    let stderr = build_stderr_for_source(
+        "immutable_mutation_exact_span",
+        "x = 1\nx = 2\nvar later = \"x\"\n",
+    );
+
+    assert!(
+        stderr.contains("main.kiro:2:1"),
+        "diagnostic should point at the mutation, not later text:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("2 | x = 2"),
+        "diagnostic should show the mutation source line:\n{}",
+        stderr
+    );
+}
+
+#[test]
 fn unknown_function_diagnostic_suggests_known_function() {
     let dir = temp_project("unknown_function_suggestion");
     let main_path = dir.join("main.kiro");
@@ -557,6 +719,49 @@ give 1 2
     assert!(
         !stderr.contains("error[E"),
         "diagnostic should not leak Rust compiler errors:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn bad_give_location_ignores_same_text_inside_string() {
+    let stderr = build_stderr_for_source(
+        "bad_give_exact_span",
+        "import io\n\nio.print(\"give\")\ngive 1 2\n",
+    );
+
+    assert!(
+        stderr.contains("main.kiro:4:1"),
+        "diagnostic should point at the give statement, not the earlier string:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("4 | give 1 2"),
+        "diagnostic should show the give source line:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn missing_import_location_ignores_same_text_inside_string() {
+    let stderr = build_stderr_for_source(
+        "missing_import_exact_span",
+        "import io\n\nio.print(\"missing\")\nimport missing\n",
+    );
+
+    assert!(
+        stderr.contains("[KIRO2007:compile] Module 'missing' not found."),
+        "diagnostic should report missing module as an import error:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("main.kiro:4:8"),
+        "diagnostic should point at the import name, not the earlier string:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("4 | import missing"),
+        "diagnostic should show the import source line:\n{}",
         stderr
     );
 }
@@ -771,6 +976,62 @@ io.print(math.raed(1))
 }
 
 #[test]
+fn imported_unknown_function_location_ignores_same_text_inside_string() {
+    let dir = temp_project("imported_unknown_function_exact_span");
+    let main_path = dir.join("main.kiro");
+    fs::write(
+        dir.join("math.kiro"),
+        "pure fn read(a: num) -> num { return a }\n",
+    )
+    .expect("math module should be written");
+    fs::write(
+        &main_path,
+        "import io\n\nimport math\n\nio.print(\"math.raed\")\nio.print(math.raed(1))\n",
+    )
+    .expect("main module should be written");
+
+    let output = run_kiro(
+        &["build", main_path.to_str().unwrap()],
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "unknown imported function should fail"
+    );
+    assert!(
+        stderr.contains("main.kiro:6:10"),
+        "diagnostic should point at the imported function call, not the earlier string:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("6 | io.print(math.raed(1))"),
+        "diagnostic should show the imported call source line:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn struct_initializer_unknown_field_location_ignores_same_text_inside_string() {
+    let stderr = build_stderr_for_source(
+        "struct_initializer_unknown_field_exact_span",
+        "import io\n\nstruct User { name: str }\nio.print(\"age\")\nvar u = User { age: 1 }\n",
+    );
+
+    assert!(
+        stderr.contains("main.kiro:5:16"),
+        "diagnostic should point at the initializer field, not earlier string text:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("5 | var u = User { age: 1 }"),
+        "diagnostic should show the initializer source line:\n{}",
+        stderr
+    );
+}
+
+#[test]
 fn wrong_return_type_fails_before_rust_build() {
     let dir = temp_project("wrong_return_type");
     let main_path = dir.join("main.kiro");
@@ -839,6 +1100,42 @@ io.print(1 at 0)
         "diagnostic should not leak Rust compiler errors:\n{}",
         stderr
     );
+}
+
+#[test]
+fn bad_take_at_and_push_locations_ignore_same_text_inside_strings() {
+    for (name, source, expected_location, expected_line) in [
+        (
+            "bad_take_exact_span",
+            "import io\n\nio.print(\"take\")\nvar x = take 1\n",
+            "main.kiro:4:9",
+            "4 | var x = take 1",
+        ),
+        (
+            "bad_at_exact_span",
+            "import io\n\nio.print(\"at\")\nio.print(1 at 0)\n",
+            "main.kiro:4:12",
+            "4 | io.print(1 at 0)",
+        ),
+        (
+            "bad_push_exact_span",
+            "import io\n\nio.print(\"push\")\n1 push 2\n",
+            "main.kiro:4:3",
+            "4 | 1 push 2",
+        ),
+    ] {
+        let stderr = build_stderr_for_source(name, source);
+        assert!(
+            stderr.contains(expected_location),
+            "diagnostic should point at the operator, not string contents:\n{}",
+            stderr
+        );
+        assert!(
+            stderr.contains(expected_line),
+            "diagnostic should show the operator source line:\n{}",
+            stderr
+        );
+    }
 }
 
 #[test]
@@ -960,7 +1257,10 @@ fn effectful_recursion_fails_without_rust_panic_output() {
     fs::write(
         &main_path,
         r#"
+import io
+
 fn crawl() {
+    io.print("crawl")
     crawl()
 }
 
@@ -979,6 +1279,16 @@ crawl()
     assert!(
         stderr.contains("Recursive calls are only supported in pure fn."),
         "unexpected stderr:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("main.kiro:4:4"),
+        "diagnostic should point at the recursive function name:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("4 | fn crawl() {"),
+        "diagnostic should show the recursive function declaration:\n{}",
         stderr
     );
     assert!(
@@ -1184,6 +1494,9 @@ fn missing_host_glue_fails_before_rust_build() {
     fs::write(
         &main_path,
         r#"
+import io
+
+io.print("rust fn read_file")
 rust fn read_file(path: str) -> str!
 "#,
     )
@@ -1202,8 +1515,13 @@ rust fn read_file(path: str) -> str!
         stderr
     );
     assert!(
-        stderr.contains("main.kiro:2:1"),
-        "diagnostic should point at rust fn declaration:\n{}",
+        stderr.contains("main.kiro:5:1"),
+        "diagnostic should point at rust fn declaration, not earlier string text:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("5 | rust fn read_file(path: str) -> str!"),
+        "diagnostic should show the host declaration source line:\n{}",
         stderr
     );
     assert!(
@@ -1398,6 +1716,44 @@ age = "old"
     assert!(
         stderr.contains("Cannot assign str to num variable 'age'."),
         "unexpected stderr:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn assignment_type_mismatch_location_ignores_same_text_inside_string() {
+    let stderr = build_stderr_for_source(
+        "assignment_type_exact_span",
+        "import io\n\nvar age = 10\nage = \"old\"\nio.print(\"age\")\n",
+    );
+
+    assert!(
+        stderr.contains("main.kiro:4:1"),
+        "diagnostic should point at the assignment target, not string contents:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("4 | age = \"old\""),
+        "diagnostic should show the assignment source line:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn computed_function_target_location_is_exact() {
+    let stderr = build_stderr_for_source(
+        "computed_function_target_exact_span",
+        "struct User { name: str }\nvar user = User { name: \"Ada\" }\nuser.name()\n",
+    );
+
+    assert!(
+        stderr.contains("main.kiro:3:1"),
+        "diagnostic should point at the computed call target:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("3 | user.name()"),
+        "diagnostic should show the computed call source line:\n{}",
         stderr
     );
 }

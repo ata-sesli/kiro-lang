@@ -6,6 +6,7 @@ pub mod errors;
 pub mod formatter;
 pub mod grammar;
 pub mod interpreter;
+pub mod ir;
 #[cfg(feature = "lsp")]
 pub mod lsp;
 #[cfg(feature = "lsp")]
@@ -79,17 +80,31 @@ impl StdAssets {
     }
 }
 
-pub fn unsupported_let_line(source: &str) -> Option<usize> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnsupportedLetStatement {
+    pub line: usize,
+    pub column: usize,
+}
+
+pub fn unsupported_let_statement(source: &str) -> Option<UnsupportedLetStatement> {
     for (idx, line) in source.lines().enumerate() {
         let trimmed = line.trim_start();
         if trimmed.is_empty() || trimmed.starts_with("//") {
             continue;
         }
+        let leading_ws = line.len().saturating_sub(trimmed.len());
         if trimmed.split_whitespace().next() == Some("let") {
-            return Some(idx + 1);
+            return Some(UnsupportedLetStatement {
+                line: idx + 1,
+                column: leading_ws + 1,
+            });
         }
     }
     None
+}
+
+pub fn unsupported_let_line(source: &str) -> Option<usize> {
+    unsupported_let_statement(source).map(|found| found.line)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

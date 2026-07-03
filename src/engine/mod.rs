@@ -7,11 +7,12 @@ use std::time::Duration;
 
 use kiro_runtime::{KiroError as HostError, RuntimeVal as HostRuntimeVal};
 
-use crate::grammar::{self, Expression, Statement};
+use crate::grammar::{self, Statement};
 use crate::interpreter::values::RuntimeVal as InterpreterRuntimeVal;
 use crate::interpreter::{
-    HostCallCtx as InterpreterHostCallCtx, HostFnHandler, Interpreter, InterpreterLimits,
+    HostCallCtx as InterpreterHostCallCtx, HostFnHandler, InterpreterLimits, SessionRuntime,
 };
+use crate::ir::IrModule;
 use crate::{
     StdAssets, canonical_std_module_name, removed_print_statement, std_asset_path,
     unsupported_let_line,
@@ -174,6 +175,7 @@ pub struct CompiledScript {
     pub module_name: String,
     pub source: String,
     pub base_dir: PathBuf,
+    ir_module: IrModule,
     has_main: bool,
     host_decls: HashMap<(String, String), HostDecl>,
 }
@@ -382,12 +384,15 @@ impl Engine {
 
         for stmt in &program.statements {
             match stmt {
-                Statement::FunctionDef(def) if def.name == "main" => {
+                Statement::FunctionDef(def)
+                    if crate::grammar::function_name(&def.name) == "main" =>
+                {
                     has_main = true;
                 }
                 Statement::RustFnDecl(def) => {
+                    let name = crate::grammar::function_name(&def.name).to_string();
                     host_decls.insert(
-                        (module_name.to_string(), def.name.clone()),
+                        (module_name.to_string(), name),
                         HostDecl {
                             params: def.params.iter().map(|p| p.command_type.clone()).collect(),
                             ret: def.return_type.clone(),
@@ -396,12 +401,15 @@ impl Engine {
                     );
                 }
                 Statement::Documented { item, .. } => match item {
-                    grammar::AnnotatableItem::FunctionDef(def) if def.name == "main" => {
+                    grammar::AnnotatableItem::FunctionDef(def)
+                        if crate::grammar::function_name(&def.name) == "main" =>
+                    {
                         has_main = true;
                     }
                     grammar::AnnotatableItem::RustFnDecl(def) => {
+                        let name = crate::grammar::function_name(&def.name).to_string();
                         host_decls.insert(
-                            (module_name.to_string(), def.name.clone()),
+                            (module_name.to_string(), name),
                             HostDecl {
                                 params: def.params.iter().map(|p| p.command_type.clone()).collect(),
                                 ret: def.return_type.clone(),
@@ -414,11 +422,13 @@ impl Engine {
                 _ => {}
             }
         }
+        let ir_module = IrModule::lower(module_name, program);
 
         Ok(CompiledScript {
             module_name: module_name.to_string(),
             source: source.to_string(),
             base_dir: self.base_dir.clone(),
+            ir_module,
             has_main,
             host_decls,
         })
@@ -432,10 +442,8 @@ impl Engine {
         if script.has_main {
             self.call_fn(script, "main", vec![], options)
         } else {
-            let mut interpreter = self.prepare_interpreter(script, options)?;
-            let program = grammar::parse(&script.source)
-                .map_err(|e| EngineError::Parse(format!("{:?}", e)))?;
-            interpreter.run(program).map_err(EngineError::Runtime)?;
+            let mut runtime = self.prepare_runtime(script, options)?;
+            runtime.run().map_err(EngineError::Runtime)?;
             Ok(Value::Void)
         }
     }
@@ -447,39 +455,24 @@ impl Engine {
         args: Vec<Value>,
         options: ExecOptions,
     ) -> Result<Value, EngineError> {
-        let mut interpreter = self.prepare_interpreter(script, options)?;
-
-        let program =
-            grammar::parse(&script.source).map_err(|e| EngineError::Parse(format!("{:?}", e)))?;
-
-        interpreter
-            .run(declaration_program(program))
-            .map_err(EngineError::Runtime)?;
-
-        let mut arg_exprs = Vec::with_capacity(args.len());
+        let mut runtime = self.prepare_runtime(script, options)?;
+        let mut arg_values = Vec::with_capacity(args.len());
         for arg in args {
-            arg_exprs.push(value_to_expression(arg)?);
+            arg_values.push(value_to_interpreter_runtime(arg)?);
         }
 
-        let call = Expression::Call(
-            Box::new(Expression::Variable(grammar::VariableVal {
-                value: fn_name.to_string(),
-            })),
-            (),
-            arg_exprs,
-            (),
-        );
-
-        let result = interpreter.eval_expr(call).map_err(EngineError::Runtime)?;
+        let result = runtime
+            .call_function(&script.module_name, fn_name, arg_values)
+            .map_err(EngineError::Runtime)?;
 
         interpreter_to_value(result)
     }
 
-    fn prepare_interpreter(
+    fn prepare_runtime(
         &self,
         script: &CompiledScript,
         options: ExecOptions,
-    ) -> Result<Interpreter, EngineError> {
+    ) -> Result<SessionRuntime, EngineError> {
         let options = if options == ExecOptions::default() {
             self.default_options.clone()
         } else {
@@ -488,23 +481,23 @@ impl Engine {
 
         self.validate_host_contracts(script, &options)?;
 
-        let mut interpreter = Interpreter::with_base_dir(script.base_dir.clone());
-        interpreter.set_current_module(script.module_name.clone());
-        interpreter.set_host_mode(options.host_mode);
-        interpreter.set_limits(InterpreterLimits {
+        let mut runtime = SessionRuntime::new(script.ir_module.clone(), script.base_dir.clone());
+        runtime.set_current_module(script.module_name.clone());
+        runtime.set_host_mode(options.host_mode);
+        runtime.set_limits(InterpreterLimits {
             max_steps: options.limits.max_steps,
             max_call_depth: options.limits.max_call_depth,
             timeout: options.limits.timeout_ms.map(Duration::from_millis),
         });
-        interpreter.set_module_loader(Arc::new(LoaderAdapter {
+        runtime.set_module_loader(Arc::new(LoaderAdapter {
             inner: self.module_loader.clone(),
         }));
 
         for ((module, name), handler) in &self.host_handlers {
-            interpreter.register_host_fn(module.clone(), name.clone(), handler.clone());
+            runtime.register_host_fn(module.clone(), name.clone(), handler.clone());
         }
 
-        Ok(interpreter)
+        Ok(runtime)
     }
 
     fn validate_host_contracts(
@@ -563,73 +556,24 @@ impl Engine {
     }
 }
 
-fn escape_kiro_string(input: &str) -> String {
-    input.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-fn declaration_program(program: grammar::Program) -> grammar::Program {
-    grammar::Program {
-        statements: program
-            .statements
-            .into_iter()
-            .filter(is_declaration_statement)
-            .collect(),
-    }
-}
-
-fn is_declaration_statement(stmt: &Statement) -> bool {
-    match stmt {
-        Statement::ErrorDef { .. }
-        | Statement::StructDef(_)
-        | Statement::FunctionDef(_)
-        | Statement::RustFnDecl(_)
-        | Statement::Import { .. } => true,
-        Statement::Documented { .. } => true,
-        _ => false,
-    }
-}
-
-fn value_to_expression(value: Value) -> Result<Expression, EngineError> {
+fn value_to_interpreter_runtime(value: Value) -> Result<InterpreterRuntimeVal, EngineError> {
     match value {
-        Value::Num(n) => Ok(Expression::Number(grammar::NumberVal {
-            value: n.to_string(),
-        })),
-        Value::Str(s) => Ok(Expression::StringLit(grammar::StringVal {
-            value: format!("\"{}\"", escape_kiro_string(&s)),
-        })),
-        Value::Bool(true) => Ok(Expression::BoolLit(grammar::BoolVal::True(()))),
-        Value::Bool(false) => Ok(Expression::BoolLit(grammar::BoolVal::False(()))),
+        Value::Num(n) => Ok(InterpreterRuntimeVal::Float(n)),
+        Value::Str(s) => Ok(InterpreterRuntimeVal::String(s)),
+        Value::Bool(b) => Ok(InterpreterRuntimeVal::Bool(b)),
         Value::List(items) => {
-            let mut exprs = Vec::with_capacity(items.len());
+            let mut out = Vec::with_capacity(items.len());
             for item in items {
-                exprs.push(value_to_expression(item)?);
+                out.push(value_to_interpreter_runtime(item)?);
             }
-            Ok(Expression::ListInit(
-                (),
-                grammar::KiroType::Num,
-                (),
-                exprs,
-                (),
-            ))
+            Ok(InterpreterRuntimeVal::List(out))
         }
         Value::Map(map) => {
-            let mut pairs = Vec::with_capacity(map.len());
+            let mut out = HashMap::with_capacity(map.len());
             for (key, value) in map {
-                pairs.push(grammar::MapPair {
-                    key: Expression::StringLit(grammar::StringVal {
-                        value: format!("\"{}\"", escape_kiro_string(&key)),
-                    }),
-                    value: value_to_expression(value)?,
-                });
+                out.insert(key, value_to_interpreter_runtime(value)?);
             }
-            Ok(Expression::MapInit(
-                (),
-                grammar::KiroType::Str,
-                grammar::KiroType::Num,
-                (),
-                pairs,
-                (),
-            ))
+            Ok(InterpreterRuntimeVal::Map(out))
         }
         Value::Void => Err(EngineError::Type(
             "Cannot pass Value::Void as a function argument".to_string(),

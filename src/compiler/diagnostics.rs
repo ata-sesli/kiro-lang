@@ -1,14 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::errors::{ErrorCode, KiroError};
+use crate::errors::{ErrorCode, KiroError, SourceSpan};
 use crate::grammar::grammar;
 
 use super::{Compiler, FunctionInfo};
-
-struct SourceLocation {
-    line: usize,
-    column: usize,
-}
 
 struct SourceIndex {
     file: String,
@@ -23,51 +18,13 @@ impl SourceIndex {
         }
     }
 
-    fn locate(&self, needle: &str) -> Option<SourceLocation> {
-        self.source
-            .find(needle)
-            .and_then(|offset| self.location_at(offset))
-    }
-
-    fn locate_last(&self, needle: &str) -> Option<SourceLocation> {
-        self.source
-            .rfind(needle)
-            .and_then(|offset| self.location_at(offset))
-    }
-
-    fn location_at(&self, offset: usize) -> Option<SourceLocation> {
-        let mut line_start = 0;
-        for (idx, line) in self.source.split_inclusive('\n').enumerate() {
-            let line_end = line_start + line.len();
-            if offset < line_end {
-                return Some(SourceLocation {
-                    line: idx + 1,
-                    column: offset.saturating_sub(line_start) + 1,
-                });
-            }
-            line_start = line_end;
-        }
-        None
-    }
-
-    fn attach(&self, err: KiroError, token: &str, label: &str, prefer_last: bool) -> KiroError {
-        let located = if prefer_last {
-            self.locate_last(token)
-        } else {
-            self.locate(token)
-        };
-        if let Some(loc) = located {
-            err.with_source_span(
-                self.file.clone(),
-                self.source.clone(),
-                loc.line,
-                loc.column,
-                token.len().max(1),
-                label,
-            )
-        } else {
-            err
-        }
+    fn attach_span(&self, err: KiroError, span: crate::grammar::AstSpan, label: &str) -> KiroError {
+        err.with_byte_span(
+            self.file.clone(),
+            self.source.clone(),
+            SourceSpan::new(span.0, span.1),
+            label,
+        )
     }
 }
 
@@ -115,26 +72,15 @@ impl<'a> SemanticCtx<'a> {
         KiroError::compile_error(self.module, code, message, None)
     }
 
-    fn error_at(
+    fn error_at_span(
         &self,
         code: ErrorCode,
         message: impl Into<String>,
-        token: &str,
+        span: crate::grammar::AstSpan,
         label: &str,
     ) -> KiroError {
         let err = self.error(code, message);
-        self.source.attach(err, token, label, false)
-    }
-
-    fn error_at_last(
-        &self,
-        code: ErrorCode,
-        message: impl Into<String>,
-        token: &str,
-        label: &str,
-    ) -> KiroError {
-        let err = self.error(code, message);
-        self.source.attach(err, token, label, true)
+        self.source.attach_span(err, span, label)
     }
 
     fn error_with_help(
@@ -146,28 +92,16 @@ impl<'a> SemanticCtx<'a> {
         KiroError::compile_error(self.module, code, message, Some(help.into()))
     }
 
-    fn error_at_with_help(
+    fn error_at_span_with_help(
         &self,
         code: ErrorCode,
         message: impl Into<String>,
-        token: &str,
+        span: crate::grammar::AstSpan,
         label: &str,
         help: impl Into<String>,
     ) -> KiroError {
         let err = self.error_with_help(code, message, help);
-        self.source.attach(err, token, label, false)
-    }
-
-    fn error_at_last_with_help(
-        &self,
-        code: ErrorCode,
-        message: impl Into<String>,
-        token: &str,
-        label: &str,
-        help: impl Into<String>,
-    ) -> KiroError {
-        let err = self.error_with_help(code, message, help);
-        self.source.attach(err, token, label, true)
+        self.source.attach_span(err, span, label)
     }
 
     fn push_scope(&mut self) {
@@ -219,6 +153,12 @@ impl<'a> SemanticCtx<'a> {
         suggest_name(name, candidates)
     }
 
+    fn required_call_target_span(&self, func: &grammar::Expression) -> crate::grammar::AstSpan {
+        crate::grammar::call_target_span(func)
+            .or_else(|| crate::grammar::expr_span(func))
+            .expect("parsed Kiro call target should carry a source span")
+    }
+
     fn analyze_block(&mut self, block: &grammar::Block) -> Result<(), KiroError> {
         self.push_scope();
         for stmt in &block.statements {
@@ -236,51 +176,60 @@ impl<'a> SemanticCtx<'a> {
             | grammar::Statement::Continue(_) => Ok(()),
             grammar::Statement::StructDef(def) => {
                 self.structs.insert(
-                    def.name.value.clone(),
+                    crate::grammar::struct_def_name(def).to_string(),
                     def.fields
                         .iter()
-                        .map(|field| (field.name.value.clone(), field.field_type.clone()))
+                        .map(|field| {
+                            (
+                                crate::grammar::field_def_name(field).to_string(),
+                                field.field_type.clone(),
+                            )
+                        })
                         .collect(),
                 );
                 Ok(())
             }
             grammar::Statement::Import { module_name, .. } => {
-                self.imports.insert(module_name.clone());
+                self.imports
+                    .insert(crate::grammar::variable_name(module_name).to_string());
                 Ok(())
             }
             grammar::Statement::VarDecl { ident, value, .. } => {
                 let ty = self.infer_expr(value)?;
-                self.insert_binding(ident.clone(), ty, true);
+                self.insert_binding(crate::grammar::variable_name(ident).to_string(), ty, true);
                 Ok(())
             }
             grammar::Statement::AssignStmt { lhs, rhs, .. } => {
                 let rhs_ty = self.infer_expr(rhs)?;
                 match lhs {
                     grammar::Expression::Variable(v) => {
-                        if let Some(binding) = self.binding(&v.value) {
+                        let name = crate::grammar::variable_name(v);
+                        if let Some(binding) = self.binding(name) {
                             if !binding.is_mutable {
-                                return Err(self.error_at_last(
+                                return Err(self.error_at_span(
                                     ErrorCode::MutabilityError,
-                                    format!("Cannot mutate immutable variable '{}'.", v.value),
-                                    &v.value,
+                                    format!("Cannot mutate immutable variable '{}'.", name),
+                                    crate::grammar::variable_span(v),
                                     "immutable variable",
                                 ));
                             }
                             if let (Some(expected), Some(actual)) = (&binding.ty, &rhs_ty)
                                 && !same_type(expected, actual)
                             {
-                                return Err(self.error(
+                                return Err(self.error_at_span(
                                     ErrorCode::TypeError,
                                     format!(
                                         "Cannot assign {} to {} variable '{}'.",
                                         type_name(actual),
                                         type_name(expected),
-                                        v.value
+                                        name
                                     ),
+                                    crate::grammar::variable_span(v),
+                                    "wrong assignment type",
                                 ));
                             }
                         } else {
-                            self.insert_binding(v.value.clone(), rhs_ty, false);
+                            self.insert_binding(name.to_string(), rhs_ty, false);
                         }
                         Ok(())
                     }
@@ -290,35 +239,35 @@ impl<'a> SemanticCtx<'a> {
                     }
                 }
             }
-            grammar::Statement::Check(_, condition, _) => {
+            grammar::Statement::Check(check_kw, condition, _) => {
                 let ty = self.infer_expr(condition)?;
                 if !matches!(ty, Some(grammar::KiroType::Bool)) {
-                    return Err(self.error_at(
+                    return Err(self.error_at_span(
                         ErrorCode::TypeError,
                         "Check condition must be bool.",
-                        "check",
+                        crate::grammar::token_span(check_kw),
                         "check condition",
                     ));
                 }
                 Ok(())
             }
-            grammar::Statement::Rest(_) => {
+            grammar::Statement::Rest(rest_kw) => {
                 if self.in_pure {
-                    return Err(self.error_at(
+                    return Err(self.error_at_span(
                         ErrorCode::PureViolation,
                         "Pure Function Error: 'rest' is forbidden.",
-                        "rest",
+                        crate::grammar::token_span(rest_kw),
                         "forbidden in pure fn",
                     ));
                 }
                 Ok(())
             }
-            grammar::Statement::Give(_, channel, value) => {
+            grammar::Statement::Give(give_kw, channel, value) => {
                 if self.in_pure {
-                    return Err(self.error_at(
+                    return Err(self.error_at_span(
                         ErrorCode::PureViolation,
                         "Pure Function Error: 'give' is forbidden.",
-                        "give",
+                        crate::grammar::token_span(give_kw),
                         "forbidden in pure fn",
                     ));
                 }
@@ -329,24 +278,24 @@ impl<'a> SemanticCtx<'a> {
                         if let Some(actual) = value_ty
                             && !same_type(&inner, &actual)
                         {
-                            return Err(self.error_at_with_help(
+                            return Err(self.error_at_span_with_help(
                                 ErrorCode::TypeError,
                                 format!(
                                     "'give' value must be {}, got {}.",
                                     type_name(&inner),
                                     type_name(&actual)
                                 ),
-                                "give",
+                                crate::grammar::token_span(give_kw),
                                 "wrong give value",
                                 "Send a value whose type matches the pipe element type.",
                             ));
                         }
                     }
                     Some(_) => {
-                        return Err(self.error_at_with_help(
+                        return Err(self.error_at_span_with_help(
                             ErrorCode::BadUse,
                             "'give' expects a pipe.",
-                            "give",
+                            crate::grammar::token_span(give_kw),
                             "bad give",
                             "Use `give pipe value` where the first expression is a pipe.",
                         ));
@@ -355,20 +304,20 @@ impl<'a> SemanticCtx<'a> {
                 }
                 Ok(())
             }
-            grammar::Statement::Close(_, channel) => {
+            grammar::Statement::Close(close_kw, channel) => {
                 let ch_ty = self.infer_expr(channel)?;
                 if !matches!(ch_ty, Some(grammar::KiroType::Pipe(_, _))) {
-                    return Err(self.error_at_with_help(
+                    return Err(self.error_at_span_with_help(
                         ErrorCode::BadUse,
                         "'close' expects a pipe.",
-                        "close",
+                        crate::grammar::token_span(close_kw),
                         "bad close",
                         "Use `close pipe` where the expression is a pipe.",
                     ));
                 }
                 Ok(())
             }
-            grammar::Statement::Return(_, expr) => {
+            grammar::Statement::Return(return_kw, expr) => {
                 let returned = if let Some(expr) = expr {
                     self.infer_expr(expr)?
                 } else {
@@ -381,13 +330,13 @@ impl<'a> SemanticCtx<'a> {
                         .as_ref()
                         .map(type_name)
                         .unwrap_or_else(|| "value".to_string());
-                    return Err(self.error_at_last_with_help(
+                    return Err(self.error_at_span_with_help(
                         ErrorCode::TypeError,
                         format!(
                             "Function '{}' returns void but returned a value.",
                             self.fn_name.as_deref().unwrap_or("<function>")
                         ),
-                        "return",
+                        crate::grammar::token_span(return_kw),
                         "return value",
                         format!("Add `-> {}` or remove the returned value.", actual),
                     ));
@@ -395,14 +344,14 @@ impl<'a> SemanticCtx<'a> {
                 if let (Some(expected), Some(actual)) = (&self.return_type, &returned)
                     && !same_type(expected, actual)
                 {
-                    return Err(self.error_at_last(
+                    return Err(self.error_at_span(
                         ErrorCode::TypeError,
                         format!(
                             "Wrong return type: expected {}, got {}.",
                             type_name(expected),
                             type_name(actual)
                         ),
-                        "return",
+                        crate::grammar::token_span(return_kw),
                         "wrong return type",
                     ));
                 }
@@ -445,7 +394,11 @@ impl<'a> SemanticCtx<'a> {
                     self.infer_expr(&step.value)?;
                 }
                 self.push_scope();
-                self.insert_binding(iterator.clone(), None, false);
+                self.insert_binding(
+                    crate::grammar::variable_name(iterator).to_string(),
+                    None,
+                    false,
+                );
                 if let Some(filter) = filter {
                     self.infer_expr(&filter.condition)?;
                 }
@@ -467,10 +420,15 @@ impl<'a> SemanticCtx<'a> {
                 grammar::AnnotatableItem::RustFnDecl(_) => Ok(()),
                 grammar::AnnotatableItem::StructDef(def) => {
                     self.structs.insert(
-                        def.name.value.clone(),
+                        crate::grammar::struct_def_name(def).to_string(),
                         def.fields
                             .iter()
-                            .map(|field| (field.name.value.clone(), field.field_type.clone()))
+                            .map(|field| {
+                                (
+                                    crate::grammar::field_def_name(field).to_string(),
+                                    field.field_type.clone(),
+                                )
+                            })
                             .collect(),
                     );
                     Ok(())
@@ -498,10 +456,15 @@ impl<'a> SemanticCtx<'a> {
         self.in_pure = def.pure_kw.is_some();
         let declared_return = def.return_type.clone().unwrap_or(grammar::KiroType::Void);
         self.return_type = Some(declared_return.clone());
-        self.fn_name = Some(def.name.clone());
+        let fn_name = crate::grammar::function_name(&def.name);
+        self.fn_name = Some(fn_name.to_string());
         self.push_scope();
         for param in &def.params {
-            self.insert_binding(param.name.clone(), Some(param.command_type.clone()), false);
+            self.insert_binding(
+                crate::grammar::param_name(param).to_string(),
+                Some(param.command_type.clone()),
+                false,
+            );
         }
         for stmt in &def.body.statements {
             self.analyze_statement(stmt)?;
@@ -513,14 +476,16 @@ impl<'a> SemanticCtx<'a> {
             if let Some(actual) = actual
                 && !same_type(&declared_return, &actual)
             {
-                return Err(self.error_at_last(
+                let span = crate::grammar::expr_span(expr)
+                    .unwrap_or_else(|| crate::grammar::function_span(&def.name));
+                return Err(self.error_at_span(
                     ErrorCode::TypeError,
                     format!(
                         "Wrong return type: expected {}, got {}.",
                         type_name(&declared_return),
                         type_name(&actual)
                     ),
-                    &def.name,
+                    span,
                     "wrong return type",
                 ));
             }
@@ -532,14 +497,14 @@ impl<'a> SemanticCtx<'a> {
         if !matches!(declared_return, grammar::KiroType::Void)
             && !block_guarantees_return(&def.body, &declared_return)
         {
-            return Err(self.error_at(
+            return Err(self.error_at_span(
                 ErrorCode::TypeError,
                 format!(
                     "Function '{}' must return {} on every path.",
-                    def.name,
+                    fn_name,
                     type_name(&declared_return)
                 ),
-                &def.name,
+                crate::grammar::function_span(&def.name),
                 "missing return",
             ));
         }
@@ -562,49 +527,51 @@ impl<'a> SemanticCtx<'a> {
                 Ok(Some(grammar::KiroType::Pipe((), Box::new(inner.clone()))))
             }
             grammar::Expression::Variable(v) => {
-                if let Some(binding) = self.binding(&v.value) {
+                let name = crate::grammar::variable_name(v);
+                if let Some(binding) = self.binding(name) {
                     return Ok(binding.ty.clone());
                 }
-                if self.imports.contains(&v.value) || self.functions.contains_key(&v.value) {
+                if self.imports.contains(name) || self.functions.contains_key(name) {
                     return Ok(None);
                 }
-                let mut err = self.error_at(
+                let mut err = self.error_at_span(
                     ErrorCode::UnknownName,
-                    format!("Unknown variable '{}'.", v.value),
-                    &v.value,
+                    format!("Unknown variable '{}'.", name),
+                    crate::grammar::variable_span(v),
                     "unknown variable",
                 );
-                if let Some(suggestion) = self.suggest_name(&v.value, self.visible_names()) {
+                if let Some(suggestion) = self.suggest_name(name, self.visible_names()) {
                     err = err.with_suggestion(suggestion);
                 }
                 Err(err)
             }
-            grammar::Expression::MoveExpr(_, v) => {
+            grammar::Expression::MoveExpr(move_kw, v) => {
                 if self.in_pure {
-                    return Err(self.error_at(
+                    return Err(self.error_at_span(
                         ErrorCode::PureViolation,
                         "Compiler Error: 'move' is forbidden in pure functions.",
-                        "move",
+                        crate::grammar::token_span(move_kw),
                         "forbidden in pure fn",
                     ));
                 }
-                let binding = self.binding(&v.value).ok_or_else(|| {
-                    let mut err = self.error_at(
+                let name = crate::grammar::variable_name(v);
+                let binding = self.binding(name).ok_or_else(|| {
+                    let mut err = self.error_at_span(
                         ErrorCode::UnknownName,
-                        format!("Unknown variable '{}'.", v.value),
-                        &v.value,
+                        format!("Unknown variable '{}'.", name),
+                        crate::grammar::variable_span(v),
                         "unknown variable",
                     );
-                    if let Some(suggestion) = self.suggest_name(&v.value, self.visible_names()) {
+                    if let Some(suggestion) = self.suggest_name(name, self.visible_names()) {
                         err = err.with_suggestion(suggestion);
                     }
                     err
                 })?;
                 if !binding.is_mutable {
-                    return Err(self.error_at(
+                    return Err(self.error_at_span(
                         ErrorCode::MutabilityError,
-                        format!("Cannot move immutable variable '{}'.", v.value),
-                        &v.value,
+                        format!("Cannot move immutable variable '{}'.", name),
+                        crate::grammar::variable_span(v),
                         "immutable variable",
                     ));
                 }
@@ -612,39 +579,44 @@ impl<'a> SemanticCtx<'a> {
             }
             grammar::Expression::StructInit(name, _, fields, _) => {
                 for field in fields {
-                    if let Some(known_fields) = self.structs.get(&name.value)
-                        && !known_fields.contains_key(&field.name.value)
+                    let struct_name = crate::grammar::struct_name(name);
+                    let field_name = crate::grammar::field_name(&field.name);
+                    if let Some(known_fields) = self.structs.get(struct_name)
+                        && !known_fields.contains_key(field_name)
                     {
-                        return Err(self.error_at(
+                        return Err(self.error_at_span(
                             ErrorCode::TypeError,
-                            format!("Type {} has no field '{}'.", name.value, field.name.value),
-                            &field.name.value,
+                            format!("Type {} has no field '{}'.", struct_name, field_name),
+                            crate::grammar::field_span(&field.name),
                             "unknown field",
                         ));
                     }
                     self.infer_expr(&field.value)?;
                 }
-                Ok(Some(grammar::KiroType::Custom(name.clone())))
+                Ok(Some(grammar::KiroType::Custom(name.value.clone())))
             }
             grammar::Expression::FieldAccess(target, _, field) => {
                 if let grammar::Expression::Variable(module) = &**target
-                    && self.imports.contains(&module.value)
+                    && self.imports.contains(crate::grammar::variable_name(module))
                 {
+                    let module_name = crate::grammar::variable_name(module);
+                    let member_name = crate::grammar::field_name(field);
                     if self
                         .module_functions
-                        .contains_key(&(module.value.clone(), field.value.clone()))
+                        .contains_key(&(module_name.to_string(), member_name.to_string()))
                     {
                         return Ok(None);
                     }
-                    let call_name = format!("{}.{}", module.value, field.value);
-                    let mut err = self.error_at(
+                    let call_name = format!("{}.{}", module_name, member_name);
+                    let mut err = self.error_at_span(
                         ErrorCode::ImportError,
                         format!("Unknown function '{}'.", call_name),
-                        &call_name,
+                        crate::grammar::expr_span(expr)
+                            .unwrap_or_else(|| crate::grammar::field_span(field)),
                         "unknown imported function",
                     );
                     if let Some(suggestion) =
-                        self.suggest_name(&call_name, self.imported_function_names(&module.value))
+                        self.suggest_name(&call_name, self.imported_function_names(module_name))
                     {
                         err = err.with_suggestion(suggestion);
                     }
@@ -654,11 +626,11 @@ impl<'a> SemanticCtx<'a> {
                 if let Some(grammar::KiroType::Custom(name)) = target_ty
                     && let Some(fields) = self.structs.get(&name.value)
                 {
-                    return fields.get(&field.value).cloned().map(Some).ok_or_else(|| {
-                        self.error_at(
+                    return fields.get(field.name()).cloned().map(Some).ok_or_else(|| {
+                        self.error_at_span(
                             ErrorCode::TypeError,
-                            format!("Type {} has no field '{}'.", name.value, field.value),
-                            &field.value,
+                            format!("Type {} has no field '{}'.", name.value, field.name()),
+                            crate::grammar::field_span(field),
                             "unknown field",
                         )
                     });
@@ -682,7 +654,7 @@ impl<'a> SemanticCtx<'a> {
                     Box::new(val.clone()),
                 )))
             }
-            grammar::Expression::At(collection, _, key) => {
+            grammar::Expression::At(collection, at_kw, key) => {
                 let col_ty = self.infer_expr(collection)?;
                 let key_ty = self.infer_expr(key)?;
                 match col_ty {
@@ -690,10 +662,10 @@ impl<'a> SemanticCtx<'a> {
                         if let Some(actual) = key_ty
                             && !same_type(&grammar::KiroType::Num, &actual)
                         {
-                            return Err(self.error_at_with_help(
+                            return Err(self.error_at_span_with_help(
                                 ErrorCode::TypeError,
                                 format!("List index must be num, got {}.", type_name(&actual)),
-                                "at",
+                                crate::grammar::token_span(at_kw),
                                 "wrong index type",
                                 "Lists are indexed with numeric positions.",
                             ));
@@ -704,31 +676,31 @@ impl<'a> SemanticCtx<'a> {
                         if let Some(actual) = key_ty
                             && !same_type(&key, &actual)
                         {
-                            return Err(self.error_at_with_help(
+                            return Err(self.error_at_span_with_help(
                                 ErrorCode::TypeError,
                                 format!(
                                     "Map key must be {}, got {}.",
                                     type_name(&key),
                                     type_name(&actual)
                                 ),
-                                "at",
+                                crate::grammar::token_span(at_kw),
                                 "wrong key type",
                                 "Use a key whose type matches the map declaration.",
                             ));
                         }
                         Ok(Some(*val))
                     }
-                    Some(_) => Err(self.error_at_with_help(
+                    Some(_) => Err(self.error_at_span_with_help(
                         ErrorCode::BadUse,
                         "'at' expects a list or map.",
-                        "at",
+                        crate::grammar::token_span(at_kw),
                         "bad access",
                         "Use `list at index` or `map at key`.",
                     )),
                     None => Ok(None),
                 }
             }
-            grammar::Expression::Push(list, _, value) => {
+            grammar::Expression::Push(list, push_kw, value) => {
                 let list_ty = self.infer_expr(list)?;
                 let value_ty = self.infer_expr(value)?;
                 match list_ty {
@@ -736,24 +708,24 @@ impl<'a> SemanticCtx<'a> {
                         if let Some(actual) = value_ty
                             && !same_type(&inner, &actual)
                         {
-                            return Err(self.error_at_with_help(
+                            return Err(self.error_at_span_with_help(
                                 ErrorCode::TypeError,
                                 format!(
                                     "'push' value must be {}, got {}.",
                                     type_name(&inner),
                                     type_name(&actual)
                                 ),
-                                "push",
+                                crate::grammar::token_span(push_kw),
                                 "wrong push value",
                                 "Push a value whose type matches the list element type.",
                             ));
                         }
                     }
                     Some(_) => {
-                        return Err(self.error_at_with_help(
+                        return Err(self.error_at_span_with_help(
                             ErrorCode::BadUse,
                             "'push' expects a list.",
-                            "push",
+                            crate::grammar::token_span(push_kw),
                             "bad push",
                             "Use `list push value` where the left expression is a list.",
                         ));
@@ -762,21 +734,21 @@ impl<'a> SemanticCtx<'a> {
                 }
                 Ok(Some(grammar::KiroType::Void))
             }
-            grammar::Expression::Take(_, channel) => {
+            grammar::Expression::Take(take_kw, channel) => {
                 if self.in_pure {
-                    return Err(self.error_at(
+                    return Err(self.error_at_span(
                         ErrorCode::PureViolation,
                         "Pure Function Error: 'take' is forbidden.",
-                        "take",
+                        crate::grammar::token_span(take_kw),
                         "forbidden in pure fn",
                     ));
                 }
                 match self.infer_expr(channel)? {
                     Some(grammar::KiroType::Pipe(_, inner)) => Ok(Some(*inner)),
-                    Some(_) => Err(self.error_at_with_help(
+                    Some(_) => Err(self.error_at_span_with_help(
                         ErrorCode::BadUse,
                         "'take' expects a pipe.",
-                        "take",
+                        crate::grammar::token_span(take_kw),
                         "bad take",
                         "Use `take pipe` where the expression is a pipe.",
                     )),
@@ -787,16 +759,16 @@ impl<'a> SemanticCtx<'a> {
                 self.infer_expr(target)?;
                 Ok(None)
             }
-            grammar::Expression::Deref(_, target) => {
+            grammar::Expression::Deref(deref_kw, target) => {
                 let target_ty = self.infer_expr(target)?;
                 if matches!(
                     target_ty,
                     Some(grammar::KiroType::Adr(_, inner)) if matches!(*inner, grammar::KiroType::Void)
                 ) {
-                    return Err(self.error_at_with_help(
+                    return Err(self.error_at_span_with_help(
                         ErrorCode::BadUse,
                         "Cannot deref adr void.",
-                        "deref",
+                        crate::grammar::token_span(deref_kw),
                         "bad deref",
                         "Use a typed address like `adr num`, or pass the opaque address to host code.",
                     ));
@@ -841,26 +813,26 @@ impl<'a> SemanticCtx<'a> {
                 {
                     let call_name = format!("{}.{}", module, function);
                     if args.len() != 1 {
-                        return Err(self.error_at_last_with_help(
+                        return Err(self.error_at_span_with_help(
                             ErrorCode::WrongArgumentCount,
                             format!(
                                 "Wrong argument count for '{}': expected 1, got {}.",
                                 call_name,
                                 args.len()
                             ),
-                            &format!("{}(", call_name),
+                            self.required_call_target_span(func),
                             "wrong argument count",
                             format!("{} expects (value)", call_name),
                         ));
                     }
                     if self.in_pure {
-                        return Err(self.error_at_last(
+                        return Err(self.error_at_span(
                             ErrorCode::PureViolation,
                             format!(
                                 "Pure function cannot call impure/async function '{}' inside a pure function.",
                                 call_name
                             ),
-                            &format!("{}(", call_name),
+                            self.required_call_target_span(func),
                             "impure call",
                         ));
                     }
@@ -883,7 +855,7 @@ impl<'a> SemanticCtx<'a> {
                                 .join(", ")
                         )
                     };
-                    return Err(self.error_at_last_with_help(
+                    return Err(self.error_at_span_with_help(
                         ErrorCode::WrongArgumentCount,
                         format!(
                             "Wrong argument count for '{}': expected {}, got {}.",
@@ -891,19 +863,19 @@ impl<'a> SemanticCtx<'a> {
                             info.params.len(),
                             args.len()
                         ),
-                        &format!("{}(", call_name),
+                        self.required_call_target_span(func),
                         "wrong argument count",
                         help,
                     ));
                 }
                 if self.in_pure && !info.is_pure {
-                    return Err(self.error_at_last(
+                    return Err(self.error_at_span(
                         ErrorCode::PureViolation,
                         format!(
                             "Pure function cannot call impure/async function '{}' inside a pure function.",
                             call_name
                         ),
-                        &format!("{}(", call_name),
+                        self.required_call_target_span(func),
                         "impure call",
                     ));
                 }
@@ -912,7 +884,7 @@ impl<'a> SemanticCtx<'a> {
                     if let Some(actual) = actual {
                         let expected = &info.params[idx];
                         if !same_type(expected, &actual) {
-                            return Err(self.error_at_last(
+                            return Err(self.error_at_span(
                                 ErrorCode::TypeError,
                                 format!(
                                     "Argument {} for '{}' must be {}, got {}.",
@@ -921,7 +893,7 @@ impl<'a> SemanticCtx<'a> {
                                     type_name(expected),
                                     type_name(&actual)
                                 ),
-                                &format!("{}(", call_name),
+                                self.required_call_target_span(func),
                                 "wrong argument type",
                             ));
                         }
@@ -929,11 +901,11 @@ impl<'a> SemanticCtx<'a> {
                 }
                 Ok(info.return_type.clone())
             }
-            grammar::Expression::RunCall(_, call) => {
+            grammar::Expression::RunCall(run_kw, call) => {
                 if let grammar::Expression::Call(func, _, args, _) = &**call {
                     let (_, info) = self.lookup_call(func)?;
                     if args.len() != info.params.len() {
-                        return Err(self.error_at_last(
+                        return Err(self.error_at_span(
                             ErrorCode::WrongArgumentCount,
                             format!(
                                 "Wrong argument count for '{}': expected {}, got {}.",
@@ -941,7 +913,7 @@ impl<'a> SemanticCtx<'a> {
                                 info.params.len(),
                                 args.len()
                             ),
-                            "run",
+                            crate::grammar::token_span(run_kw),
                             "wrong argument count",
                         ));
                     }
@@ -949,10 +921,10 @@ impl<'a> SemanticCtx<'a> {
                         self.infer_expr(arg)?;
                     }
                 } else {
-                    return Err(self.error_at_last_with_help(
+                    return Err(self.error_at_span_with_help(
                         ErrorCode::BadUse,
                         "'run' expects a function call.",
-                        "run",
+                        crate::grammar::token_span(run_kw),
                         "bad run",
                         "Use `run worker()` instead of `run worker`.",
                     ));
@@ -964,63 +936,81 @@ impl<'a> SemanticCtx<'a> {
 
     fn lookup_call(&self, func: &grammar::Expression) -> Result<(String, FunctionInfo), KiroError> {
         match func {
-            grammar::Expression::Variable(v) => self
-                .functions
-                .get(&v.value)
-                .cloned()
-                .map(|info| (v.value.clone(), info))
-                .ok_or_else(|| {
-                    let mut err = self.error_at_last(
-                        ErrorCode::UnknownName,
-                        format!("Unknown function '{}'.", v.value),
-                        &format!("{}(", v.value),
-                        "unknown function",
-                    );
-                    if let Some(suggestion) =
-                        self.suggest_name(&v.value, self.visible_function_names())
-                    {
-                        err = err.with_suggestion(suggestion);
-                    }
-                    err
-                }),
+            grammar::Expression::Variable(v) => {
+                let name = crate::grammar::variable_name(v);
+                self.functions
+                    .get(name)
+                    .cloned()
+                    .map(|info| (name.to_string(), info))
+                    .ok_or_else(|| {
+                        let mut err = self.error_at_span(
+                            ErrorCode::UnknownName,
+                            format!("Unknown function '{}'.", name),
+                            crate::grammar::variable_span(v),
+                            "unknown function",
+                        );
+                        if let Some(suggestion) =
+                            self.suggest_name(name, self.visible_function_names())
+                        {
+                            err = err.with_suggestion(suggestion);
+                        }
+                        err
+                    })
+            }
             grammar::Expression::FieldAccess(target, _, field) => {
                 if let grammar::Expression::Variable(module) = &**target
-                    && self.imports.contains(&module.value)
+                    && self.imports.contains(crate::grammar::variable_name(module))
                 {
+                    let module_name = crate::grammar::variable_name(module);
+                    let member_name = crate::grammar::field_name(field);
                     return self
                         .module_functions
-                        .get(&(module.value.clone(), field.value.clone()))
+                        .get(&(module_name.to_string(), member_name.to_string()))
                         .cloned()
-                        .map(|info| (format!("{}.{}", module.value, field.value), info))
+                        .map(|info| (format!("{}.{}", module_name, member_name), info))
                         .ok_or_else(|| {
-                            let call_name = format!("{}.{}", module.value, field.value);
-                            let mut err = self.error_at_last(
+                            let call_name = format!("{}.{}", module_name, member_name);
+                            let mut err = self.error_at_span(
                                 ErrorCode::ImportError,
                                 format!("Unknown function '{}'.", call_name),
-                                &call_name,
+                                crate::grammar::call_target_span(func)
+                                    .unwrap_or_else(|| crate::grammar::field_span(field)),
                                 "unknown imported function",
                             );
-                            if let Some(suggestion) = self.suggest_name(
-                                &call_name,
-                                self.imported_function_names(&module.value),
-                            ) {
+                            if let Some(suggestion) = self
+                                .suggest_name(&call_name, self.imported_function_names(module_name))
+                            {
                                 err = err.with_suggestion(suggestion);
                             }
                             err
                         });
                 }
-                Err(self.error(ErrorCode::UnknownName, "Unknown function target."))
+                Err(self.error_at_span(
+                    ErrorCode::UnknownName,
+                    "Unknown function target.",
+                    self.required_call_target_span(func),
+                    "unknown function target",
+                ))
             }
-            _ => Err(self.error(ErrorCode::UnknownName, "Unknown function target.")),
+            _ => Err(self.error_at_span(
+                ErrorCode::UnknownName,
+                "Unknown function target.",
+                self.required_call_target_span(func),
+                "unknown function target",
+            )),
         }
     }
 
     fn call_name(&self, func: &grammar::Expression) -> String {
         match func {
-            grammar::Expression::Variable(v) => v.value.clone(),
+            grammar::Expression::Variable(v) => crate::grammar::variable_name(v).to_string(),
             grammar::Expression::FieldAccess(target, _, field) => {
                 if let grammar::Expression::Variable(module) = &**target {
-                    format!("{}.{}", module.value, field.value)
+                    format!(
+                        "{}.{}",
+                        crate::grammar::variable_name(module),
+                        crate::grammar::field_name(field)
+                    )
                 } else {
                     "<computed function>".to_string()
                 }
@@ -1061,7 +1051,7 @@ impl Compiler {
         source: &str,
     ) -> Result<(), KiroError> {
         self.functions = Self::collect_program_functions(program);
-        self.validate_effectful_recursion(program, module)?;
+        self.validate_effectful_recursion(program, module, Some(source))?;
         let mut ctx = SemanticCtx::new(module, source, &self.functions, &self.module_functions);
         ctx.collect_program_structs(program);
         for stmt in &program.statements {
@@ -1087,10 +1077,15 @@ impl SemanticCtx<'_> {
 
     fn insert_struct(&mut self, def: &grammar::StructDef) {
         self.structs.insert(
-            def.name.value.clone(),
+            crate::grammar::struct_def_name(def).to_string(),
             def.fields
                 .iter()
-                .map(|field| (field.name.value.clone(), field.field_type.clone()))
+                .map(|field| {
+                    (
+                        crate::grammar::field_def_name(field).to_string(),
+                        field.field_type.clone(),
+                    )
+                })
                 .collect(),
         );
     }
@@ -1139,10 +1134,13 @@ fn type_name(ty: &grammar::KiroType) -> String {
 fn std_io_display_call(func: &grammar::Expression) -> Option<(&str, &str)> {
     if let grammar::Expression::FieldAccess(target, _, field) = func
         && let grammar::Expression::Variable(module) = &**target
-        && crate::is_std_io_module_name(&module.value)
-        && crate::is_std_io_display_function(&field.value)
+        && crate::is_std_io_module_name(crate::grammar::variable_name(module))
+        && crate::is_std_io_display_function(crate::grammar::field_name(field))
     {
-        return Some((&module.value, &field.value));
+        return Some((
+            crate::grammar::variable_name(module),
+            crate::grammar::field_name(field),
+        ));
     }
     None
 }

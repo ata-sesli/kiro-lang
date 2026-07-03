@@ -9,10 +9,11 @@ impl Compiler {
             Statement::ErrorDef {
                 name, description, ..
             } => {
+                let name = crate::grammar::struct_name(&name);
                 // d.value.value contains the raw string WITH quotes, we need to strip them
                 let desc = description
                     .map(|d| d.value.value.trim_matches('"').to_string())
-                    .unwrap_or_else(|| name.clone());
+                    .unwrap_or_else(|| name.to_string());
                 // Generate a helper function that creates an Arc<anyhow error>
                 format!(
                     "fn kiro_error_{name}() -> std::sync::Arc<anyhow::Error> {{ std::sync::Arc::new(anyhow::anyhow!(\"{desc}\").context(\"{name}\")) }}"
@@ -21,16 +22,25 @@ impl Compiler {
             // 1. Compile Struct Definition
             // 1. Compile Struct Definition
             Statement::StructDef(def) => {
-                let name = def.name;
+                let name = crate::grammar::struct_def_name(&def).to_string();
                 let fields = def.fields;
                 let field_strs: Vec<String> = fields
                     .iter()
-                    .map(|f| format!("pub {}: {}", f.name.value, compile_type(&f.field_type)))
+                    .map(|f| {
+                        format!(
+                            "pub {}: {}",
+                            crate::grammar::field_def_name(f),
+                            compile_type(&f.field_type)
+                        )
+                    })
                     .collect();
 
                 let eq_checks: Vec<String> = fields
                     .iter()
-                    .map(|f| format!("self.{0}.kiro_eq(&other.{0})", f.name.value))
+                    .map(|f| {
+                        let name = crate::grammar::field_def_name(f);
+                        format!("self.{0}.kiro_eq(&other.{0})", name)
+                    })
                     .collect();
                 let eq_body = if eq_checks.is_empty() {
                     "true".to_string()
@@ -41,13 +51,14 @@ impl Compiler {
                 // We add #[derive(Clone, Debug)] and impl KiroGet/KiroEq/AsKiroLoopVar
                 format!(
                     "#[derive(Clone, Debug)]\npub struct {0} {{ {1} }}\nimpl KiroGet for {0} {{ type Inner = Self; fn kiro_get<R>(&self, f: impl FnOnce(&Self::Inner) -> R) -> R {{ f(self) }} }}\nimpl KiroEq for {0} {{ fn kiro_eq(&self, other: &Self) -> bool {{ {2} }} }}\nimpl AsKiroLoopVar for {0} {{ type Out = {0}; fn as_kiro(self) -> Self::Out {{ self }} }}",
-                    name.value,
+                    name,
                     field_strs.join(", "),
                     eq_body
                 )
             }
             // 6. Import Statement
             Statement::Import { module_name, .. } => {
+                let module_name = crate::grammar::variable_name(&module_name).to_string();
                 self.imported_modules.insert(module_name.clone());
                 if self.options.skipped_module_imports.contains(&module_name) {
                     String::new()
@@ -57,6 +68,7 @@ impl Compiler {
             }
             // 1. Variable Declaration
             Statement::VarDecl { ident, value, .. } => {
+                let ident = crate::grammar::variable_name(&ident).to_string();
                 if self.expr_yields_fn_ref(&value) {
                     self.fn_ref_vars.insert(ident.clone());
                 } else {
@@ -76,17 +88,18 @@ impl Compiler {
             // ... (Middle assignments kept same, just copying context) ...
             Statement::AssignStmt { lhs, rhs, .. } => {
                 if let grammar::Expression::Variable(v) = &lhs {
+                    let name = crate::grammar::variable_name(v);
                     if self.expr_yields_fn_ref(&rhs) {
-                        self.fn_ref_vars.insert(v.value.clone());
+                        self.fn_ref_vars.insert(name.to_string());
                     } else {
-                        self.fn_ref_vars.remove(&v.value);
+                        self.fn_ref_vars.remove(name);
                     }
                 }
                 let rhs_str = self.compile_expr(rhs);
 
                 match lhs {
                     grammar::Expression::Variable(v) => {
-                        let name = v.value;
+                        let name = crate::grammar::variable_name(&v).to_string();
                         if let Some(info) = self.known_vars.get(&name) {
                             if info.is_mutable {
                                 // Mutable Assignment
@@ -218,6 +231,7 @@ impl Compiler {
                 else_clause,
                 ..
             } => {
+                let iterator = crate::grammar::variable_name(&iterator).to_string();
                 let range_str = self.compile_expr(iterable);
 
                 // Handle "per 5" -> .step_by(5)
@@ -254,7 +268,7 @@ impl Compiler {
                 )
             }
             Statement::FunctionDef(def) => {
-                let name = def.name;
+                let name = crate::grammar::function_name(&def.name).to_string();
                 let params = def.params;
                 let return_type = def.return_type;
                 let body = def.body;
@@ -290,7 +304,8 @@ impl Compiler {
                     // Populate allowed params for pure scope
                     self.pure_scope_params.clear();
                     for p in &params {
-                        self.pure_scope_params.insert(p.name.clone());
+                        self.pure_scope_params
+                            .insert(crate::grammar::param_name(p).to_string());
                     }
                 }
                 for p in &params {
@@ -298,13 +313,20 @@ impl Compiler {
                         p.command_type,
                         crate::grammar::grammar::KiroType::FnType(_, _, _, _, _, _)
                     ) {
-                        self.fn_ref_vars.insert(p.name.clone());
+                        self.fn_ref_vars
+                            .insert(crate::grammar::param_name(p).to_string());
                     }
                 }
 
                 let param_strs: Vec<String> = params
                     .iter()
-                    .map(|p| format!("{}: {}", p.name, compile_type(&p.command_type)))
+                    .map(|p| {
+                        format!(
+                            "{}: {}",
+                            crate::grammar::param_name(p),
+                            compile_type(&p.command_type)
+                        )
+                    })
                     .collect();
 
                 let can_error = can_error.is_some();
@@ -353,7 +375,7 @@ impl Compiler {
 
             // Rust-backed function (external glue)
             Statement::RustFnDecl(def) => {
-                let name = def.name;
+                let name = crate::grammar::function_name(&def.name).to_string();
                 let params = def.params;
                 let return_type = def.return_type;
                 let can_error = def.can_error;
@@ -371,7 +393,13 @@ impl Compiler {
 
                 let param_strs: Vec<String> = params
                     .iter()
-                    .map(|p| format!("{}: {}", p.name, compile_type(&p.command_type)))
+                    .map(|p| {
+                        format!(
+                            "{}: {}",
+                            crate::grammar::param_name(p),
+                            compile_type(&p.command_type)
+                        )
+                    })
                     .collect();
 
                 let can_error = can_error.is_some();
@@ -383,7 +411,10 @@ impl Compiler {
                 };
 
                 // Generate call to header glue
-                let arg_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+                let arg_names: Vec<String> = params
+                    .iter()
+                    .map(|p| crate::grammar::param_name(p).to_string())
+                    .collect();
                 let args_vec = if arg_names.is_empty() {
                     "vec![]".to_string()
                 } else {

@@ -4,12 +4,13 @@ use kiro_lang::compiler;
 use kiro_lang::errors::{self, KiroError, emit_error, panic_payload_to_string};
 use kiro_lang::formatter;
 use kiro_lang::grammar;
-use kiro_lang::interpreter;
+use kiro_lang::interpreter::SessionRuntime;
+use kiro_lang::ir::IrModule;
 use kiro_lang::project;
 use kiro_lang::test_runner;
 use kiro_lang::{
     StdAssets, canonical_std_module_name, removed_print_statement, std_asset_path,
-    unsupported_let_line,
+    unsupported_let_statement,
 };
 
 use std::collections::HashMap;
@@ -574,8 +575,14 @@ fn run_interpreter(filename: &str) -> bool {
             return false;
         }
     };
-    if let Some(line) = unsupported_let_line(&source) {
-        emit_error(&KiroError::unsupported_keyword(filename, line, "let"));
+    if let Some(found) = unsupported_let_statement(&source) {
+        emit_error(&KiroError::unsupported_keyword_with_source(
+            filename,
+            &source,
+            found.line,
+            found.column,
+            "let",
+        ));
         return false;
     }
     if let Some(removed) = removed_print_statement(&source) {
@@ -591,7 +598,7 @@ fn run_interpreter(filename: &str) -> bool {
     let prog = match grammar::parse(&source) {
         Ok(p) => p,
         Err(e) => {
-            emit_error(&KiroError::parse_failed(filename, &format!("{:?}", e)));
+            emit_error(&KiroError::parse_failed_with_source(filename, &source, &e));
             return false;
         }
     };
@@ -600,9 +607,33 @@ fn run_interpreter(filename: &str) -> bool {
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let mut i = interpreter::Interpreter::with_base_dir(base_dir);
-    if let Err(e) = i.run(prog) {
-        let err = if let Some(message) = e.strip_prefix("Check failed: ") {
+    let module_name = std::path::Path::new(filename)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("main")
+        .to_string();
+    let module = IrModule::lower(module_name.clone(), prog);
+    let mut runtime = SessionRuntime::new(module, base_dir);
+    runtime.set_current_module(module_name);
+    if let Err(e) = runtime.run() {
+        let err = if let Some(site) = runtime.take_last_error_site() {
+            let message = if let Some(message) = e.strip_prefix("Check failed: ") {
+                format!("Check failed: {}", message)
+            } else {
+                e.clone()
+            };
+            let mut err = KiroError::new(site.code, errors::ErrorPhase::Runtime, message)
+                .with_byte_span(
+                    filename,
+                    &source,
+                    errors::SourceSpan::new(site.span.0, site.span.1),
+                    site.label,
+                );
+            if let Some(help) = site.help {
+                err = err.with_help(help);
+            }
+            err
+        } else if let Some(message) = e.strip_prefix("Check failed: ") {
             KiroError::runtime_check_failed(message)
         } else {
             KiroError::new(

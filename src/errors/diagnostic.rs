@@ -1,5 +1,21 @@
 use super::{ErrorCode, ErrorPhase};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceSpan {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl SourceSpan {
+    pub fn new(start: usize, end: usize) -> Self {
+        Self { start, end }
+    }
+
+    pub fn len(self) -> usize {
+        self.end.saturating_sub(self.start).max(1)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct KiroError {
     pub code: ErrorCode,
@@ -83,6 +99,28 @@ impl KiroError {
         self
     }
 
+    pub fn with_byte_span(
+        mut self,
+        file: impl Into<String>,
+        source_text: impl Into<String>,
+        span: SourceSpan,
+        label: impl Into<String>,
+    ) -> Self {
+        let source_text = source_text.into();
+        let offset = span.start.min(source_text.len());
+        let len = span.len();
+        let (line, column) = line_column_at(&source_text, offset);
+        self.file = Some(file.into());
+        self.line = Some(line);
+        self.column = Some(column);
+        self.source_line = source_line(&source_text, line);
+        self.span_offset = Some(offset);
+        self.span_len = Some(len);
+        self.source_text = Some(source_text);
+        self.label = Some(label.into());
+        self
+    }
+
     pub fn with_help(mut self, help: impl Into<String>) -> Self {
         self.help = Some(help.into());
         self
@@ -110,6 +148,29 @@ impl KiroError {
         )
         .with_file(file_or_module)
         .with_line(line)
+        .with_help("Use 'var x = ...' (mutable) or 'x = ...' (immutable).")
+    }
+
+    pub fn unsupported_keyword_with_source(
+        file_or_module: &str,
+        source: &str,
+        line: usize,
+        column: usize,
+        keyword: &str,
+    ) -> Self {
+        Self::new(
+            ErrorCode::UnsupportedKeyword,
+            ErrorPhase::Parse,
+            format!("Unsupported keyword '{}'.", keyword),
+        )
+        .with_source_span(
+            file_or_module,
+            source,
+            line,
+            column,
+            keyword.len(),
+            "unsupported keyword",
+        )
         .with_help("Use 'var x = ...' (mutable) or 'x = ...' (immutable).")
     }
 
@@ -142,6 +203,33 @@ impl KiroError {
             format!("Parse failed: {}", details),
         )
         .with_file(file_or_module)
+    }
+
+    pub fn parse_failed_with_source(
+        file_or_module: &str,
+        source: &str,
+        errors: &[rust_sitter::errors::ParseError],
+    ) -> Self {
+        let details = if errors.is_empty() {
+            "unknown parse error".to_string()
+        } else {
+            format!("{:?}", errors)
+        };
+        let err = Self::new(
+            ErrorCode::ParseFailed,
+            ErrorPhase::Parse,
+            format!("Parse failed: {}", details),
+        );
+        if let Some(first) = errors.first() {
+            err.with_byte_span(
+                file_or_module,
+                source,
+                SourceSpan::new(first.start, first.end.max(first.start + 1)),
+                "parse error",
+            )
+        } else {
+            err.with_file(file_or_module)
+        }
     }
 
     pub fn build_graph_failed() -> Self {
@@ -188,6 +276,20 @@ fn source_line(source: &str, target_line: usize) -> Option<String> {
         .lines()
         .nth(target_line.saturating_sub(1))
         .map(str::to_string)
+}
+
+fn line_column_at(source: &str, offset: usize) -> (usize, usize) {
+    let mut line_start = 0;
+    for (idx, line) in source.split_inclusive('\n').enumerate() {
+        let line_end = line_start + line.len();
+        if offset < line_end {
+            return (idx + 1, offset.saturating_sub(line_start) + 1);
+        }
+        line_start = line_end;
+    }
+    let line_count = source.lines().count().max(1);
+    let column = source.len().saturating_sub(line_start) + 1;
+    (line_count, column)
 }
 
 fn byte_offset_at(source: &str, target_line: usize, target_column: usize) -> Option<usize> {

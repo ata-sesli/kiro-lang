@@ -209,9 +209,9 @@ fn collect_calls_from_expr(
         }
         grammar::Expression::Call(func, _, args, _) => {
             if let grammar::Expression::Variable(v) = &**func
-                && local_functions.contains(&v.value)
+                && local_functions.contains(crate::grammar::variable_name(v))
             {
-                calls.insert(v.value.clone());
+                calls.insert(crate::grammar::variable_name(v).to_string());
             }
             collect_calls_from_expr(func, local_functions, calls);
             for arg in args {
@@ -764,7 +764,7 @@ impl Compiler {
                                 .join("\n"),
                         );
                         functions.insert(
-                            def.name.clone(),
+                            crate::grammar::function_name(&def.name).to_string(),
                             FunctionInfo {
                                 is_pure: def.pure_kw.is_some(),
                                 can_error: def.can_error.is_some(),
@@ -782,7 +782,7 @@ impl Compiler {
                                 .join("\n"),
                         );
                         functions.insert(
-                            def.name.clone(),
+                            crate::grammar::function_name(&def.name).to_string(),
                             FunctionInfo {
                                 is_pure: false,
                                 can_error: def.can_error.is_some(),
@@ -796,7 +796,7 @@ impl Compiler {
                 },
                 grammar::Statement::FunctionDef(def) => {
                     functions.insert(
-                        def.name.clone(),
+                        crate::grammar::function_name(&def.name).to_string(),
                         FunctionInfo {
                             is_pure: def.pure_kw.is_some(),
                             can_error: def.can_error.is_some(),
@@ -808,7 +808,7 @@ impl Compiler {
                 }
                 grammar::Statement::RustFnDecl(def) => {
                     functions.insert(
-                        def.name.clone(),
+                        crate::grammar::function_name(&def.name).to_string(),
                         FunctionInfo {
                             is_pure: false,
                             can_error: def.can_error.is_some(),
@@ -826,13 +826,21 @@ impl Compiler {
 
     pub fn call_function_info(&self, func: &grammar::Expression) -> Option<FunctionInfo> {
         match func {
-            grammar::Expression::Variable(v) => self.functions.get(&v.value).cloned(),
+            grammar::Expression::Variable(v) => self
+                .functions
+                .get(crate::grammar::variable_name(v))
+                .cloned(),
             grammar::Expression::FieldAccess(target, _, field) => {
                 if let grammar::Expression::Variable(module) = &**target
-                    && self.imported_modules.contains(&module.value)
+                    && self
+                        .imported_modules
+                        .contains(crate::grammar::variable_name(module))
                 {
                     self.module_functions
-                        .get(&(module.value.clone(), field.value.clone()))
+                        .get(&(
+                            crate::grammar::variable_name(module).to_string(),
+                            crate::grammar::field_name(field).to_string(),
+                        ))
                         .cloned()
                 } else {
                     None
@@ -844,10 +852,14 @@ impl Compiler {
 
     pub fn call_name(&self, func: &grammar::Expression) -> String {
         match func {
-            grammar::Expression::Variable(v) => v.value.clone(),
+            grammar::Expression::Variable(v) => crate::grammar::variable_name(v).to_string(),
             grammar::Expression::FieldAccess(target, _, field) => {
                 if let grammar::Expression::Variable(module) = &**target {
-                    format!("{}.{}", module.value, field.value)
+                    format!(
+                        "{}.{}",
+                        crate::grammar::variable_name(module),
+                        crate::grammar::field_name(field)
+                    )
                 } else {
                     "<computed function>".to_string()
                 }
@@ -859,10 +871,10 @@ impl Compiler {
     pub fn pure_fn_ref_name_from_expr(&self, expr: &grammar::Expression) -> Option<String> {
         if let grammar::Expression::Ref(_, target) = expr
             && let grammar::Expression::Variable(v) = &**target
-            && let Some(info) = self.functions.get(&v.value)
+            && let Some(info) = self.functions.get(crate::grammar::variable_name(v))
             && info.is_pure
         {
-            return Some(v.value.clone());
+            return Some(crate::grammar::variable_name(v).to_string());
         }
         None
     }
@@ -872,10 +884,13 @@ impl Compiler {
             return true;
         }
         match expr {
-            grammar::Expression::Variable(v) => self.fn_ref_vars.contains(&v.value),
+            grammar::Expression::Variable(v) => {
+                self.fn_ref_vars.contains(crate::grammar::variable_name(v))
+            }
             grammar::Expression::Call(func, _, _, _) => {
                 if let grammar::Expression::Variable(v) = &**func {
-                    self.fn_returning_fn.contains(&v.value)
+                    self.fn_returning_fn
+                        .contains(crate::grammar::variable_name(v))
                 } else {
                     false
                 }
@@ -888,22 +903,28 @@ impl Compiler {
         &self,
         program: &grammar::Program,
         module: &str,
+        source: Option<&str>,
     ) -> Result<(), crate::errors::KiroError> {
         let local_functions: HashSet<String> = self.functions.keys().cloned().collect();
         let mut graph: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut spans: HashMap<String, crate::grammar::AstSpan> = HashMap::new();
 
         for stmt in &program.statements {
             match stmt {
                 grammar::Statement::FunctionDef(def) => {
+                    let name = crate::grammar::function_name(&def.name).to_string();
                     let mut calls = HashSet::new();
                     collect_calls_from_block(&def.body, &local_functions, &mut calls);
-                    graph.insert(def.name.clone(), calls);
+                    spans.insert(name.clone(), crate::grammar::function_span(&def.name));
+                    graph.insert(name, calls);
                 }
                 grammar::Statement::Documented { item, .. } => {
                     if let grammar::AnnotatableItem::FunctionDef(def) = item {
+                        let name = crate::grammar::function_name(&def.name).to_string();
                         let mut calls = HashSet::new();
                         collect_calls_from_block(&def.body, &local_functions, &mut calls);
-                        graph.insert(def.name.clone(), calls);
+                        spans.insert(name.clone(), crate::grammar::function_span(&def.name));
+                        graph.insert(name, calls);
                     }
                 }
                 _ => {}
@@ -920,12 +941,29 @@ impl Compiler {
                         .unwrap_or(false)
                 })
             {
-                return Err(crate::errors::KiroError::compile_error(
+                let mut err = crate::errors::KiroError::compile_error(
                     module,
                     crate::errors::ErrorCode::PureViolation,
                     EFFECTFUL_RECURSION_MESSAGE,
                     None,
-                ));
+                );
+                if let Some(source) = source
+                    && let Some(offending) = cycle.iter().find(|n| {
+                        self.functions
+                            .get(*n)
+                            .map(|info| !info.is_pure)
+                            .unwrap_or(false)
+                    })
+                    && let Some(span) = spans.get(offending)
+                {
+                    err = err.with_byte_span(
+                        module,
+                        source,
+                        crate::errors::SourceSpan::new(span.0, span.1),
+                        "effectful recursion",
+                    );
+                }
+                return Err(err);
             }
         }
 
@@ -933,7 +971,7 @@ impl Compiler {
     }
 
     fn validate_effectful_recursion_or_panic(&self, program: &grammar::Program) {
-        if let Err(err) = self.validate_effectful_recursion(program, "<module>") {
+        if let Err(err) = self.validate_effectful_recursion(program, "<module>", None) {
             panic!("{}", err.message);
         }
     }

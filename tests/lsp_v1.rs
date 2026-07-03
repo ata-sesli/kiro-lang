@@ -833,6 +833,28 @@ pure fn add(a: num, b: num) -> num {
         .find(|item| item["name"] == "worker")
         .expect("worker symbol should exist");
     assert_eq!(worker["range"]["start"]["line"], 3);
+    assert_eq!(worker["selectionRange"]["start"]["character"], 3);
+
+    for (name, line, character) in [
+        ("math", 0, 7),
+        ("User", 7, 7),
+        ("NotFound", 8, 6),
+        ("host_read", 9, 8),
+        ("total", 11, 4),
+    ] {
+        let item = items
+            .iter()
+            .find(|item| item["name"] == name)
+            .unwrap_or_else(|| panic!("{name} symbol should exist"));
+        assert_eq!(
+            item["selectionRange"]["start"]["line"], line,
+            "{name} should start on exact declaration line"
+        );
+        assert_eq!(
+            item["selectionRange"]["start"]["character"], character,
+            "{name} should start on exact declaration name column"
+        );
+    }
 
     shutdown(child, &mut stdin, &mut stdout);
 }

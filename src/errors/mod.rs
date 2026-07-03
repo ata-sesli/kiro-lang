@@ -5,5 +5,5 @@ pub mod render;
 
 pub use code::{ErrorCode, ErrorPhase};
 pub use convert::panic_payload_to_string;
-pub use diagnostic::KiroError;
+pub use diagnostic::{KiroError, SourceSpan};
 pub use render::emit_error;

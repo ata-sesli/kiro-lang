@@ -2,11 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::compiler::{Compiler, FunctionInfo};
-use crate::errors::{ErrorCode, ErrorPhase, KiroError};
+use crate::errors::{ErrorCode, ErrorPhase, KiroError, SourceSpan};
 use crate::grammar::{self, grammar as ast};
 use crate::{
     StdAssets, is_reserved_std_module_name, removed_print_statement, std_asset_path,
-    unsupported_let_line,
+    unsupported_let_statement,
 };
 
 pub type SourceOverlays = HashMap<PathBuf, String>;
@@ -88,10 +88,12 @@ impl AnalysisCtx {
         self.seen.insert(name.to_string());
 
         let (path, source) = self.load_module(name, base_dir, explicit_path)?;
-        if let Some(line) = unsupported_let_line(&source) {
-            return Err(KiroError::unsupported_keyword(
+        if let Some(found) = unsupported_let_statement(&source) {
+            return Err(KiroError::unsupported_keyword_with_source(
                 &file_name_for(&path),
-                line,
+                &source,
+                found.line,
+                found.column,
                 "let",
             ));
         }
@@ -104,23 +106,24 @@ impl AnalysisCtx {
             ));
         }
         let program = grammar::parse(&source)
-            .map_err(|e| KiroError::parse_failed(&file_name_for(&path), &format!("{:?}", e)))?;
+            .map_err(|e| KiroError::parse_failed_with_source(&file_name_for(&path), &source, &e))?;
 
         for (fn_name, info) in Compiler::collect_program_functions(&program) {
             self.module_functions
                 .insert((name.to_string(), fn_name), info);
         }
 
-        let rust_decls = rust_decl_names(&program);
+        let rust_decls = rust_decl_infos(&program);
         if !is_reserved_std_module_name(name) && !rust_decls.is_empty() {
             let glue_path = path.with_extension("rs");
             if !glue_path.exists() {
-                let mut missing = rust_decls.into_iter().collect::<Vec<_>>();
-                missing.sort();
+                let mut missing = rust_decls;
+                missing.sort_by(|a, b| a.name.cmp(&b.name));
                 return Err(missing_host_glue_error(
                     name,
                     &source,
-                    &missing[0],
+                    &missing[0].name,
+                    missing[0].span,
                     &path,
                     &glue_path,
                 ));
@@ -128,14 +131,36 @@ impl AnalysisCtx {
         }
 
         for import in imports(&program) {
-            let import_dir = if is_reserved_std_module_name(&import) {
+            let import_dir = if is_reserved_std_module_name(&import.name) {
                 PathBuf::from(".")
             } else {
                 path.parent()
                     .map(Path::to_path_buf)
                     .unwrap_or_else(|| base_dir.to_path_buf())
             };
-            self.collect_recursive(&import, &import_dir, None)?;
+            if let Err(err) = self.collect_recursive(&import.name, &import_dir, None) {
+                if matches!(err.code, ErrorCode::FileNotFound) {
+                    return Err(KiroError::new(
+                        ErrorCode::ImportError,
+                        ErrorPhase::Compile,
+                        format!("Module '{}' not found.", import.name),
+                    )
+                    .with_byte_span(
+                        file_name_for(&path),
+                        &source,
+                        SourceSpan::new(import.span.0, import.span.1),
+                        "missing module",
+                    )
+                    .with_help(format!(
+                        "add '{}.kiro' beside '{}'",
+                        import.name,
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("this file")
+                    )));
+                }
+                return Err(err);
+            }
         }
 
         self.modules.insert(
@@ -193,33 +218,54 @@ impl AnalyzedModule {
     }
 }
 
-fn imports(program: &ast::Program) -> Vec<String> {
+#[derive(Debug, Clone)]
+struct ImportInfo {
+    name: String,
+    span: grammar::AstSpan,
+}
+
+fn imports(program: &ast::Program) -> Vec<ImportInfo> {
     program
         .statements
         .iter()
         .filter_map(|stmt| match stmt {
-            ast::Statement::Import { module_name, .. } => Some(module_name.clone()),
+            ast::Statement::Import { module_name, .. } => Some(ImportInfo {
+                name: grammar::variable_name(module_name).to_string(),
+                span: grammar::variable_span(module_name),
+            }),
             _ => None,
         })
         .collect()
 }
 
-fn rust_decl_names(program: &ast::Program) -> HashSet<String> {
-    let mut names = HashSet::new();
+#[derive(Debug, Clone)]
+struct RustDeclInfo {
+    name: String,
+    span: grammar::AstSpan,
+}
+
+fn rust_decl_infos(program: &ast::Program) -> Vec<RustDeclInfo> {
+    let mut decls = Vec::new();
     for stmt in &program.statements {
         match stmt {
             ast::Statement::RustFnDecl(def) => {
-                names.insert(def.name.clone());
+                decls.push(RustDeclInfo {
+                    name: grammar::function_name(&def.name).to_string(),
+                    span: grammar::rust_fn_decl_span(def),
+                });
             }
             ast::Statement::Documented { item, .. } => {
                 if let ast::AnnotatableItem::RustFnDecl(def) = item {
-                    names.insert(def.name.clone());
+                    decls.push(RustDeclInfo {
+                        name: grammar::function_name(&def.name).to_string(),
+                        span: grammar::rust_fn_decl_span(def),
+                    });
                 }
             }
             _ => {}
         }
     }
-    names
+    decls
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -250,10 +296,11 @@ fn missing_host_glue_error(
     module: &str,
     source: &str,
     fn_name: &str,
+    span: grammar::AstSpan,
     module_path: &Path,
     glue_path: &Path,
 ) -> KiroError {
-    let mut err = KiroError::new(
+    KiroError::new(
         ErrorCode::MissingHostGlue,
         ErrorPhase::Compile,
         format!(
@@ -269,22 +316,11 @@ fn missing_host_glue_error(
             .and_then(|name| name.to_str())
             .unwrap_or("module.rs"),
         fn_name
-    ));
-
-    let needle = format!("rust fn {}", fn_name);
-    for (idx, line) in source.lines().enumerate() {
-        if let Some(col) = line.find(&needle) {
-            err = err.with_source_span(
-                file_name_for(module_path),
-                source,
-                idx + 1,
-                col + 1,
-                needle.len(),
-                "missing glue",
-            );
-            break;
-        }
-    }
-
-    err
+    ))
+    .with_byte_span(
+        file_name_for(module_path),
+        source,
+        SourceSpan::new(span.0, span.1),
+        "missing glue",
+    )
 }

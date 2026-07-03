@@ -9,7 +9,7 @@ use lsp_types::{
 use url::Url;
 
 use crate::analysis::{self, AnalysisResult, SourceOverlays};
-use crate::grammar::{self, grammar as ast};
+use crate::grammar::{self, AstSpan, grammar as ast};
 
 pub const STD_MODULES: &[&str] = &[
     "env", "fs", "io", "net", "time", "std_env", "std_fs", "std_io", "std_net", "std_time",
@@ -374,6 +374,7 @@ fn index_module_line_first(name: &str, path: PathBuf, source: String) -> ModuleS
                 None,
                 Vec::new(),
                 None,
+                None,
             ));
         } else if let Some(fn_name) = function_name_from_line(trimmed) {
             declarations.push(decl(
@@ -390,6 +391,7 @@ fn index_module_line_first(name: &str, path: PathBuf, source: String) -> ModuleS
                 Some(signature_from_line(trimmed)),
                 Vec::new(),
                 None,
+                None,
             ));
         } else if let Some(fn_name) = rust_fn_name_from_line(trimmed) {
             declarations.push(decl(
@@ -401,6 +403,7 @@ fn index_module_line_first(name: &str, path: PathBuf, source: String) -> ModuleS
                 "rust fn",
                 Some(signature_from_line(trimmed)),
                 Vec::new(),
+                None,
                 None,
             ));
         } else if let Some(struct_name) = trimmed.strip_prefix("struct ").and_then(first_word) {
@@ -414,6 +417,7 @@ fn index_module_line_first(name: &str, path: PathBuf, source: String) -> ModuleS
                 Some(format!("struct {}", struct_name)),
                 Vec::new(),
                 None,
+                None,
             ));
         } else if let Some(error_name) = trimmed.strip_prefix("error ").and_then(first_word) {
             declarations.push(decl(
@@ -426,6 +430,7 @@ fn index_module_line_first(name: &str, path: PathBuf, source: String) -> ModuleS
                 Some(format!("error {}", error_name)),
                 Vec::new(),
                 None,
+                None,
             ));
         } else if let Some(var_name) = trimmed.strip_prefix("var ").and_then(first_word) {
             declarations.push(decl(
@@ -437,6 +442,7 @@ fn index_module_line_first(name: &str, path: PathBuf, source: String) -> ModuleS
                 "variable",
                 None,
                 Vec::new(),
+                None,
                 None,
             ));
         }
@@ -488,12 +494,13 @@ fn collect_statement(
             module,
             path,
             source,
-            module_name,
+            crate::grammar::variable_name(module_name),
             IndexedKind::Import,
             "import",
             None,
             Vec::new(),
             doc,
+            Some(crate::grammar::variable_span(module_name)),
         )),
         ast::Statement::FunctionDef(def) => {
             push_function(module, path, source, def, doc, declarations)
@@ -505,34 +512,37 @@ fn collect_statement(
             module,
             path,
             source,
-            &def.name.value,
+            crate::grammar::struct_def_name(def),
             IndexedKind::Struct,
-            &format!("struct {}", def.name.value),
-            Some(format!("struct {}", def.name.value)),
+            &format!("struct {}", crate::grammar::struct_def_name(def)),
+            Some(format!("struct {}", crate::grammar::struct_def_name(def))),
             Vec::new(),
             doc,
+            Some(crate::grammar::struct_def_span(def)),
         )),
         ast::Statement::ErrorDef { name, .. } => declarations.push(decl(
             module,
             path,
             source,
-            name,
+            crate::grammar::struct_name(name),
             IndexedKind::Error,
             "error",
-            Some(format!("error {}", name)),
+            Some(format!("error {}", crate::grammar::struct_name(name))),
             Vec::new(),
             doc,
+            Some(crate::grammar::struct_span(name)),
         )),
         ast::Statement::VarDecl { ident, .. } => declarations.push(decl(
             module,
             path,
             source,
-            ident,
+            crate::grammar::variable_name(ident),
             IndexedKind::Var,
             "variable",
             None,
             Vec::new(),
             doc,
+            Some(crate::grammar::variable_span(ident)),
         )),
         ast::Statement::Documented { doc, item } => {
             let doc = doc_text(doc);
@@ -547,12 +557,13 @@ fn collect_statement(
                     module,
                     path,
                     source,
-                    &def.name.value,
+                    crate::grammar::struct_def_name(def),
                     IndexedKind::Struct,
-                    &format!("struct {}", def.name.value),
-                    Some(format!("struct {}", def.name.value)),
+                    &format!("struct {}", crate::grammar::struct_def_name(def)),
+                    Some(format!("struct {}", crate::grammar::struct_def_name(def))),
                     Vec::new(),
                     doc,
+                    Some(crate::grammar::struct_def_span(def)),
                 )),
             }
         }
@@ -568,10 +579,17 @@ fn push_function(
     doc: Option<String>,
     declarations: &mut Vec<SymbolDecl>,
 ) {
+    let name = crate::grammar::function_name(&def.name);
     let params = def
         .params
         .iter()
-        .map(|param| format!("{}: {}", param.name, type_label(&param.command_type)))
+        .map(|param| {
+            format!(
+                "{}: {}",
+                crate::grammar::param_name(param),
+                type_label(&param.command_type)
+            )
+        })
         .collect::<Vec<_>>();
     let signature = function_signature(
         if def.pure_kw.is_some() {
@@ -579,7 +597,7 @@ fn push_function(
         } else {
             "fn"
         },
-        &def.name,
+        name,
         &params,
         def.return_type.as_ref(),
         def.can_error.is_some(),
@@ -593,12 +611,13 @@ fn push_function(
         module,
         path,
         source,
-        &def.name,
+        name,
         IndexedKind::Function,
         detail,
         Some(signature),
         params,
         doc,
+        Some(crate::grammar::function_span(&def.name)),
     ));
 }
 
@@ -610,14 +629,21 @@ fn push_rust_fn(
     doc: Option<String>,
     declarations: &mut Vec<SymbolDecl>,
 ) {
+    let name = crate::grammar::function_name(&def.name);
     let params = def
         .params
         .iter()
-        .map(|param| format!("{}: {}", param.name, type_label(&param.command_type)))
+        .map(|param| {
+            format!(
+                "{}: {}",
+                crate::grammar::param_name(param),
+                type_label(&param.command_type)
+            )
+        })
         .collect::<Vec<_>>();
     let signature = function_signature(
         "rust fn",
-        &def.name,
+        name,
         &params,
         Some(&def.return_type),
         def.can_error.is_some(),
@@ -626,12 +652,13 @@ fn push_rust_fn(
         module,
         path,
         source,
-        &def.name,
+        name,
         IndexedKind::RustFunction,
         "rust fn",
         Some(signature),
         params,
         doc,
+        Some(crate::grammar::function_span(&def.name)),
     ));
 }
 
@@ -645,8 +672,11 @@ fn decl(
     signature: Option<String>,
     params: Vec<String>,
     doc: Option<String>,
+    exact_span: Option<AstSpan>,
 ) -> SymbolDecl {
-    let range = declaration_range(source, name, &kind);
+    let range = exact_span
+        .map(|span| range_for_byte_span(source, span))
+        .unwrap_or_else(|| declaration_range(source, name, &kind));
     SymbolDecl {
         name: name.to_string(),
         kind,
@@ -739,6 +769,17 @@ fn find_token_range(source: &str, token: &str) -> Option<Range> {
     None
 }
 
+pub fn range_for_byte_span(source: &str, span: AstSpan) -> Range {
+    let start = span.0.min(source.len());
+    let end = span.1.max(start + 1).min(source.len());
+    let (start_line, start_col) = line_col_for_byte(source, start);
+    let (end_line, end_col) = line_col_for_byte(source, end);
+    Range {
+        start: Position::new(start_line as u32, start_col as u32),
+        end: Position::new(end_line as u32, end_col.max(start_col + 1) as u32),
+    }
+}
+
 fn range_for_line_span(line_idx: usize, line: &str, byte_col: usize, byte_len: usize) -> Range {
     let start = utf16_col(line, byte_col);
     let end = utf16_col(line, byte_col.saturating_add(byte_len).min(line.len()));
@@ -746,6 +787,24 @@ fn range_for_line_span(line_idx: usize, line: &str, byte_col: usize, byte_len: u
         start: Position::new(line_idx as u32, start as u32),
         end: Position::new(line_idx as u32, end.max(start + 1) as u32),
     }
+}
+
+fn line_col_for_byte(source: &str, offset: usize) -> (usize, usize) {
+    let mut line_start = 0;
+    for (line_idx, line) in source.split_inclusive('\n').enumerate() {
+        let line_end = line_start + line.len();
+        if offset < line_end {
+            let column = utf16_col(
+                line.trim_end_matches('\n'),
+                offset.saturating_sub(line_start),
+            );
+            return (line_idx, column);
+        }
+        line_start = line_end;
+    }
+    let line_idx = source.lines().count().saturating_sub(1);
+    let line = source.lines().last().unwrap_or("");
+    (line_idx, utf16_col(line, offset.saturating_sub(line_start)))
 }
 
 fn location_for(decl: &SymbolDecl) -> Option<Location> {

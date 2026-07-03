@@ -173,7 +173,7 @@ fn no_interpret_flag_is_removed_from_bare_invocation() {
 }
 
 #[test]
-fn interpret_executes_with_existing_interpreter() {
+fn interpret_executes_with_v2_interpreter() {
     let dir = temp_project("interpret");
     fs::write(
         dir.join("main.kiro"),
@@ -188,6 +188,102 @@ fn interpret_executes_with_existing_interpreter() {
         String::from_utf8_lossy(&output.stdout).contains("interpreted"),
         "interpreter stdout should include script output:\n{}",
         String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn interpret_failed_check_reports_source_span() {
+    let dir = temp_project("interpret_check_span");
+    fs::write(dir.join("main.kiro"), "check false, \"boom\"\n")
+        .expect("main module should be written");
+
+    let output = run_kiro(&["interpret", "main.kiro"], &dir);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1), "stderr:\n{}", stderr);
+    assert!(
+        stderr.contains("[KIRO3001:runtime] Check failed: boom"),
+        "stderr should show runtime check diagnostic:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("main.kiro:1:1"),
+        "stderr should include exact check location:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("check false"),
+        "stderr should include source line:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn interpret_runtime_at_and_deref_errors_report_source_spans() {
+    let dir = temp_project("interpret_runtime_spans");
+    fs::write(
+        dir.join("list.kiro"),
+        "import io\n\nvar xs = list num { 1 }\nio.print(xs at 4)\n",
+    )
+    .expect("list module should be written");
+
+    let output = run_kiro(&["interpret", "list.kiro"], &dir);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr:\n{}", stderr);
+    assert!(
+        stderr.contains("[KIRO3004:runtime] List index out of bounds: index 4, length 1."),
+        "stderr should show list diagnostic:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("list.kiro:4:10") && stderr.contains("xs at 4"),
+        "stderr should point at the at expression:\n{}",
+        stderr
+    );
+
+    fs::write(
+        dir.join("map.kiro"),
+        "import io\n\nvar users = map str num { \"ada\" 1 }\nio.print(users at \"grace\")\n",
+    )
+    .expect("map module should be written");
+
+    let output = run_kiro(&["interpret", "map.kiro"], &dir);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr:\n{}", stderr);
+    assert!(
+        stderr.contains("[KIRO3005:runtime] Map key not found: \"grace\"."),
+        "stderr should show map diagnostic:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("map.kiro:4:10") && stderr.contains("users at \"grace\""),
+        "stderr should point at the map access expression:\n{}",
+        stderr
+    );
+
+    fs::write(
+        dir.join("deref.kiro"),
+        "import io\n\nvar p = adr num\nio.print(deref p)\n",
+    )
+    .expect("deref module should be written");
+
+    let output = run_kiro(&["interpret", "deref.kiro"], &dir);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr:\n{}", stderr);
+    assert!(
+        stderr.contains("[KIRO3006:runtime] Cannot deref an empty address."),
+        "stderr should show deref diagnostic:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("deref.kiro:4:10") && stderr.contains("deref p"),
+        "stderr should point at the deref expression:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("help: Assign it with `ref value` before using `deref`."),
+        "stderr should include deref help:\n{}",
+        stderr
     );
 }
 

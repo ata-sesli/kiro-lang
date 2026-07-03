@@ -311,6 +311,16 @@ fn cli_fmt_invalid_source_reports_parse_error_without_writing() {
         "stderr should contain Kiro parse diagnostic:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("main.kiro:3:"),
+        "stderr should contain parse source location:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("3 | fn main( {"),
+        "stderr should contain invalid source line:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

@@ -140,6 +140,36 @@ fn main() -> str {
 }
 
 #[test]
+fn embedded_engine_rejects_void_function_arguments() {
+    let engine = Engine::builder().build();
+
+    let script = engine
+        .compile_module(
+            "main",
+            r#"
+fn accepts_num(value: num) -> num {
+    return 1
+}
+"#,
+        )
+        .expect("compile should succeed");
+
+    let err = engine
+        .call_fn(&script, "accepts_num", vec![Value::Void], execute_options())
+        .expect_err("void arguments should be rejected before execution");
+
+    match err {
+        EngineError::Type(msg) => {
+            assert!(
+                msg.contains("Cannot pass Value::Void as a function argument"),
+                "unexpected message: {msg}"
+            );
+        }
+        other => panic!("unexpected error type: {other}"),
+    }
+}
+
+#[test]
 fn embedded_engine_does_not_execute_top_level_entry_twice() {
     let mut engine = Engine::builder().build();
     let calls = Arc::new(Mutex::new(0usize));

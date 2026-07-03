@@ -5,10 +5,13 @@ use crate::grammar::grammar::{self, Expression};
 fn std_io_display_call(func: &Expression) -> Option<(&str, &str)> {
     if let Expression::FieldAccess(target, _, field) = func
         && let Expression::Variable(module) = &**target
-        && crate::is_std_io_module_name(&module.value)
-        && crate::is_std_io_display_function(&field.value)
+        && crate::is_std_io_module_name(crate::grammar::variable_name(module))
+        && crate::is_std_io_display_function(crate::grammar::field_name(field))
     {
-        return Some((&module.value, &field.value));
+        return Some((
+            crate::grammar::variable_name(module),
+            crate::grammar::field_name(field),
+        ));
     }
     None
 }
@@ -50,7 +53,7 @@ impl Compiler {
     pub fn compile_expr(&mut self, expr: Expression) -> String {
         match expr {
             Expression::MoveExpr(_, ident) => {
-                let name = ident.value;
+                let name = crate::grammar::variable_name(&ident).to_string();
 
                 // 1. Purity Check
                 if self.in_pure_context {
@@ -75,61 +78,70 @@ impl Compiler {
             }
 
             Expression::ErrorRef(name_val) => {
-                let name = name_val.value;
+                let name = crate::grammar::struct_name(&name_val);
                 // Generate Err(kiro_error_Name())
                 format!("Err(kiro_error_{}())", name)
             }
 
             Expression::Variable(v) => {
+                let name = crate::grammar::variable_name(&v);
                 // Strict Purity: Ban capturing external variables
                 // EXCEPTION: Allow calling other global functions (which are technically "captured" but are code, not data)
-                let is_known_fn = self.functions.contains_key(&v.value);
+                let is_known_fn = self.functions.contains_key(name);
 
-                if self.in_pure_context
-                    && !self.pure_scope_params.contains(&v.value)
-                    && !is_known_fn
-                {
+                if self.in_pure_context && !self.pure_scope_params.contains(name) && !is_known_fn {
                     panic!(
                         "Compiler Error: Pure function cannot capture external variable '{}'. Only parameters and local variables are allowed.",
-                        v.value
+                        name
                     );
                 }
 
                 // Move Check: Ensure variable hasn't been moved
-                if self.moved_vars.contains(&v.value) {
+                if self.moved_vars.contains(name) {
                     panic!(
                         "Compiler Error: Variable '{}' was moved and cannot be used.",
-                        v.value
+                        name
                     );
                 }
 
                 // Default Behavior: Clone variable access to ensure Copy Semantics
-                format!("({}).clone()", v.value)
+                format!("({}).clone()", name)
             }
 
             // 2. Compile Struct Init
             Expression::StructInit(name, _, fields, _) => {
                 let init_strs: Vec<String> = fields
                     .iter()
-                    .map(|f| format!("{}: {}", f.name.value, self.compile_expr(f.value.clone())))
+                    .map(|f| {
+                        format!(
+                            "{}: {}",
+                            crate::grammar::field_name(&f.name),
+                            self.compile_expr(f.value.clone())
+                        )
+                    })
                     .collect();
 
-                format!("{} {{ {} }}", name.value, init_strs.join(", "))
+                format!(
+                    "{} {{ {} }}",
+                    crate::grammar::struct_name(&name),
+                    init_strs.join(", ")
+                )
             }
 
             // 3. Compile Field Access
             Expression::FieldAccess(target, _, field) => {
                 // Check if the target is a known module (e.g., "math")
                 if let Expression::Variable(v) = &*target {
-                    if self.imported_modules.contains(&v.value) {
-                        return format!("{}::{}", v.value, field.value);
+                    let module_name = crate::grammar::variable_name(v);
+                    if self.imported_modules.contains(module_name) {
+                        return format!("{}::{}", module_name, crate::grammar::field_name(&field));
                     }
                 }
 
                 format!(
                     "{}.kiro_get(|v| v.{}.clone())",
                     self.compile_expr(*target),
-                    field.value
+                    crate::grammar::field_name(&field)
                 )
             }
 
@@ -144,8 +156,14 @@ impl Compiler {
 
             Expression::StringLit(s) => format!("String::from({})", s.value),
             Expression::BoolLit(b) => match b {
-                grammar::BoolVal::True(_) => "true".to_string(),
-                grammar::BoolVal::False(_) => "false".to_string(),
+                rust_sitter::Spanned {
+                    value: grammar::BoolVal::True(_),
+                    ..
+                } => "true".to_string(),
+                rust_sitter::Spanned {
+                    value: grammar::BoolVal::False(_),
+                    ..
+                } => "false".to_string(),
             },
 
             // Adr Init (Lazy / Void)
@@ -196,15 +214,15 @@ impl Compiler {
 
             Expression::Ref(_, target) => {
                 if let Expression::Variable(v) = &*target
-                    && let Some(info) = self.functions.get(&v.value)
+                    && let Some(info) = self.functions.get(crate::grammar::variable_name(v))
                 {
                     if !info.is_pure {
                         panic!(
                             "Compiler Error: Function references currently support pure functions only: '{}'.",
-                            v.value
+                            crate::grammar::variable_name(v)
                         );
                     }
-                    return v.value.clone();
+                    return crate::grammar::variable_name(v).to_string();
                 }
                 let val = self.compile_expr(*target);
                 format!("Some(std::sync::Arc::new(std::sync::Mutex::new({})))", val)
@@ -314,7 +332,7 @@ impl Compiler {
                 let call_name = self.call_name(&func);
                 // Determine if we need .await (Access func by reference BEFORE move)
                 let needs_await = if let Expression::Variable(v) = &*func {
-                    if self.fn_ref_vars.contains(&v.value) {
+                    if self.fn_ref_vars.contains(crate::grammar::variable_name(v)) {
                         false
                     } else if let Some(info) = &call_info {
                         !info.is_pure
@@ -342,11 +360,12 @@ impl Compiler {
                                 current = target;
                             }
                             if let Expression::Variable(arg_v) = current {
-                                if let Some(var_info) = self.known_vars.get(&arg_v.value) {
+                                let arg_name = crate::grammar::variable_name(arg_v);
+                                if let Some(var_info) = self.known_vars.get(arg_name) {
                                     if var_info.is_mutable {
                                         panic!(
                                             "Compiler Error: Cannot pass mutable variable '{}' to pure function '{}'.",
-                                            arg_v.value, call_name
+                                            arg_name, call_name
                                         );
                                     }
                                 }
@@ -354,10 +373,12 @@ impl Compiler {
                         }
                     }
                 } else if let Expression::Variable(v) = &*func {
-                    if self.in_pure_context && !self.fn_ref_vars.contains(&v.value) {
+                    if self.in_pure_context
+                        && !self.fn_ref_vars.contains(crate::grammar::variable_name(v))
+                    {
                         panic!(
                             "Compiler Error: Pure function cannot call unknown/impure function '{}'.",
-                            v.value
+                            crate::grammar::variable_name(v)
                         );
                     }
                 } else if self.in_pure_context {
@@ -395,7 +416,7 @@ impl Compiler {
                     let call_info = self.call_function_info(&func);
                     // Check if target is pure (Sync)
                     let is_pure_target = if let Expression::Variable(v) = &*func {
-                        if self.fn_ref_vars.contains(&v.value) {
+                        if self.fn_ref_vars.contains(crate::grammar::variable_name(v)) {
                             true
                         } else if let Some(info) = &call_info {
                             info.is_pure
@@ -437,9 +458,13 @@ impl Compiler {
 
     pub fn compile_lvalue(&mut self, expr: Expression) -> String {
         match expr {
-            Expression::Variable(v) => v.value,
+            Expression::Variable(v) => crate::grammar::variable_name(&v).to_string(),
             Expression::FieldAccess(target, _, field) => {
-                format!("{}.{}", self.compile_lvalue(*target), field.value)
+                format!(
+                    "{}.{}",
+                    self.compile_lvalue(*target),
+                    crate::grammar::field_name(&field)
+                )
             }
             Expression::Deref(_, target) => {
                 format!(
