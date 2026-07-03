@@ -27,6 +27,34 @@ The practical workflow is consistent: decode arguments, execute Rust logic, map 
 
 Host error matching in Kiro uses the error name. The optional message is kept for diagnostics.
 
+For native resources, return an opaque Kiro handle instead of exposing pointer-shaped details:
+
+```rust
+use kiro_runtime::{HostResult, RuntimeVal};
+
+pub async fn load(args: Vec<RuntimeVal>) -> HostResult {
+    RuntimeVal::expect_arity(&args, 1, "load")?;
+    let path = RuntimeVal::expect_arg(&args, 0, "load")?.as_str()?.to_string();
+    Ok(RuntimeVal::handle("Model", path))
+}
+
+pub async fn label(args: Vec<RuntimeVal>) -> HostResult {
+    RuntimeVal::expect_arity(&args, 1, "label")?;
+    let model = RuntimeVal::expect_arg(&args, 0, "label")?.as_handle("Model")?;
+    let path = model.downcast_ref::<String>().expect("Model payload should be String");
+    Ok(RuntimeVal::from(path.clone()))
+}
+```
+
+The matching Kiro declaration is:
+
+```kiro
+handle Model
+
+rust fn load(path: str) -> Model!
+rust fn label(model: Model) -> str!
+```
+
 Keep host functions narrow in scope. Small host surfaces are easier to test, easier to review, and safer to evolve as language features grow.
 
 ## Common Pitfalls

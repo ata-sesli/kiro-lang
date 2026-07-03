@@ -27,6 +27,7 @@ pub enum Value {
     Bool(bool),
     List(Vec<Value>),
     Map(HashMap<String, Value>),
+    Handle(kiro_runtime::KiroHandle),
     Void,
     Error { name: String, description: String },
 }
@@ -53,6 +54,7 @@ impl TryFrom<HostRuntimeVal> for Value {
                 }
                 Ok(Value::Map(out))
             }
+            HostRuntimeVal::Handle(handle) => Ok(Value::Handle(handle)),
             HostRuntimeVal::Void => Ok(Value::Void),
         }
     }
@@ -80,6 +82,7 @@ impl TryFrom<Value> for HostRuntimeVal {
                 }
                 Ok(HostRuntimeVal::Map(out))
             }
+            Value::Handle(handle) => Ok(HostRuntimeVal::Handle(handle)),
             Value::Void => Ok(HostRuntimeVal::Void),
             Value::Error { .. } => Err(EngineError::Type(
                 "Cannot convert Value::Error into a host runtime value".to_string(),
@@ -575,6 +578,7 @@ fn value_to_interpreter_runtime(value: Value) -> Result<InterpreterRuntimeVal, E
             }
             Ok(InterpreterRuntimeVal::Map(out))
         }
+        Value::Handle(handle) => Ok(InterpreterRuntimeVal::Handle(handle)),
         Value::Void => Err(EngineError::Type(
             "Cannot pass Value::Void as a function argument".to_string(),
         )),
@@ -603,6 +607,7 @@ fn interpreter_to_value(value: InterpreterRuntimeVal) -> Result<Value, EngineErr
             }
             Ok(Value::Map(out))
         }
+        InterpreterRuntimeVal::Handle(handle) => Ok(Value::Handle(handle)),
         InterpreterRuntimeVal::Void => Ok(Value::Void),
         InterpreterRuntimeVal::Error(name, description) => Ok(Value::Error { name, description }),
         other => Err(EngineError::Type(format!(

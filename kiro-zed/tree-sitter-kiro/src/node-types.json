@@ -241,6 +241,10 @@
           "named": true
         },
         {
+          "type": "handle_definition",
+          "named": true
+        },
+        {
           "type": "import_statement",
           "named": true
         },
@@ -460,6 +464,10 @@
         },
         {
           "type": "function_definition",
+          "named": true
+        },
+        {
+          "type": "handle_definition",
           "named": true
         },
         {
@@ -886,6 +894,32 @@
       "types": [
         {
           "type": "give_keyword",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "handle_definition",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "type_identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "handle_keyword",
           "named": true
         }
       ]
@@ -1589,6 +1623,10 @@
           "named": true
         },
         {
+          "type": "handle_definition",
+          "named": true
+        },
+        {
           "type": "import_statement",
           "named": true
         },
@@ -1953,6 +1991,10 @@
   },
   {
     "type": "gte_operator",
+    "named": true
+  },
+  {
+    "type": "handle_keyword",
     "named": true
   },
   {

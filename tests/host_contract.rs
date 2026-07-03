@@ -57,11 +57,37 @@ fn runtime_helpers_expose_list_map_and_void_shapes() {
 }
 
 #[test]
+fn runtime_helpers_expose_typed_handles() {
+    let handle = RuntimeVal::handle("Model", "model-state".to_string());
+    let model = handle
+        .as_handle("Model")
+        .expect("Model handle should decode");
+
+    assert_eq!(model.type_name(), "Model");
+    assert_eq!(
+        model
+            .downcast_ref::<String>()
+            .expect("payload should be a string"),
+        "model-state"
+    );
+
+    let err = handle
+        .as_handle("File")
+        .expect_err("wrong handle type should fail");
+    assert_eq!(err.name, "TypeError");
+    assert!(
+        err.to_string().contains("expected handle File"),
+        "unexpected error: {}",
+        err
+    );
+}
+
+#[test]
 fn host_result_alias_and_abi_version_are_public() {
     fn ok_host(_args: Vec<RuntimeVal>) -> HostResult {
         Ok(RuntimeVal::Void)
     }
 
-    assert_eq!(KIRO_RUNTIME_ABI_VERSION, 1);
+    assert_eq!(KIRO_RUNTIME_ABI_VERSION, 2);
     assert!(ok_host(vec![]).is_ok());
 }

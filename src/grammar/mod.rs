@@ -231,6 +231,8 @@ pub mod grammar {
     #[derive(Debug, Clone)]
     pub enum Statement {
         // ... (Keep existing Statements) ...
+        /// Opaque host-owned handle declaration: `handle File`.
+        HandleDef(HandleDef),
 
         // 2. Struct Definition (No commas, whitespace separated)
         // struct User { name: str age: num }
@@ -687,9 +689,18 @@ pub mod grammar {
     }
     #[derive(Debug, Clone)]
     pub enum AnnotatableItem {
+        HandleDef(HandleDef),
         StructDef(StructDef),
         FunctionDef(FunctionDef),
         RustFnDecl(RustFnDecl),
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct HandleDef {
+        #[rust_sitter::leaf(text = "handle")]
+        pub _handle: Spanned<()>,
+
+        pub name: Spanned<StructNameVal>,
     }
 
     #[derive(Debug, Clone)]
@@ -841,6 +852,14 @@ pub fn struct_def_span(value: &StructDef) -> AstSpan {
     struct_span(&value.name)
 }
 
+pub fn handle_name(value: &HandleDef) -> &str {
+    struct_name(&value.name)
+}
+
+pub fn handle_span(value: &HandleDef) -> AstSpan {
+    struct_span(&value.name)
+}
+
 pub fn error_name(value: &Statement) -> Option<&str> {
     match value {
         Statement::ErrorDef { name, .. } => Some(struct_name(name)),
@@ -903,6 +922,7 @@ pub fn token_span<T>(value: &rust_sitter::Spanned<T>) -> AstSpan {
 
 pub fn stmt_span(stmt: &Statement) -> Option<AstSpan> {
     match stmt {
+        Statement::HandleDef(def) => Some(handle_span(def)),
         Statement::StructDef(def) => Some(struct_def_span(def)),
         Statement::ErrorDef { name, .. } => Some(struct_span(name)),
         Statement::VarDecl { ident, .. } => Some(variable_span(ident)),
@@ -936,6 +956,7 @@ pub fn stmt_span(stmt: &Statement) -> Option<AstSpan> {
         Statement::Import { module_name, .. } => Some(variable_span(module_name)),
         Statement::ExprStmt(expr) => expr_span(expr),
         Statement::Documented { item, .. } => match item {
+            AnnotatableItem::HandleDef(def) => Some(handle_span(def)),
             AnnotatableItem::StructDef(def) => Some(struct_def_span(def)),
             AnnotatableItem::FunctionDef(def) => Some(function_span(&def.name)),
             AnnotatableItem::RustFnDecl(def) => Some(rust_fn_decl_span(def)),

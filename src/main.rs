@@ -793,7 +793,7 @@ fn build_header_content(
             if rs_path.exists() {
                 println!("  - Found Glue: {}", rs_path.display());
                 match fs::read_to_string(&rs_path) {
-                    Ok(content) => header.push_str(&content),
+                    Ok(content) => header.push_str(&sanitize_header_glue(&content)),
                     Err(e) => eprintln!("Failed to read glue file {}: {}", rs_path.display(), e),
                 }
             }
@@ -801,6 +801,44 @@ fn build_header_content(
     }
 
     header
+}
+
+fn sanitize_header_glue(content: &str) -> String {
+    content
+        .lines()
+        .filter_map(sanitize_header_glue_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn sanitize_header_glue_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if matches!(
+        trimmed,
+        "use kiro_runtime::HostResult;"
+            | "use kiro_runtime::KiroError;"
+            | "use kiro_runtime::RuntimeVal;"
+    ) {
+        return None;
+    }
+
+    let Some(imports) = trimmed
+        .strip_prefix("use kiro_runtime::{")
+        .and_then(|rest| rest.strip_suffix("};"))
+    else {
+        return Some(line.to_string());
+    };
+
+    let keep = imports
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !matches!(*name, "HostResult" | "KiroError" | "RuntimeVal"))
+        .collect::<Vec<_>>();
+    if keep.is_empty() {
+        None
+    } else {
+        Some(format!("use kiro_runtime::{{{}}};", keep.join(", ")))
+    }
 }
 
 fn module_name_from_path(path: &Path) -> Result<String, KiroError> {

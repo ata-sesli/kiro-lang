@@ -40,6 +40,7 @@ struct SemanticCtx<'a> {
     functions: &'a HashMap<String, FunctionInfo>,
     module_functions: &'a HashMap<(String, String), FunctionInfo>,
     structs: HashMap<String, HashMap<String, grammar::KiroType>>,
+    handles: HashSet<String>,
     imports: HashSet<String>,
     scopes: Vec<HashMap<String, Binding>>,
     in_pure: bool,
@@ -60,6 +61,7 @@ impl<'a> SemanticCtx<'a> {
             functions,
             module_functions,
             structs: HashMap::new(),
+            handles: HashSet::new(),
             imports: HashSet::new(),
             scopes: vec![HashMap::new()],
             in_pure: false,
@@ -170,6 +172,7 @@ impl<'a> SemanticCtx<'a> {
 
     fn analyze_statement(&mut self, stmt: &grammar::Statement) -> Result<(), KiroError> {
         match stmt {
+            grammar::Statement::HandleDef(_) => Ok(()),
             grammar::Statement::ErrorDef { .. }
             | grammar::Statement::RustFnDecl(_)
             | grammar::Statement::Break(_)
@@ -417,6 +420,7 @@ impl<'a> SemanticCtx<'a> {
                 Ok(())
             }
             grammar::Statement::Documented { item, .. } => match item {
+                grammar::AnnotatableItem::HandleDef(_) => Ok(()),
                 grammar::AnnotatableItem::RustFnDecl(_) => Ok(()),
                 grammar::AnnotatableItem::StructDef(def) => {
                     self.structs.insert(
@@ -578,8 +582,17 @@ impl<'a> SemanticCtx<'a> {
                 Ok(binding.ty.clone())
             }
             grammar::Expression::StructInit(name, _, fields, _) => {
+                let struct_name = crate::grammar::struct_name(name);
+                if self.handles.contains(struct_name) {
+                    return Err(self.error_at_span_with_help(
+                        ErrorCode::BadUse,
+                        format!("Cannot construct handle '{}' in Kiro.", struct_name),
+                        crate::grammar::struct_span(name),
+                        "handle construction",
+                        "Handles are opaque host-owned values; return them from `rust fn` instead.",
+                    ));
+                }
                 for field in fields {
-                    let struct_name = crate::grammar::struct_name(name);
                     let field_name = crate::grammar::field_name(&field.name);
                     if let Some(known_fields) = self.structs.get(struct_name)
                         && !known_fields.contains_key(field_name)
@@ -623,6 +636,17 @@ impl<'a> SemanticCtx<'a> {
                     return Err(err);
                 }
                 let target_ty = self.infer_expr(target)?;
+                if let Some(grammar::KiroType::Custom(name)) = &target_ty
+                    && self.handles.contains(&name.value)
+                {
+                    return Err(self.error_at_span_with_help(
+                        ErrorCode::BadUse,
+                        format!("Cannot access fields on handle '{}'.", name.value),
+                        crate::grammar::field_span(field),
+                        "handle field access",
+                        "Handles are opaque; pass them to host functions instead.",
+                    ));
+                }
                 if let Some(grammar::KiroType::Custom(name)) = target_ty
                     && let Some(fields) = self.structs.get(&name.value)
                 {
@@ -1053,7 +1077,7 @@ impl Compiler {
         self.functions = Self::collect_program_functions(program);
         self.validate_effectful_recursion(program, module, Some(source))?;
         let mut ctx = SemanticCtx::new(module, source, &self.functions, &self.module_functions);
-        ctx.collect_program_structs(program);
+        ctx.collect_program_types(program)?;
         for stmt in &program.statements {
             ctx.analyze_statement(stmt)?;
         }
@@ -1062,22 +1086,48 @@ impl Compiler {
 }
 
 impl SemanticCtx<'_> {
-    fn collect_program_structs(&mut self, program: &grammar::Program) {
+    fn collect_program_types(&mut self, program: &grammar::Program) -> Result<(), KiroError> {
         for stmt in &program.statements {
             match stmt {
-                grammar::Statement::StructDef(def) => self.insert_struct(def),
+                grammar::Statement::HandleDef(def) => self.insert_handle(def)?,
+                grammar::Statement::StructDef(def) => self.insert_struct(def)?,
+                grammar::Statement::Documented {
+                    item: grammar::AnnotatableItem::HandleDef(def),
+                    ..
+                } => self.insert_handle(def)?,
                 grammar::Statement::Documented {
                     item: grammar::AnnotatableItem::StructDef(def),
                     ..
-                } => self.insert_struct(def),
+                } => self.insert_struct(def)?,
                 _ => {}
             }
         }
+        for stmt in &program.statements {
+            self.validate_statement_types(stmt)?;
+        }
+        Ok(())
     }
 
-    fn insert_struct(&mut self, def: &grammar::StructDef) {
+    fn insert_struct(&mut self, def: &grammar::StructDef) -> Result<(), KiroError> {
+        let name = crate::grammar::struct_def_name(def).to_string();
+        if self.handles.contains(&name) {
+            return Err(self.error_at_span(
+                ErrorCode::TypeError,
+                format!("Type '{}' is already declared as a handle.", name),
+                crate::grammar::struct_def_span(def),
+                "duplicate type name",
+            ));
+        }
+        if self.structs.contains_key(&name) {
+            return Err(self.error_at_span(
+                ErrorCode::TypeError,
+                format!("Type '{}' is already declared.", name),
+                crate::grammar::struct_def_span(def),
+                "duplicate type name",
+            ));
+        }
         self.structs.insert(
-            crate::grammar::struct_def_name(def).to_string(),
+            name,
             def.fields
                 .iter()
                 .map(|field| {
@@ -1088,6 +1138,108 @@ impl SemanticCtx<'_> {
                 })
                 .collect(),
         );
+        Ok(())
+    }
+
+    fn insert_handle(&mut self, def: &grammar::HandleDef) -> Result<(), KiroError> {
+        let name = crate::grammar::handle_name(def).to_string();
+        if self.structs.contains_key(&name) || self.handles.contains(&name) {
+            return Err(self.error_at_span(
+                ErrorCode::TypeError,
+                format!("Type '{}' is already declared.", name),
+                crate::grammar::handle_span(def),
+                "duplicate type name",
+            ));
+        }
+        self.handles.insert(name);
+        Ok(())
+    }
+
+    fn validate_statement_types(&self, stmt: &grammar::Statement) -> Result<(), KiroError> {
+        match stmt {
+            grammar::Statement::StructDef(def) => {
+                for field in &def.fields {
+                    self.validate_type(&field.field_type, crate::grammar::field_def_span(field))?;
+                }
+            }
+            grammar::Statement::FunctionDef(def) => self.validate_function_types(def)?,
+            grammar::Statement::RustFnDecl(def) => {
+                for param in &def.params {
+                    self.validate_type(
+                        &param.command_type,
+                        crate::grammar::param_name_span(param),
+                    )?;
+                }
+                self.validate_type(&def.return_type, crate::grammar::function_span(&def.name))?;
+            }
+            grammar::Statement::Documented { item, .. } => match item {
+                grammar::AnnotatableItem::StructDef(def) => {
+                    for field in &def.fields {
+                        self.validate_type(
+                            &field.field_type,
+                            crate::grammar::field_def_span(field),
+                        )?;
+                    }
+                }
+                grammar::AnnotatableItem::FunctionDef(def) => self.validate_function_types(def)?,
+                grammar::AnnotatableItem::RustFnDecl(def) => {
+                    for param in &def.params {
+                        self.validate_type(
+                            &param.command_type,
+                            crate::grammar::param_name_span(param),
+                        )?;
+                    }
+                    self.validate_type(&def.return_type, crate::grammar::function_span(&def.name))?;
+                }
+                grammar::AnnotatableItem::HandleDef(_) => {}
+            },
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn validate_function_types(&self, def: &grammar::FunctionDef) -> Result<(), KiroError> {
+        for param in &def.params {
+            self.validate_type(&param.command_type, crate::grammar::param_name_span(param))?;
+        }
+        if let Some(ret) = &def.return_type {
+            self.validate_type(ret, crate::grammar::function_span(&def.name))?;
+        }
+        Ok(())
+    }
+
+    fn validate_type(
+        &self,
+        ty: &grammar::KiroType,
+        span: crate::grammar::AstSpan,
+    ) -> Result<(), KiroError> {
+        match ty {
+            grammar::KiroType::Adr(_, inner)
+            | grammar::KiroType::Pipe(_, inner)
+            | grammar::KiroType::List(_, inner) => self.validate_type(inner, span),
+            grammar::KiroType::Map(_, key, value) => {
+                self.validate_type(key, span)?;
+                self.validate_type(value, span)
+            }
+            grammar::KiroType::FnType(_, _, params, _, _, ret) => {
+                for param in params {
+                    self.validate_type(param, span)?;
+                }
+                self.validate_type(ret, span)
+            }
+            grammar::KiroType::Custom(name)
+                if !self.structs.contains_key(&name.value)
+                    && !self.handles.contains(&name.value) =>
+            {
+                Err(self.error_at_span(
+                    ErrorCode::TypeError,
+                    format!("Unknown type '{}'.", name.value),
+                    span,
+                    "unknown type",
+                ))
+            }
+            _ => Ok(()),
+        }
     }
 }
 

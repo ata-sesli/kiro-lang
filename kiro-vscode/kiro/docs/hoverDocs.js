@@ -66,6 +66,11 @@ const keywordDocs = {
     detail: 'Defines a structured data type.',
     example: 'struct User { name: str age: num }'
   },
+  handle: {
+    signature: 'handle Name',
+    detail: 'Declares an opaque host-owned value type.',
+    example: 'handle Model'
+  },
   error: {
     signature: 'error Name = "message"',
     detail: 'Declares a named error value.',

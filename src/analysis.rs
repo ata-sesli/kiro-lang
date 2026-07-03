@@ -52,6 +52,7 @@ pub fn analyze_path_with_info(
         seen: HashSet::new(),
         modules: HashMap::new(),
         module_functions: HashMap::new(),
+        missing_glue: Vec::new(),
     };
 
     ctx.collect_recursive(&name, &base_dir, Some(root.clone()))?;
@@ -59,6 +60,16 @@ pub fn analyze_path_with_info(
     for module in ctx.modules.values() {
         let mut compiler = Compiler::with_module_functions(ctx.module_functions.clone());
         compiler.validate_semantics(&module.program, &module.file_name(), &module.source)?;
+    }
+    if let Some(missing) = ctx.missing_glue.first() {
+        return Err(missing_host_glue_error(
+            &missing.module,
+            &missing.source,
+            &missing.function,
+            missing.span,
+            &missing.module_path,
+            &missing.glue_path,
+        ));
     }
 
     Ok(AnalysisResult {
@@ -73,6 +84,16 @@ struct AnalysisCtx {
     seen: HashSet<String>,
     modules: HashMap<String, AnalyzedModule>,
     module_functions: HashMap<(String, String), FunctionInfo>,
+    missing_glue: Vec<MissingGlueInfo>,
+}
+
+struct MissingGlueInfo {
+    module: String,
+    source: String,
+    function: String,
+    span: grammar::AstSpan,
+    module_path: PathBuf,
+    glue_path: PathBuf,
 }
 
 impl AnalysisCtx {
@@ -119,14 +140,14 @@ impl AnalysisCtx {
             if !glue_path.exists() {
                 let mut missing = rust_decls;
                 missing.sort_by(|a, b| a.name.cmp(&b.name));
-                return Err(missing_host_glue_error(
-                    name,
-                    &source,
-                    &missing[0].name,
-                    missing[0].span,
-                    &path,
-                    &glue_path,
-                ));
+                self.missing_glue.push(MissingGlueInfo {
+                    module: name.to_string(),
+                    source: source.clone(),
+                    function: missing[0].name.clone(),
+                    span: missing[0].span,
+                    module_path: path.clone(),
+                    glue_path,
+                });
             }
         }
 

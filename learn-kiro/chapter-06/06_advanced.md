@@ -34,6 +34,15 @@ Host declarations (`rust fn`) extend Kiro with Rust implementations where system
 rust fn read_file(path: str) -> str!
 ```
 
+Use `handle` for native resources that Kiro should pass around but not inspect:
+
+```kiro
+handle Model
+
+rust fn load(path: str) -> Model!
+rust fn predict(model: Model, input: list num) -> list num!
+```
+
 In practice, robust systems usually combine these patterns: pure functions for logic, structs for data shape, pipes for concurrency boundaries, and host functions for external capabilities.
 
 ## Common Pitfalls

@@ -51,6 +51,7 @@ impl Interpreter {
             }
             // Struct definitions are just Declarations, no runtime effect in interpreter
             Statement::StructDef(_) => Ok(StatementResult::Normal(RuntimeVal::Void)),
+            Statement::HandleDef(_) => Ok(StatementResult::Normal(RuntimeVal::Void)),
             // 1. Variable Declaration
             Statement::VarDecl { ident, value, .. } => {
                 let ident = crate::grammar::variable_name(&ident).to_string();
@@ -566,6 +567,7 @@ impl Interpreter {
             }
             Statement::Documented { item, .. } => {
                 let stmt = match item {
+                    grammar::AnnotatableItem::HandleDef(h) => Statement::HandleDef(h),
                     grammar::AnnotatableItem::StructDef(s) => Statement::StructDef(s),
                     grammar::AnnotatableItem::FunctionDef(f) => Statement::FunctionDef(f),
                     grammar::AnnotatableItem::RustFnDecl(r) => Statement::RustFnDecl(r),

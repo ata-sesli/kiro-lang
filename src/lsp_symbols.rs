@@ -20,6 +20,7 @@ pub enum IndexedKind {
     Import,
     Function,
     RustFunction,
+    Handle,
     Struct,
     Error,
     Var,
@@ -419,6 +420,19 @@ fn index_module_line_first(name: &str, path: PathBuf, source: String) -> ModuleS
                 None,
                 None,
             ));
+        } else if let Some(handle_name) = trimmed.strip_prefix("handle ").and_then(first_word) {
+            declarations.push(decl(
+                name,
+                &path,
+                &source,
+                handle_name,
+                IndexedKind::Handle,
+                "handle",
+                Some(format!("handle {}", handle_name)),
+                Vec::new(),
+                None,
+                None,
+            ));
         } else if let Some(error_name) = trimmed.strip_prefix("error ").and_then(first_word) {
             declarations.push(decl(
                 name,
@@ -490,6 +504,18 @@ fn collect_statement(
     declarations: &mut Vec<SymbolDecl>,
 ) {
     match stmt {
+        ast::Statement::HandleDef(def) => declarations.push(decl(
+            module,
+            path,
+            source,
+            crate::grammar::handle_name(def),
+            IndexedKind::Handle,
+            "handle",
+            Some(format!("handle {}", crate::grammar::handle_name(def))),
+            Vec::new(),
+            doc,
+            Some(crate::grammar::handle_span(def)),
+        )),
         ast::Statement::Import { module_name, .. } => declarations.push(decl(
             module,
             path,
@@ -547,6 +573,18 @@ fn collect_statement(
         ast::Statement::Documented { doc, item } => {
             let doc = doc_text(doc);
             match item {
+                ast::AnnotatableItem::HandleDef(def) => declarations.push(decl(
+                    module,
+                    path,
+                    source,
+                    crate::grammar::handle_name(def),
+                    IndexedKind::Handle,
+                    "handle",
+                    Some(format!("handle {}", crate::grammar::handle_name(def))),
+                    Vec::new(),
+                    doc,
+                    Some(crate::grammar::handle_span(def)),
+                )),
                 ast::AnnotatableItem::FunctionDef(def) => {
                     push_function(module, path, source, def, doc, declarations)
                 }
@@ -721,6 +759,7 @@ fn doc_text(docs: &[ast::DocComment]) -> Option<String> {
 fn hover_text(decl: &SymbolDecl) -> String {
     let mut text = decl.signature.clone().unwrap_or_else(|| match decl.kind {
         IndexedKind::Import => format!("module {}", decl.name),
+        IndexedKind::Handle => format!("handle {}", decl.name),
         _ => decl.detail.clone(),
     });
     if let Some(doc) = &decl.doc
@@ -737,6 +776,7 @@ fn declaration_range(source: &str, name: &str, kind: &IndexedKind) -> Range {
         IndexedKind::Import => "import",
         IndexedKind::Function => "fn",
         IndexedKind::RustFunction => "rust fn",
+        IndexedKind::Handle => "handle",
         IndexedKind::Struct => "struct",
         IndexedKind::Error => "error",
         IndexedKind::Var => "var",

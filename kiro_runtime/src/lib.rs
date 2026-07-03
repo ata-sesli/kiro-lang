@@ -5,8 +5,9 @@
 
 use std::collections::HashMap;
 use std::convert::TryFrom;
+use std::sync::Arc;
 
-pub const KIRO_RUNTIME_ABI_VERSION: u32 = 1;
+pub const KIRO_RUNTIME_ABI_VERSION: u32 = 2;
 
 pub type HostResult = Result<RuntimeVal, KiroError>;
 
@@ -23,7 +24,64 @@ pub enum RuntimeVal {
     Bool(bool),
     List(Vec<RuntimeVal>),
     Map(HashMap<String, RuntimeVal>),
+    Handle(KiroHandle),
     Void,
+}
+
+#[derive(Clone)]
+pub struct KiroHandle {
+    type_name: String,
+    value: Arc<dyn std::any::Any + Send + Sync>,
+}
+
+impl KiroHandle {
+    pub fn new<T>(type_name: impl Into<String>, value: T) -> Self
+    where
+        T: std::any::Any + Send + Sync + 'static,
+    {
+        Self {
+            type_name: type_name.into(),
+            value: Arc::new(value),
+        }
+    }
+
+    pub fn from_arc(
+        type_name: impl Into<String>,
+        value: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Self {
+        Self {
+            type_name: type_name.into(),
+            value,
+        }
+    }
+
+    pub fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    pub fn downcast_ref<T: std::any::Any>(&self) -> Option<&T> {
+        self.value.downcast_ref::<T>()
+    }
+}
+
+impl std::fmt::Debug for KiroHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let raw = Arc::as_ptr(&self.value) as *const ();
+        write!(f, "<handle {} {:p}>", self.type_name, raw)
+    }
+}
+
+impl std::fmt::Display for KiroHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let raw = Arc::as_ptr(&self.value) as *const ();
+        write!(f, "<handle {} {:p}>", self.type_name, raw)
+    }
+}
+
+impl PartialEq for KiroHandle {
+    fn eq(&self, other: &Self) -> bool {
+        self.type_name == other.type_name && Arc::ptr_eq(&self.value, &other.value)
+    }
 }
 
 pub fn kiro_runtime_error(code: &str, message: &str) -> ! {
@@ -522,6 +580,13 @@ impl<T: Into<RuntimeVal>> From<Vec<T>> for RuntimeVal {
 // --- Conversion: RuntimeVal -> Rust types ---
 
 impl RuntimeVal {
+    pub fn handle<T>(type_name: impl Into<String>, value: T) -> Self
+    where
+        T: std::any::Any + Send + Sync + 'static,
+    {
+        RuntimeVal::Handle(KiroHandle::new(type_name, value))
+    }
+
     pub fn expect_arity(args: &[RuntimeVal], expected: usize, fn_name: &str) -> Result<(), KiroError> {
         if args.len() == expected {
             Ok(())
@@ -592,6 +657,40 @@ impl RuntimeVal {
         match self {
             RuntimeVal::Void => Ok(()),
             _ => Err(KiroError::message("TypeError", "expected void")),
+        }
+    }
+
+    pub fn as_handle(&self, expected_type: &str) -> Result<&KiroHandle, KiroError> {
+        match self {
+            RuntimeVal::Handle(handle) if handle.type_name() == expected_type => Ok(handle),
+            RuntimeVal::Handle(handle) => Err(KiroError::message(
+                "TypeError",
+                format!(
+                    "expected handle {}, got handle {}",
+                    expected_type,
+                    handle.type_name()
+                ),
+            )),
+            _ => Err(KiroError::message(
+                "TypeError",
+                format!("expected handle {}", expected_type),
+            )),
+        }
+    }
+}
+
+impl From<KiroHandle> for RuntimeVal {
+    fn from(v: KiroHandle) -> Self {
+        RuntimeVal::Handle(v)
+    }
+}
+
+impl TryFrom<RuntimeVal> for KiroHandle {
+    type Error = KiroError;
+    fn try_from(val: RuntimeVal) -> Result<Self, Self::Error> {
+        match val {
+            RuntimeVal::Handle(handle) => Ok(handle),
+            _ => Err(KiroError::message("TypeError", "expected handle")),
         }
     }
 }

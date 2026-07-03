@@ -558,6 +558,11 @@ pure fn add(a: num, b: num) -> num {
         labels
     );
     assert!(
+        labels.contains(&"handle"),
+        "handle keyword completion missing: {:?}",
+        labels
+    );
+    assert!(
         labels.contains(&"worker"),
         "local function completion missing: {:?}",
         labels

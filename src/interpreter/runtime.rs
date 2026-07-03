@@ -172,6 +172,7 @@ impl SessionRuntime {
             match stmt {
                 IrStmt::ErrorDef { .. }
                 | IrStmt::StructDef { .. }
+                | IrStmt::HandleDef { .. }
                 | IrStmt::FunctionDef(_)
                 | IrStmt::RustFnDecl(_)
                 | IrStmt::Import { .. } => {
@@ -401,6 +402,7 @@ impl SessionRuntime {
                 Ok(StatementResult::Normal(RuntimeVal::Void))
             }
             IrStmt::StructDef { .. } => Ok(StatementResult::Normal(RuntimeVal::Void)),
+            IrStmt::HandleDef { .. } => Ok(StatementResult::Normal(RuntimeVal::Void)),
             IrStmt::VarDecl { name, value, .. } => {
                 let value = self.eval_expr(value)?;
                 self.define_var(
@@ -1307,6 +1309,10 @@ fn matches_kiro_type(value: &RuntimeVal, ty: &ast::KiroType) -> bool {
         ast::KiroType::List(_, _) => matches!(value, RuntimeVal::List(_)),
         ast::KiroType::Map(_, _, _) => matches!(value, RuntimeVal::Map(_)),
         ast::KiroType::Void => matches!(value, RuntimeVal::Void),
+        ast::KiroType::Custom(name) => {
+            matches!(value, RuntimeVal::Struct(struct_name, _) if struct_name == &name.value)
+                || matches!(value, RuntimeVal::Handle(handle) if handle.type_name() == name.value)
+        }
         _ => true,
     }
 }
@@ -1318,6 +1324,9 @@ fn mock_value(ty: &ast::KiroType) -> RuntimeVal {
         ast::KiroType::Bool => RuntimeVal::Bool(false),
         ast::KiroType::List(_, _) => RuntimeVal::List(vec![]),
         ast::KiroType::Map(_, _, _) => RuntimeVal::Map(HashMap::new()),
+        ast::KiroType::Custom(name) => {
+            RuntimeVal::Handle(kiro_runtime::KiroHandle::new(name.value.clone(), ()))
+        }
         ast::KiroType::Void | ast::KiroType::FnType(_, _, _, _, _, _) => RuntimeVal::Void,
         _ => RuntimeVal::Void,
     }

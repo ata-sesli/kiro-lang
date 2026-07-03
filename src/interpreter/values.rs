@@ -22,6 +22,7 @@ pub enum RuntimeVal {
     Struct(String, HashMap<String, RuntimeVal>),
     List(Vec<RuntimeVal>),
     Map(HashMap<String, RuntimeVal>),
+    Handle(kiro_runtime::KiroHandle),
     // Data Exports, Function ASTs
     Module(
         HashMap<String, RuntimeVal>,
@@ -53,6 +54,7 @@ impl PartialEq for RuntimeVal {
             // Collections equality
             (RuntimeVal::List(l1), RuntimeVal::List(l2)) => l1 == l2,
             (RuntimeVal::Map(m1), RuntimeVal::Map(m2)) => m1 == m2,
+            (RuntimeVal::Handle(h1), RuntimeVal::Handle(h2)) => h1 == h2,
             (RuntimeVal::Module(_m1, _f1), RuntimeVal::Module(_m2, _f2)) => false, // Modules identity is tough, assume false for now
             (RuntimeVal::FunctionRef(a), RuntimeVal::FunctionRef(b)) => a == b,
             (RuntimeVal::Error(n1, _), RuntimeVal::Error(n2, _)) => n1 == n2,
@@ -117,6 +119,7 @@ impl RuntimeVal {
                 }
                 Ok(HostRuntimeVal::Map(out))
             }
+            RuntimeVal::Handle(handle) => Ok(HostRuntimeVal::Handle(handle.clone())),
             RuntimeVal::Void => Ok(HostRuntimeVal::Void),
             other => Err(format!(
                 "Type Error: Cannot pass '{}' to host function.",
@@ -144,6 +147,7 @@ impl RuntimeVal {
                 }
                 Ok(RuntimeVal::Map(out))
             }
+            HostRuntimeVal::Handle(handle) => Ok(RuntimeVal::Handle(handle)),
             HostRuntimeVal::Void => Ok(RuntimeVal::Void),
         }
     }
@@ -161,6 +165,7 @@ impl fmt::Display for RuntimeVal {
             RuntimeVal::Struct(name, _) => write!(f, "<Struct {}>", name),
             RuntimeVal::List(l) => write!(f, "<List len={}>", l.len()),
             RuntimeVal::Map(m) => write!(f, "<Map len={}>", m.len()),
+            RuntimeVal::Handle(handle) => write!(f, "{}", handle),
             RuntimeVal::Module(_, _) => write!(f, "<Module>"),
             RuntimeVal::FunctionRef(name) => write!(f, "<FnRef {}>", name),
             RuntimeVal::Error(name, desc) => write!(f, "Error({}): {}", name, desc),

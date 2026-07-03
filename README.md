@@ -283,7 +283,7 @@ lazy_ptr = ref "Now I exist"
 
 #### Opaque Pointers (`adr void`)
 
-Use `adr void` to store a raw memory address without type information. This is useful for passing handles or legacy pointers.
+Use `adr void` as a low-level opaque address transport when you deliberately need pointer-style interop. For normal host modules, prefer named `handle` types instead.
 
 ```kiro
 import io
@@ -450,12 +450,25 @@ error NotFound = "File not found"
 rust fn read_file(path: str) -> str!
 ```
 
+Named host handles make native resources readable on the Kiro side:
+
+```kiro
+handle Model
+
+rust fn load(path: str) -> Model!
+rust fn predict(model: Model, input: list num) -> list num!
+rust fn close(model: Model) -> void!
+```
+
+Handles are opaque host-owned values. Kiro can store, pass, return, move, and print them, but cannot construct them with literals, access fields on them, or `deref` them. Host functions create and consume meaningful handles.
+
 #### 2. Rust Glue Layer (`mylib.rs`)
 
 The logic lives in an adjacent Rust glue file. A user module `mylib.kiro` uses `mylib.rs`; `main.kiro` uses `main.rs` if it declares `rust fn`. Standard modules keep embedded headers. There is no `native/` fallback in V1. Kiro scripts and Rust glue communicate through the `kiro_runtime` ABI.
 
 - **Glue implementation**: Use the `kiro_runtime` crate to convert types between Kiro and Rust.
-- **ABI v1**: Host functions are async and return `kiro_runtime::HostResult`.
+- **ABI v2**: Host functions are async and return `kiro_runtime::HostResult`.
+- **Handles**: Use `RuntimeVal::handle("Name", value)` to return an opaque handle and `as_handle("Name")` to decode one.
 - **Missing Glue**: If a module declares `rust fn` but the matching `.rs` file is absent, Kiro reports a compile diagnostic before Rust build.
 - **Generated dependencies**: Kiro only adds runtime dependencies required by Kiro source (`std_*` imports and pipes). User glue should not assume crates such as `reqwest` or Tokio feature modules are available unless the build system explicitly includes them.
 
@@ -477,9 +490,37 @@ pub async fn read_file(args: Vec<RuntimeVal>) -> HostResult {
 }
 ```
 
+Opaque handle lifecycle example:
+
+```kiro
+handle Model
+
+rust fn load(path: str) -> Model!
+rust fn label(model: Model) -> str!
+rust fn close(model: Model) -> void!
+```
+
+```rust
+use kiro_runtime::{HostResult, RuntimeVal};
+
+pub async fn load(args: Vec<RuntimeVal>) -> HostResult {
+    RuntimeVal::expect_arity(&args, 1, "load")?;
+    let path = RuntimeVal::expect_arg(&args, 0, "load")?.as_str()?.to_string();
+    Ok(RuntimeVal::handle("Model", path))
+}
+
+pub async fn label(args: Vec<RuntimeVal>) -> HostResult {
+    RuntimeVal::expect_arity(&args, 1, "label")?;
+    let model = RuntimeVal::expect_arg(&args, 0, "label")?.as_handle("Model")?;
+    let path = model.downcast_ref::<String>().expect("Model payload should be String");
+    Ok(RuntimeVal::from(path.clone()))
+}
+```
+
 - **Interpreter Behavior**: `kiro interpret` uses the direct interpreter path. Its current host behavior is simulation-oriented: it does not execute Rust glue, but it can return mock values for host calls after the analyzer has accepted the source.
 - **Compiler parity**: Results from Rust are strictly type-checked and integrated into Kiro's error handling (`on/error`).
 - **Error Matching**: Kiro matches host errors by name (`NotFound`). Optional host error messages are kept for diagnostics.
+- **Versioning**: ABI v2 includes opaque `RuntimeVal::Handle` support. Additive helpers can stay on the same ABI; changing `RuntimeVal`, `KiroError`, function signature shape, or error matching requires a new ABI version.
 
 ---
 

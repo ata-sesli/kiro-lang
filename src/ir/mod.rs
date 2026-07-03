@@ -80,6 +80,10 @@ pub enum IrStmt {
         fields: Vec<IrStructField>,
         span: IrSpan,
     },
+    HandleDef {
+        name: String,
+        span: IrSpan,
+    },
     VarDecl {
         name: String,
         value: IrExpr,
@@ -296,6 +300,10 @@ fn lower_statement(stmt: ast::Statement) -> IrStmt {
             span: Some(name.span),
         },
         ast::Statement::StructDef(def) => lower_struct(def),
+        ast::Statement::HandleDef(def) => IrStmt::HandleDef {
+            name: grammar::handle_name(&def).to_string(),
+            span: Some(grammar::handle_span(&def)),
+        },
         ast::Statement::VarDecl { ident, value, .. } => IrStmt::VarDecl {
             name: grammar::variable_name(&ident).to_string(),
             value: lower_expr(value),
@@ -381,6 +389,10 @@ fn lower_statement(stmt: ast::Statement) -> IrStmt {
         },
         ast::Statement::ExprStmt(expr) => IrStmt::Expr(lower_expr(expr)),
         ast::Statement::Documented { item, .. } => match item {
+            ast::AnnotatableItem::HandleDef(def) => IrStmt::HandleDef {
+                name: grammar::handle_name(&def).to_string(),
+                span: Some(grammar::handle_span(&def)),
+            },
             ast::AnnotatableItem::StructDef(def) => lower_struct(def),
             ast::AnnotatableItem::FunctionDef(def) => IrStmt::FunctionDef(lower_function(def)),
             ast::AnnotatableItem::RustFnDecl(def) => IrStmt::RustFnDecl(lower_rust_function(def)),

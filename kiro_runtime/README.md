@@ -11,10 +11,10 @@ It exists to keep host glue behavior consistent and avoid re-defining value conv
 The current host ABI version is:
 
 ```rust
-pub const KIRO_RUNTIME_ABI_VERSION: u32 = 1;
+pub const KIRO_RUNTIME_ABI_VERSION: u32 = 2;
 ```
 
-Host glue for ABI v1 uses this shape:
+Host glue for ABI v2 uses this shape:
 
 ```rust
 pub async fn name(args: Vec<RuntimeVal>) -> HostResult
@@ -35,7 +35,10 @@ pub type HostResult = Result<RuntimeVal, KiroError>;
 - `Bool(bool)`
 - `List(Vec<RuntimeVal>)`
 - `Map(HashMap<String, RuntimeVal>)`
+- `Handle(KiroHandle)`
 - `Void`
+
+Handles are opaque host-owned values. They are intended for native resources such as files, sockets, database connections, ML models, images, and other values Kiro should pass around but not inspect.
 
 ### Error Type
 
@@ -55,16 +58,18 @@ From Rust to `RuntimeVal`:
 
 - `f64`, `String`, `&str`, `bool`, `()`
 - `Vec<T>` where `T: Into<RuntimeVal>`
+- `RuntimeVal::handle("Model", model_state)` for opaque host handles
 
 From `RuntimeVal` to Rust:
 
-- `TryFrom<RuntimeVal>` for `String`, `f64`, `bool`, `()`, `Vec<String>`
+- `TryFrom<RuntimeVal>` for `String`, `f64`, `bool`, `()`, `Vec<String>`, `KiroHandle`
 - Accessor helpers:
   - `RuntimeVal::as_str()`
   - `RuntimeVal::as_num()`
   - `RuntimeVal::as_bool()`
   - `RuntimeVal::as_list()`
   - `RuntimeVal::as_map()`
+  - `RuntimeVal::as_handle("Model")`
   - `RuntimeVal::as_void()`
 
 Argument helpers:
@@ -131,6 +136,38 @@ pub async fn read_file(args: Vec<RuntimeVal>) -> HostResult {
 }
 ```
 
+## Opaque Handle Pattern
+
+Kiro declaration:
+
+```kiro
+handle Model
+
+rust fn load(path: str) -> Model!
+rust fn name(model: Model) -> str!
+```
+
+Rust glue:
+
+```rust
+use kiro_runtime::{HostResult, RuntimeVal};
+
+pub async fn load(args: Vec<RuntimeVal>) -> HostResult {
+    RuntimeVal::expect_arity(&args, 1, "load")?;
+    let path = RuntimeVal::expect_arg(&args, 0, "load")?.as_str()?.to_string();
+    Ok(RuntimeVal::handle("Model", path))
+}
+
+pub async fn name(args: Vec<RuntimeVal>) -> HostResult {
+    RuntimeVal::expect_arity(&args, 1, "name")?;
+    let handle = RuntimeVal::expect_arg(&args, 0, "name")?.as_handle("Model")?;
+    let path = handle.downcast_ref::<String>().expect("Model payload should be String");
+    Ok(RuntimeVal::from(path.clone()))
+}
+```
+
+Use the same handle name in Kiro and Rust. `as_handle("Model")` returns a `TypeError` if another handle type is passed.
+
 ## Current Limitations
 
 This crate intentionally stays small. Depending on language evolution, you may later extend it with:
@@ -144,9 +181,11 @@ This crate intentionally stays small. Depending on language evolution, you may l
 Because this crate encodes host boundary contracts, changes should be treated carefully:
 
 - Prefer additive changes.
+- Adding helper methods or new optional conversion helpers is additive.
 - Keep conversion behavior stable.
 - Keep error matching name-based.
-- Changing `RuntimeVal`, `KiroError`, or the host function signature requires a new ABI version.
+- Changing `RuntimeVal`, `KiroError`, the host function signature, or error matching requires a new ABI version.
+- Existing host functions using `Vec<RuntimeVal> -> HostResult` remain valid after updating to ABI v2, unless they exhaustively match `RuntimeVal` and need to handle `RuntimeVal::Handle`.
 - Coordinate updates with compiler/interpreter changes.
 
 ## License

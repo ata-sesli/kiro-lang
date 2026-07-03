@@ -457,6 +457,7 @@ fn completion_kind(kind: &IndexedKind) -> CompletionItemKind {
     match kind {
         IndexedKind::Import => CompletionItemKind::MODULE,
         IndexedKind::Function | IndexedKind::RustFunction => CompletionItemKind::FUNCTION,
+        IndexedKind::Handle => CompletionItemKind::STRUCT,
         IndexedKind::Struct => CompletionItemKind::STRUCT,
         IndexedKind::Error => CompletionItemKind::ENUM_MEMBER,
         IndexedKind::Var => CompletionItemKind::VARIABLE,
@@ -504,6 +505,7 @@ fn symbol_kind(kind: &IndexedKind) -> SymbolKind {
     match kind {
         IndexedKind::Import => SymbolKind::MODULE,
         IndexedKind::Function | IndexedKind::RustFunction => SymbolKind::FUNCTION,
+        IndexedKind::Handle => SymbolKind::STRUCT,
         IndexedKind::Struct => SymbolKind::STRUCT,
         IndexedKind::Error => SymbolKind::ENUM_MEMBER,
         IndexedKind::Var => SymbolKind::VARIABLE,
@@ -523,6 +525,7 @@ fn hover_doc(word: &str) -> Option<&'static str> {
         "fn" => Some("Defines a function. Normal functions are async in generated Rust."),
         "pure" => Some("Marks a function as deterministic and effect-free."),
         "rust" => Some("Declares a host function implemented by adjacent Rust glue."),
+        "handle" => Some("Declares an opaque host-owned value type."),
         "run" => Some("Starts a function as fire-and-forget work."),
         "rest" => {
             Some("Gives other running tasks a chance to continue; does not send data or sleep.")
@@ -547,9 +550,9 @@ fn hover_doc(word: &str) -> Option<&'static str> {
 }
 
 const KEYWORDS: &[&str] = &[
-    "adr", "break", "check", "close", "continue", "error", "fn", "give", "import", "in", "loop",
-    "map", "move", "off", "on", "pipe", "pure", "rest", "return", "run", "rust", "struct", "take",
-    "var",
+    "adr", "break", "check", "close", "continue", "error", "fn", "give", "handle", "import", "in",
+    "loop", "map", "move", "off", "on", "pipe", "pure", "rest", "return", "run", "rust", "struct",
+    "take", "var",
 ];
 
 fn uri_to_path(uri: &Uri) -> Option<PathBuf> {

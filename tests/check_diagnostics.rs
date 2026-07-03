@@ -79,6 +79,246 @@ main()
 }
 
 #[test]
+fn handle_declaration_parses_and_compiles() {
+    let rust = compile_source(
+        r#"
+handle Model
+
+rust fn load(path: str) -> Model!
+"#,
+    );
+
+    assert!(
+        rust.contains("pub type Model = KiroHandle;"),
+        "generated Rust should expose handle alias:\n{}",
+        rust
+    );
+}
+
+#[test]
+fn duplicate_handle_and_struct_name_fails() {
+    let stderr = build_stderr_for_source(
+        "duplicate_handle_struct",
+        r#"
+handle Model
+struct Model {
+    name: str
+}
+"#,
+    );
+
+    assert!(
+        stderr.contains("Type 'Model' is already declared as a handle.")
+            || stderr.contains("Type 'Model' is already declared."),
+        "unexpected stderr:\n{}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("error[E"),
+        "Rust error leaked:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn unknown_handle_type_fails_before_rust_build() {
+    let stderr = build_stderr_for_source(
+        "unknown_handle_type",
+        r#"
+rust fn load(path: str) -> Model!
+"#,
+    );
+
+    assert!(
+        stderr.contains("Unknown type 'Model'."),
+        "unexpected stderr:\n{}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("error[E"),
+        "Rust error leaked:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn handle_struct_literal_and_field_access_are_rejected() {
+    let construct = build_stderr_for_source(
+        "construct_handle",
+        r#"
+handle Model
+var model = Model {}
+"#,
+    );
+    assert!(
+        construct.contains("Cannot construct handle 'Model' in Kiro."),
+        "unexpected stderr:\n{}",
+        construct
+    );
+
+    let field = build_stderr_for_source(
+        "field_handle",
+        r#"
+handle Model
+rust fn load(path: str) -> Model!
+
+fn main() {
+    var model = load("model.bin")
+    model.name
+}
+"#,
+    );
+    assert!(
+        field.contains("Cannot access fields on handle 'Model'."),
+        "unexpected stderr:\n{}",
+        field
+    );
+}
+
+#[test]
+fn wrong_handle_argument_type_fails_before_rust_build() {
+    let stderr = build_stderr_for_source(
+        "wrong_handle_argument",
+        r#"
+handle Model
+handle File
+
+rust fn use_model(model: Model) -> void
+rust fn open(path: str) -> File!
+
+fn main() {
+    var file = open("data.txt")
+    use_model(file)
+}
+"#,
+    );
+
+    assert!(
+        stderr.contains("Argument 1 for 'use_model' must be Model, got File."),
+        "unexpected stderr:\n{}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("error[E"),
+        "Rust error leaked:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn compiled_host_handle_round_trips_through_rust_glue() {
+    let dir = temp_project("host_handle_round_trip");
+    let main_path = dir.join("main.kiro");
+    fs::write(
+        &main_path,
+        r#"
+import io
+
+handle Model
+
+rust fn load(path: str) -> Model
+rust fn name(model: Model) -> str
+
+fn main() {
+    var model = load("model.bin")
+    io.print(name(model))
+}
+
+main()
+"#,
+    )
+    .expect("main module should be written");
+    fs::write(
+        dir.join("main.rs"),
+        r#"
+use kiro_runtime::{HostResult, RuntimeVal};
+
+pub async fn load(args: Vec<RuntimeVal>) -> HostResult {
+    RuntimeVal::expect_arity(&args, 1, "load")?;
+    let path = RuntimeVal::expect_arg(&args, 0, "load")?.as_str()?.to_string();
+    Ok(RuntimeVal::handle("Model", path))
+}
+
+pub async fn name(args: Vec<RuntimeVal>) -> HostResult {
+    RuntimeVal::expect_arity(&args, 1, "name")?;
+    let handle = RuntimeVal::expect_arg(&args, 0, "name")?.as_handle("Model")?;
+    let path = handle.downcast_ref::<String>().expect("Model payload should be String");
+    Ok(RuntimeVal::from(path.clone()))
+}
+"#,
+    )
+    .expect("host glue should be written");
+
+    let output = run_kiro(
+        &["run", main_path.to_str().unwrap()],
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+    );
+
+    assert!(
+        output.status.success(),
+        "host handle script should run\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("model.bin"),
+        "unexpected stdout:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn user_glue_keeps_non_duplicate_kiro_runtime_imports() {
+    let dir = temp_project("host_handle_extra_runtime_import");
+    let main_path = dir.join("main.kiro");
+    fs::write(
+        &main_path,
+        r#"
+import io
+
+handle Model
+
+rust fn load(path: str) -> Model
+
+fn main() {
+    var model = load("model.bin")
+    io.print(model)
+}
+
+main()
+"#,
+    )
+    .expect("main module should be written");
+    fs::write(
+        dir.join("main.rs"),
+        r#"
+use kiro_runtime::{HostResult, RuntimeVal};
+use kiro_runtime::KiroHandle;
+
+pub async fn load(args: Vec<RuntimeVal>) -> HostResult {
+    RuntimeVal::expect_arity(&args, 1, "load")?;
+    let path = RuntimeVal::expect_arg(&args, 0, "load")?.as_str()?.to_string();
+    let handle = KiroHandle::new("Model", path);
+    Ok(RuntimeVal::from(handle))
+}
+"#,
+    )
+    .expect("host glue should be written");
+
+    let output = run_kiro(
+        &["run", main_path.to_str().unwrap()],
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+    );
+
+    assert!(
+        output.status.success(),
+        "host glue import should be preserved\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn check_optional_message_parses_and_compiles() {
     let rust = compile_source(
         r#"

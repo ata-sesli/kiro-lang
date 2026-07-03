@@ -19,6 +19,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "handle_definition"
+        },
+        {
+          "type": "SYMBOL",
           "name": "struct_definition"
         },
         {
@@ -102,6 +106,10 @@
           "members": [
             {
               "type": "SYMBOL",
+              "name": "handle_definition"
+            },
+            {
+              "type": "SYMBOL",
               "name": "struct_definition"
             },
             {
@@ -113,6 +121,23 @@
               "name": "rust_function_declaration"
             }
           ]
+        }
+      ]
+    },
+    "handle_definition": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "handle_keyword"
+        },
+        {
+          "type": "FIELD",
+          "name": "name",
+          "content": {
+            "type": "SYMBOL",
+            "name": "type_identifier"
+          }
         }
       ]
     },
@@ -2408,6 +2433,10 @@
     "rust_keyword": {
       "type": "STRING",
       "value": "rust"
+    },
+    "handle_keyword": {
+      "type": "STRING",
+      "value": "handle"
     },
     "struct_keyword": {
       "type": "STRING",

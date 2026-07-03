@@ -154,6 +154,7 @@ fn collect_calls_from_statement(
             }
         }
         grammar::Statement::StructDef(_)
+        | grammar::Statement::HandleDef(_)
         | grammar::Statement::ErrorDef { .. }
         | grammar::Statement::FunctionDef(_)
         | grammar::Statement::RustFnDecl(_)
@@ -297,6 +298,7 @@ fn error_clauses_use_std_io_module(clauses: &grammar::ErrorClauseList) -> bool {
 fn item_uses_pipes(item: &grammar::AnnotatableItem) -> bool {
     match item {
         grammar::AnnotatableItem::StructDef(def) => struct_uses_pipes(def),
+        grammar::AnnotatableItem::HandleDef(_) => false,
         grammar::AnnotatableItem::FunctionDef(def) => function_uses_pipes(def),
         grammar::AnnotatableItem::RustFnDecl(def) => rust_fn_uses_pipes(def),
     }
@@ -304,7 +306,7 @@ fn item_uses_pipes(item: &grammar::AnnotatableItem) -> bool {
 
 fn item_uses_anyhow(item: &grammar::AnnotatableItem) -> bool {
     match item {
-        grammar::AnnotatableItem::StructDef(_) => false,
+        grammar::AnnotatableItem::StructDef(_) | grammar::AnnotatableItem::HandleDef(_) => false,
         grammar::AnnotatableItem::FunctionDef(def) => function_uses_anyhow(def),
         grammar::AnnotatableItem::RustFnDecl(def) => rust_fn_uses_anyhow(def),
     }
@@ -312,7 +314,9 @@ fn item_uses_anyhow(item: &grammar::AnnotatableItem) -> bool {
 
 fn item_uses_std_io_module(item: &grammar::AnnotatableItem) -> bool {
     match item {
-        grammar::AnnotatableItem::StructDef(_) | grammar::AnnotatableItem::RustFnDecl(_) => false,
+        grammar::AnnotatableItem::StructDef(_)
+        | grammar::AnnotatableItem::HandleDef(_)
+        | grammar::AnnotatableItem::RustFnDecl(_) => false,
         grammar::AnnotatableItem::FunctionDef(def) => block_uses_std_io_module(&def.body),
     }
 }
@@ -320,6 +324,7 @@ fn item_uses_std_io_module(item: &grammar::AnnotatableItem) -> bool {
 fn statement_uses_pipes(stmt: &grammar::Statement) -> bool {
     match stmt {
         grammar::Statement::StructDef(def) => struct_uses_pipes(def),
+        grammar::Statement::HandleDef(_) => false,
         grammar::Statement::FunctionDef(def) => function_uses_pipes(def),
         grammar::Statement::RustFnDecl(def) => rust_fn_uses_pipes(def),
         grammar::Statement::VarDecl { value, .. } => expr_uses_pipes(value),
@@ -443,6 +448,7 @@ fn statement_uses_anyhow(stmt: &grammar::Statement) -> bool {
         grammar::Statement::ExprStmt(expr) => expr_uses_anyhow(expr),
         grammar::Statement::Documented { item, .. } => item_uses_anyhow(item),
         grammar::Statement::StructDef(_)
+        | grammar::Statement::HandleDef(_)
         | grammar::Statement::Break(_)
         | grammar::Statement::Continue(_)
         | grammar::Statement::Rest(_)
@@ -512,6 +518,7 @@ fn statement_uses_std_io_module(stmt: &grammar::Statement) -> bool {
         grammar::Statement::ExprStmt(expr) => expr_uses_std_io_module(expr),
         grammar::Statement::Documented { item, .. } => item_uses_std_io_module(item),
         grammar::Statement::StructDef(_)
+        | grammar::Statement::HandleDef(_)
         | grammar::Statement::RustFnDecl(_)
         | grammar::Statement::ErrorDef { .. }
         | grammar::Statement::Break(_)
@@ -756,6 +763,7 @@ impl Compiler {
         for stmt in &program.statements {
             match stmt {
                 grammar::Statement::Documented { doc, item } => match item {
+                    grammar::AnnotatableItem::HandleDef(_) => {}
                     grammar::AnnotatableItem::FunctionDef(def) => {
                         let doc_str = Some(
                             doc.iter()
@@ -818,6 +826,7 @@ impl Compiler {
                         },
                     );
                 }
+                grammar::Statement::HandleDef(_) => {}
                 _ => {}
             }
         }
@@ -1038,9 +1047,15 @@ impl Compiler {
         for statement in program.statements {
             // Check if it should be hoisted
             let is_hoisted = match &statement {
-                grammar::Statement::Import { .. } | grammar::Statement::StructDef(_) => true,
+                grammar::Statement::Import { .. }
+                | grammar::Statement::StructDef(_)
+                | grammar::Statement::HandleDef(_) => true,
                 grammar::Statement::Documented { item, .. } => {
-                    matches!(item, grammar::AnnotatableItem::StructDef(_))
+                    matches!(
+                        item,
+                        grammar::AnnotatableItem::StructDef(_)
+                            | grammar::AnnotatableItem::HandleDef(_)
+                    )
                 }
                 _ => false,
             };

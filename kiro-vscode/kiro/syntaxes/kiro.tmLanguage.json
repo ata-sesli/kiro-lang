@@ -52,7 +52,7 @@
         },
         {
           "name": "storage.type.kiro",
-          "match": "\\b(fn|struct|var|import)\\b"
+          "match": "\\b(fn|struct|handle|var|import)\\b"
         },
         {
           "name": "keyword.other.kiro",

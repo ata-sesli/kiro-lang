@@ -13,6 +13,7 @@
   (fn_keyword)
   (pure_keyword)
   (rust_keyword)
+  (handle_keyword)
   (struct_keyword)
   (var_keyword)
   (import_keyword)
@@ -83,6 +84,9 @@
   function: (identifier) @function)
 
 (struct_definition
+  name: (type_identifier) @type)
+
+(handle_definition
   name: (type_identifier) @type)
 
 (struct_literal

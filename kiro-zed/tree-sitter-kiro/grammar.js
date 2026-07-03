@@ -28,6 +28,7 @@ module.exports = grammar({
 
     _statement: $ => choice(
       $.documented_item,
+      $.handle_definition,
       $.struct_definition,
       $.error_definition,
       $.function_definition,
@@ -49,7 +50,12 @@ module.exports = grammar({
 
     documented_item: $ => seq(
       repeat1($.doc_comment),
-      choice($.struct_definition, $.function_definition, $.rust_function_declaration),
+      choice($.handle_definition, $.struct_definition, $.function_definition, $.rust_function_declaration),
+    ),
+
+    handle_definition: $ => seq(
+      $.handle_keyword,
+      field("name", $.type_identifier),
     ),
 
     struct_definition: $ => seq(
@@ -389,6 +395,7 @@ module.exports = grammar({
     fn_keyword: _ => "fn",
     pure_keyword: _ => "pure",
     rust_keyword: _ => "rust",
+    handle_keyword: _ => "handle",
     struct_keyword: _ => "struct",
     var_keyword: _ => "var",
     import_keyword: _ => "import",

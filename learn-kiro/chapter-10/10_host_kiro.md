@@ -10,6 +10,18 @@ rust fn read_file(path: str) -> str!
 
 This declaration is a contract between Kiro code and Rust code. Name, parameter types, and return type must stay aligned with the Rust implementation.
 
+Native resources should use named handles:
+
+```kiro
+handle Model
+
+rust fn load(path: str) -> Model!
+rust fn label(model: Model) -> str!
+rust fn close(model: Model) -> void!
+```
+
+`handle` values are opaque. Kiro can store and pass them, but only Rust glue can create or inspect the underlying native value.
+
 Calling the function is no different from calling a regular Kiro function:
 
 ```kiro
@@ -30,7 +42,7 @@ In real projects, host calls are often at system boundaries: filesystem access, 
 
 For a user module named `tools.kiro`, put the Rust implementation next to it as `tools.rs`. If `main.kiro` declares a `rust fn`, its glue lives in `main.rs`. There is no `native/` fallback in V1. If the `.kiro` file declares a `rust fn` and the adjacent `.rs` file is missing, Kiro reports a compile diagnostic before Rust build.
 
-Rust glue uses the ABI v1 shape:
+Rust glue uses the ABI v2 shape:
 
 Generated Kiro builds only include dependencies required by Kiro source (`std_*` imports and pipes), so this example uses the Rust standard library instead of assuming optional async crates are present.
 
@@ -43,6 +55,25 @@ pub async fn read_file(args: Vec<RuntimeVal>) -> HostResult {
     let content = std::fs::read_to_string(path)
         .map_err(|_| KiroError::message("NotFound", path.to_string()))?;
     Ok(RuntimeVal::from(content))
+}
+```
+
+Handle glue uses the same ABI:
+
+```rust
+use kiro_runtime::{HostResult, RuntimeVal};
+
+pub async fn load(args: Vec<RuntimeVal>) -> HostResult {
+    RuntimeVal::expect_arity(&args, 1, "load")?;
+    let path = RuntimeVal::expect_arg(&args, 0, "load")?.as_str()?.to_string();
+    Ok(RuntimeVal::handle("Model", path))
+}
+
+pub async fn label(args: Vec<RuntimeVal>) -> HostResult {
+    RuntimeVal::expect_arity(&args, 1, "label")?;
+    let model = RuntimeVal::expect_arg(&args, 0, "label")?.as_handle("Model")?;
+    let path = model.downcast_ref::<String>().expect("Model payload should be String");
+    Ok(RuntimeVal::from(path.clone()))
 }
 ```
 

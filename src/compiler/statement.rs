@@ -5,6 +5,10 @@ use crate::grammar::grammar::{self, Statement};
 impl Compiler {
     pub fn compile_statement(&mut self, statement: Statement) -> String {
         match statement {
+            Statement::HandleDef(def) => {
+                let name = crate::grammar::handle_name(&def);
+                format!("pub type {} = KiroHandle;", name)
+            }
             // Error Definition: error NotFound = "Description"
             Statement::ErrorDef {
                 name, description, ..
@@ -513,6 +517,7 @@ impl Compiler {
             Statement::Continue(_) => "continue;".to_string(),
             Statement::Documented { item, .. } => {
                 let stmt = match item {
+                    grammar::AnnotatableItem::HandleDef(h) => Statement::HandleDef(h),
                     grammar::AnnotatableItem::StructDef(s) => Statement::StructDef(s),
                     grammar::AnnotatableItem::FunctionDef(f) => Statement::FunctionDef(f),
                     grammar::AnnotatableItem::RustFnDecl(r) => Statement::RustFnDecl(r),
