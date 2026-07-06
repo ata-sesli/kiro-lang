@@ -4,6 +4,7 @@ use kiro_lang::compiler;
 use kiro_lang::errors::{self, KiroError, emit_error, panic_payload_to_string};
 use kiro_lang::formatter;
 use kiro_lang::grammar;
+use kiro_lang::host_generator::{self, HostGenOptions};
 use kiro_lang::interpreter::SessionRuntime;
 use kiro_lang::ir::IrModule;
 use kiro_lang::project;
@@ -88,6 +89,21 @@ enum Commands {
     Add { dependency: String },
     /// Remove a dependency
     Remove { dependency: String },
+    /// Generate Rust-backed Kiro host modules
+    Host {
+        #[command(subcommand)]
+        command: HostCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum HostCommands {
+    /// Generate a host module from a Cargo dependency
+    Gen {
+        crate_name: String,
+        #[arg(long)]
+        module: Option<String>,
+    },
 }
 
 fn scaffold_project(project_name: &str) {
@@ -140,11 +156,21 @@ io.print("Hello from {}!")"#,
 }
 
 fn handle_add(dep: &str) {
-    let Some((kiro_toml_path, dep_name, dep_version)) = add_remove_context(dep, true) else {
+    let Some((project, dep_name, requested_version)) = add_context(dep) else {
         std::process::exit(1);
     };
+    let dep_version = match requested_version {
+        Some(version) => version,
+        None => match host_generator::resolve_crate(&project, &dep_name, "*") {
+            Ok(resolved) => resolved.version,
+            Err(e) => {
+                emit_error(&e);
+                std::process::exit(1);
+            }
+        },
+    };
 
-    let content = fs::read_to_string(&kiro_toml_path).unwrap();
+    let content = fs::read_to_string(&project.manifest_path).unwrap();
     let mut doc = content
         .parse::<DocumentMut>()
         .expect("Invalid kiro.toml format");
@@ -154,19 +180,21 @@ fn handle_add(dep: &str) {
     }
 
     doc["dependencies"][&dep_name] = value(dep_version.as_str());
-    fs::write(&kiro_toml_path, doc.to_string()).unwrap();
+    fs::write(&project.manifest_path, doc.to_string()).unwrap();
     println!(
         "➕ Added Cargo dependency '{}' = \"{}\" to kiro.toml",
         dep_name, dep_version
     );
+
+    try_generate_added_host_module(&project, &dep_name);
 }
 
 fn handle_remove(dep: &str) {
-    let Some((kiro_toml_path, dep_name, _)) = add_remove_context(dep, false) else {
+    let Some((project, dep_name)) = remove_context(dep) else {
         std::process::exit(1);
     };
 
-    let content = fs::read_to_string(&kiro_toml_path).unwrap();
+    let content = fs::read_to_string(&project.manifest_path).unwrap();
     let mut doc = content
         .parse::<DocumentMut>()
         .expect("Invalid kiro.toml format");
@@ -182,10 +210,10 @@ fn handle_remove(dep: &str) {
         }
     }
 
-    fs::write(&kiro_toml_path, doc.to_string()).unwrap();
+    fs::write(&project.manifest_path, doc.to_string()).unwrap();
 }
 
-fn add_remove_context(dep: &str, parse_version: bool) -> Option<(PathBuf, String, String)> {
+fn add_context(dep: &str) -> Option<(project::KiroProject, String, Option<String>)> {
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(e) => {
@@ -205,17 +233,42 @@ fn add_remove_context(dep: &str, parse_version: bool) -> Option<(PathBuf, String
         }
     };
 
-    let (name, version) = if parse_version {
-        parse_dependency_spec(dep)?
-    } else {
-        (dep.to_string(), "*".to_string())
-    };
+    let (name, version) = parse_dependency_spec(dep)?;
+    validate_dependency_name_and_version(&name, version.as_deref())?;
 
+    Some((project, name, version))
+}
+
+fn remove_context(dep: &str) -> Option<(project::KiroProject, String)> {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("Error reading current directory: {}", e);
+            return None;
+        }
+    };
+    let project = match project::find_project(cwd) {
+        Ok(Some(project)) => project,
+        Ok(None) => {
+            eprintln!("Error: kiro.toml not found. Are you in a Kiro project?");
+            return None;
+        }
+        Err(e) => {
+            emit_error(&e);
+            return None;
+        }
+    };
+    let name = dep.trim().to_string();
+    validate_dependency_name_and_version(&name, None)?;
+    Some((project, name))
+}
+
+fn validate_dependency_name_and_version(name: &str, version: Option<&str>) -> Option<()> {
     if !project::is_valid_cargo_dependency_name(&name) {
         eprintln!("Error: Invalid dependency name '{}'.", name);
         return None;
     }
-    if version.trim().is_empty() {
+    if version.is_some_and(|version| version.trim().is_empty()) {
         eprintln!("Error: Dependency version must not be empty.");
         return None;
     }
@@ -227,10 +280,10 @@ fn add_remove_context(dep: &str, parse_version: bool) -> Option<(PathBuf, String
         return None;
     }
 
-    Some((project.manifest_path, name, version))
+    Some(())
 }
 
-fn parse_dependency_spec(spec: &str) -> Option<(String, String)> {
+fn parse_dependency_spec(spec: &str) -> Option<(String, Option<String>)> {
     if let Some((name, version)) = spec.split_once('@') {
         let name = name.trim();
         let version = version.trim();
@@ -238,9 +291,39 @@ fn parse_dependency_spec(spec: &str) -> Option<(String, String)> {
             eprintln!("Error: use `kiro add crate@version` or `kiro add crate`.");
             return None;
         }
-        Some((name.to_string(), version.to_string()))
+        Some((name.to_string(), Some(version.to_string())))
     } else {
-        Some((spec.trim().to_string(), "*".to_string()))
+        Some((spec.trim().to_string(), None))
+    }
+}
+
+fn try_generate_added_host_module(project: &project::KiroProject, dep_name: &str) {
+    let Ok(Some(updated_project)) = project::find_project(&project.manifest_path) else {
+        eprintln!("Warning: Added dependency, but could not reload kiro.toml for host generation.");
+        return;
+    };
+    match host_generator::generate(
+        &updated_project,
+        HostGenOptions {
+            crate_name: dep_name.to_string(),
+            module_name: None,
+        },
+    ) {
+        Ok(result) => {
+            println!(
+                "🔗 Generated host module '{}' ({} declarations)",
+                result.module_name, result.declarations
+            );
+            for skipped in result.skipped {
+                println!("  - skipped {}", skipped);
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "Warning: Added dependency, but no Kiro host module was generated automatically."
+            );
+            emit_error(&e);
+        }
     }
 }
 
@@ -340,6 +423,13 @@ fn main() {
         Some(Commands::Remove { dependency }) => {
             handle_remove(dependency);
         }
+        Some(Commands::Host { command }) => match command {
+            HostCommands::Gen { crate_name, module } => {
+                if !handle_host_gen(crate_name, module.clone()) {
+                    std::process::exit(1);
+                }
+            }
+        },
         None => {
             if let Some(file) = resolve_input_file(cli.file.as_deref()) {
                 // Default behavior: Analyze -> Compile -> Run
@@ -349,6 +439,55 @@ fn main() {
             } else {
                 std::process::exit(1);
             }
+        }
+    }
+}
+
+fn handle_host_gen(crate_name: &str, module: Option<String>) -> bool {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            emit_error(&KiroError::new(
+                errors::ErrorCode::FileNotFound,
+                errors::ErrorPhase::Cli,
+                format!("Failed to read current directory: {}", e),
+            ));
+            return false;
+        }
+    };
+    let project = match project::find_project(cwd) {
+        Ok(Some(project)) => project,
+        Ok(None) => {
+            emit_error(&project::no_input_error());
+            return false;
+        }
+        Err(e) => {
+            emit_error(&e);
+            return false;
+        }
+    };
+    match host_generator::generate(
+        &project,
+        HostGenOptions {
+            crate_name: crate_name.to_string(),
+            module_name: module,
+        },
+    ) {
+        Ok(result) => {
+            println!(
+                "Generated host module '{}' with {} declaration(s).",
+                result.module_name, result.declarations
+            );
+            println!("  - {}", result.kiro_path.display());
+            println!("  - {}", result.rust_path.display());
+            for skipped in result.skipped {
+                println!("  - skipped {}", skipped);
+            }
+            true
+        }
+        Err(e) => {
+            emit_error(&e);
+            false
         }
     }
 }
@@ -634,11 +773,16 @@ fn run_compiler(
         ));
     }
 
-    let requirements = build_requirements(&analysis.modules);
+    let mut requirements = build_requirements(&analysis.modules);
     let project_dependencies = project::find_project(&analysis.root)?
         .map(|project| project.dependencies)
         .unwrap_or_default();
     let header = build_header_content(&analysis.modules, &requirements);
+    requirements.record_host_macros(
+        header.contains("kiro_export")
+            || header.contains("kiro_handle")
+            || header.contains("kiro_struct"),
+    );
     let root_name = module_name_from_path(&analysis.root)?;
     let module_functions = analysis.module_functions.clone();
     let mut modules = analysis.modules;

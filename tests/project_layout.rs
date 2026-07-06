@@ -70,6 +70,42 @@ fn link_runtime(project_dir: &Path) {
     }
 }
 
+fn write_add_fixture_crate(project_dir: &Path) {
+    let crate_dir = project_dir.join("fixture_crate");
+    fs::create_dir_all(crate_dir.join("src")).expect("fixture src should be created");
+    fs::write(
+        crate_dir.join("Cargo.toml"),
+        r#"[package]
+name = "kiro_add_fixture"
+version = "0.1.0"
+edition = "2021"
+"#,
+    )
+    .expect("fixture manifest should be written");
+    fs::write(
+        crate_dir.join("src/lib.rs"),
+        r#"pub fn add(a: f64, b: f64) -> f64 {
+    a + b
+}
+"#,
+    )
+    .expect("fixture lib should be written");
+    fs::write(
+        project_dir.join("Cargo.toml"),
+        r#"[package]
+name = "demo_add_fixture"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kiro_add_fixture = { path = "fixture_crate" }
+"#,
+    )
+    .expect("metadata manifest should be written");
+    fs::create_dir_all(project_dir.join("src")).expect("project src should be created");
+    fs::write(project_dir.join("src/lib.rs"), "").expect("project lib should be written");
+}
+
 #[test]
 fn no_file_run_uses_manifest_entry() {
     let dir = temp_project("run_entry");
@@ -385,47 +421,75 @@ io = "1"
 }
 
 #[test]
-fn kiro_add_and_remove_edit_manifest_only() {
+fn kiro_add_records_dependency_and_generates_host_module() {
     let dir = temp_project("add_remove");
     write_manifest(&dir, "main.kiro");
+    write_add_fixture_crate(&dir);
 
-    let add_versioned = run_kiro(&["add", "image@0.25"], &dir);
+    let add_versioned = run_kiro(&["add", "kiro_add_fixture@0.1.0"], &dir);
     assert!(
         add_versioned.status.success(),
-        "kiro add image@0.25 should succeed\nstdout:\n{}\nstderr:\n{}",
+        "kiro add kiro_add_fixture@0.1.0 should succeed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&add_versioned.stdout),
         String::from_utf8_lossy(&add_versioned.stderr)
-    );
-    let add_star = run_kiro(&["add", "csv"], &dir);
-    assert!(
-        add_star.status.success(),
-        "kiro add csv should succeed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&add_star.stdout),
-        String::from_utf8_lossy(&add_star.stderr)
     );
 
     let manifest = fs::read_to_string(dir.join("kiro.toml")).expect("manifest should be readable");
     assert!(
-        manifest.contains(r#"image = "0.25""#) && manifest.contains(r#"csv = "*""#),
-        "add should write simple Cargo dependency specs:\n{}",
+        manifest.contains(r#"kiro_add_fixture = "0.1.0""#),
+        "add should write the Cargo dependency spec:\n{}",
         manifest
     );
     assert!(
-        !dir.join(".kiro/build/Cargo.toml").exists(),
-        "kiro add should not run Cargo or refresh generated files"
+        dir.join("kiro_add_fixture.kiro").exists() && dir.join("kiro_add_fixture.rs").exists(),
+        "kiro add should generate a host module pair"
+    );
+    let generated =
+        fs::read_to_string(dir.join("kiro_add_fixture.kiro")).expect("generated module readable");
+    assert!(
+        generated.contains("rust fn add(a: num, b: num) -> num"),
+        "generated bindings should include supported crate functions:\n{}",
+        generated
     );
 
-    let remove = run_kiro(&["remove", "image"], &dir);
+    let remove = run_kiro(&["remove", "kiro_add_fixture"], &dir);
     assert!(
         remove.status.success(),
-        "kiro remove image should succeed\nstdout:\n{}\nstderr:\n{}",
+        "kiro remove kiro_add_fixture should succeed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&remove.stdout),
         String::from_utf8_lossy(&remove.stderr)
     );
     let manifest = fs::read_to_string(dir.join("kiro.toml")).expect("manifest should be readable");
     assert!(
-        !manifest.contains("image") && manifest.contains(r#"csv = "*""#),
+        !manifest.contains("kiro_add_fixture"),
         "remove should delete only the named dependency:\n{}",
+        manifest
+    );
+}
+
+#[test]
+fn kiro_add_without_version_records_resolved_package_version() {
+    let dir = temp_project("add_latest");
+    write_manifest(&dir, "main.kiro");
+    write_add_fixture_crate(&dir);
+
+    let add = run_kiro(&["add", "kiro_add_fixture"], &dir);
+    assert!(
+        add.status.success(),
+        "kiro add without version should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&add.stdout),
+        String::from_utf8_lossy(&add.stderr)
+    );
+
+    let manifest = fs::read_to_string(dir.join("kiro.toml")).expect("manifest should be readable");
+    assert!(
+        manifest.contains(r#"kiro_add_fixture = "0.1.0""#),
+        "unversioned add should write the resolved package version, not '*':\n{}",
+        manifest
+    );
+    assert!(
+        !manifest.contains(r#"kiro_add_fixture = "*""#),
+        "unversioned add must not keep wildcard dependency specs:\n{}",
         manifest
     );
 }

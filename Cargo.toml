@@ -14,6 +14,9 @@ rayon = "1.11.0"
 rust-sitter = { version = "0.4.5", default-features = false, features = ["tree-sitter-standard"] }
 toml_edit = "0.24.0"
 kiro_runtime = { path = "kiro_runtime" }
+kiro_macros = { path = "kiro_macros" }
+cargo_metadata = "0.23.1"
+syn = { version = "2.0.111", features = ["full", "extra-traits"] }
 lsp-server = { version = "0.8.0", optional = true }
 lsp-types = { version = "0.97.0", optional = true }
 serde_json = { version = "1.0.150", optional = true }

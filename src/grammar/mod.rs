@@ -751,6 +751,9 @@ pub mod grammar {
 
     #[derive(Debug, Clone)]
     pub struct RustFnDecl {
+        #[rust_sitter::leaf(text = "pure")]
+        pub pure_kw: Option<()>,
+
         #[rust_sitter::leaf(text = "rust")]
         pub _rust_kw: Spanned<()>,
 

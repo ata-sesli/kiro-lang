@@ -15,6 +15,7 @@ pub struct BuildRequirements {
     pub uses_std_net: bool,
     pub uses_pipes: bool,
     pub uses_anyhow: bool,
+    pub uses_host_macros: bool,
     pub skipped_module_imports: HashSet<String>,
 }
 
@@ -34,6 +35,10 @@ impl BuildRequirements {
 
     pub fn record_anyhow(&mut self, uses_anyhow: bool) {
         self.uses_anyhow |= uses_anyhow;
+    }
+
+    pub fn record_host_macros(&mut self, uses_host_macros: bool) {
+        self.uses_host_macros |= uses_host_macros;
     }
 
     pub fn skip_module_import(&mut self, module_name: impl Into<String>) {
@@ -152,6 +157,12 @@ impl BuildManager {
             "kiro_runtime".to_string(),
             r#"kiro_runtime = { path = "../../kiro_runtime" }"#.to_string(),
         );
+        if requirements.uses_host_macros {
+            generated_dependencies.insert(
+                "kiro_macros".to_string(),
+                r#"kiro_macros = { path = "../../kiro_macros" }"#.to_string(),
+            );
+        }
 
         if requirements.uses_anyhow {
             generated_dependencies.insert("anyhow".to_string(), r#"anyhow = "1""#.to_string());

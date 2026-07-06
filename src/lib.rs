@@ -5,6 +5,7 @@ pub mod engine;
 pub mod errors;
 pub mod formatter;
 pub mod grammar;
+pub mod host_generator;
 pub mod interpreter;
 pub mod ir;
 #[cfg(feature = "lsp")]

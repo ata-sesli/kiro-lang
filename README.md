@@ -145,7 +145,7 @@ image = "0.25"
 csv = "1"
 ```
 
-`[dependencies]` is Cargo-backed dependency intent for Rust host glue. V1 supports simple string versions only (`crate = "version"`). Kiro generates the real Cargo project under `.kiro/build/`; Cargo owns `.kiro/build/Cargo.lock`, dependency resolution, native builds, and caching. Kiro does not create a `kiro.lock` and does not provide a Kiro-native registry.
+`[dependencies]` is Cargo-backed dependency intent for Rust host glue. V1 supports simple string versions only (`crate = "version"`). `kiro add image` resolves the latest crate version, records it in `kiro.toml`, and tries to generate a Kiro host module automatically. Kiro generates the real Cargo project under `.kiro/build/`; Cargo owns `.kiro/build/Cargo.lock`, dependency resolution, native builds, and caching. Kiro does not create a `kiro.lock` and does not provide a Kiro-native registry.
 
 **`math.kiro`**:
 
@@ -474,7 +474,28 @@ The logic lives in an adjacent Rust glue file. A user module `mylib.kiro` uses `
 - **ABI v2**: Host functions are async and return `kiro_runtime::HostResult`.
 - **Handles**: Use `RuntimeVal::handle("Name", value)` to return an opaque handle and `as_handle("Name")` to decode one.
 - **Missing Glue**: If a module declares `rust fn` but the matching `.rs` file is absent, Kiro reports a compile diagnostic before Rust build.
-- **Generated dependencies**: Kiro writes the generated Cargo project under `.kiro/build/`. It includes Kiro runtime dependencies, language-required dependencies (`std_*` imports and pipes), and simple user `[dependencies]` from `kiro.toml`. Use `kiro add image@0.25` or edit `kiro.toml`; Kiro refreshes generated Cargo files during build/run/test.
+- **Generated dependencies**: Kiro writes the generated Cargo project under `.kiro/build/`. It includes Kiro runtime dependencies, language-required dependencies (`std_*` imports and pipes), and simple user `[dependencies]` from `kiro.toml`. Use `kiro add image` or `kiro add image@0.25`; Kiro refreshes generated Cargo files during build/run/test.
+
+#### 3. Host Module Generator
+
+`kiro add` is the normal Cargo-backed bridge from Rust crates into Kiro modules:
+
+```bash
+kiro add dtoa
+```
+
+It records the resolved dependency in `kiro.toml`, inspects the Cargo dependency with stable Rust source parsing, and writes:
+
+```text
+dtoa.kiro
+dtoa.rs
+```
+
+Use `kiro host gen dtoa --module dtoa_bindings` when you want to regenerate bindings or choose a custom module name.
+
+It generates all safely supported bindings it can identify: simple functions, obvious constructors, basic methods on opaque handles, `Result<T, E>` fallible returns, lists, maps, and primitive values. Rust APIs with generics, lifetimes, `impl Trait`, borrowed returns, `Option<T>`, enums, iterator returns, or macro-generated surfaces are skipped with a clear report.
+
+Manual fallback code lives in the generated module-specific manual block, such as `mod __kiro_manual_dtoa_bindings`, and is preserved across regeneration. Mark fallback functions with Rust-side no-op attributes such as `#[kiro_export]` or `#[kiro_export(pure)]`; these are host tooling markers, not Kiro language macros.
 
 ```rust
 // Example Glue Implementation

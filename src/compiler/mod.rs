@@ -792,7 +792,7 @@ impl Compiler {
                         functions.insert(
                             crate::grammar::function_name(&def.name).to_string(),
                             FunctionInfo {
-                                is_pure: false,
+                                is_pure: def.pure_kw.is_some(),
                                 can_error: def.can_error.is_some(),
                                 params: def.params.iter().map(|p| p.command_type.clone()).collect(),
                                 return_type: Some(def.return_type.clone()),
@@ -818,7 +818,7 @@ impl Compiler {
                     functions.insert(
                         crate::grammar::function_name(&def.name).to_string(),
                         FunctionInfo {
-                            is_pure: false,
+                            is_pure: def.pure_kw.is_some(),
                             can_error: def.can_error.is_some(),
                             params: def.params.iter().map(|p| p.command_type.clone()).collect(),
                             return_type: Some(def.return_type.clone()),

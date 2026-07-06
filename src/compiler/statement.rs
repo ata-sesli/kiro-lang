@@ -432,7 +432,17 @@ impl Compiler {
                     )
                 };
 
-                let final_body = if can_error {
+                let final_body = if def.pure_kw.is_some() && can_error {
+                    format!(
+                        "{{ match header::{}({}) {{ Ok(v) => match v.try_into() {{ Ok(val) => Ok(val), Err(e) => Err(std::sync::Arc::new(anyhow::anyhow!(e))) }}, Err(e) => Err(std::sync::Arc::new(anyhow::anyhow!(e.to_string()).context(e.name))) }} }}",
+                        name, args_vec
+                    )
+                } else if def.pure_kw.is_some() {
+                    format!(
+                        "{{ match header::{}({}) {{ Ok(v) => v.try_into().unwrap(), Err(e) => kiro_runtime_error(\"KIRO3007\", &format!(\"Host function '{}' failed: {{}}.\", e)) }} }}",
+                        name, args_vec, name
+                    )
+                } else if can_error {
                     format!(
                         "{{ match header::{}({}).await {{ Ok(v) => match v.try_into() {{ Ok(val) => Ok(val), Err(e) => Err(std::sync::Arc::new(anyhow::anyhow!(e))) }}, Err(e) => Err(std::sync::Arc::new(anyhow::anyhow!(e.to_string()).context(e.name))) }} }}",
                         name, args_vec
@@ -450,13 +460,23 @@ impl Compiler {
                     ret_def
                 };
 
-                format!(
-                    "pub async fn {}({}) -> {} {}",
-                    name,
-                    param_strs.join(", "),
-                    ret_type,
-                    final_body
-                )
+                if def.pure_kw.is_some() {
+                    format!(
+                        "pub fn {}({}) -> {} {}",
+                        name,
+                        param_strs.join(", "),
+                        ret_type,
+                        final_body
+                    )
+                } else {
+                    format!(
+                        "pub async fn {}({}) -> {} {}",
+                        name,
+                        param_strs.join(", "),
+                        ret_type,
+                        final_body
+                    )
+                }
             }
 
             // 2. Expression Statement (Standard Call on its own line)

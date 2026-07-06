@@ -167,6 +167,7 @@ fn starts_top_level_item(code: &str) -> bool {
         || code.starts_with("fn ")
         || code.starts_with("pure fn ")
         || code.starts_with("rust fn ")
+        || code.starts_with("pure rust fn ")
         || code.starts_with("handle ")
         || code.starts_with("struct ")
         || code.starts_with("error ")
