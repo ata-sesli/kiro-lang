@@ -1,11 +1,11 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use cargo_metadata::MetadataCommand;
 use syn::{
     Attribute, FnArg, GenericArgument, ImplItem, Item, ItemFn, ItemImpl, ItemMod, Pat,
-    PathArguments, ReturnType, Type, Visibility,
+    PathArguments, ReturnType, Type, TypeParamBound, UseTree, Visibility,
 };
 
 use crate::errors::{ErrorCode, ErrorPhase, KiroError};
@@ -64,6 +64,44 @@ struct Param {
     rust_type: RustType,
 }
 
+#[derive(Debug, Clone)]
+struct TypeContext {
+    public_structs: BTreeSet<String>,
+    result_aliases: BTreeMap<String, String>,
+    std_path_names: BTreeSet<String>,
+    self_type: Option<String>,
+}
+
+impl TypeContext {
+    fn new(
+        public_structs: &BTreeSet<String>,
+        result_aliases: &BTreeMap<String, String>,
+        items: &[Item],
+    ) -> Self {
+        Self {
+            public_structs: public_structs.clone(),
+            result_aliases: result_aliases.clone(),
+            std_path_names: std_path_names(items),
+            self_type: None,
+        }
+    }
+
+    fn manual(handles: &BTreeSet<String>) -> Self {
+        Self {
+            public_structs: handles.clone(),
+            result_aliases: BTreeMap::new(),
+            std_path_names: BTreeSet::new(),
+            self_type: None,
+        }
+    }
+
+    fn with_self_type(&self, self_type: String) -> Self {
+        let mut next = self.clone();
+        next.self_type = Some(self_type);
+        next
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RustType {
     Str,
@@ -82,6 +120,19 @@ struct Collector {
     skipped: Vec<String>,
     crate_ident: String,
     manual_module: String,
+}
+
+impl Collector {
+    fn push_binding(&mut self, binding: Binding) {
+        if self
+            .bindings
+            .iter()
+            .any(|existing| existing.exported_name == binding.exported_name)
+        {
+            return;
+        }
+        self.bindings.push(binding);
+    }
 }
 
 pub fn generate(
@@ -306,57 +357,318 @@ fn metadata_error(error: cargo_metadata::Error) -> KiroError {
 }
 
 fn collect_crate(root: &Path, collector: &mut Collector) -> Result<(), KiroError> {
-    let source = fs::read_to_string(root).map_err(|e| {
+    let file = parse_rust_file(root)?;
+    let base_dir = root.parent().unwrap_or_else(|| Path::new("."));
+    let reexports = collect_root_reexports(&file, base_dir, collector)?;
+
+    let mut public_structs = public_struct_names(&file.items, None);
+    for reexport in &reexports {
+        public_structs.extend(public_struct_names(
+            &reexport.file.items,
+            Some(&reexport.names),
+        ));
+    }
+    let mut result_alias_map = result_aliases(&file.items, None);
+    for reexport in &reexports {
+        result_alias_map.extend(result_aliases(&reexport.file.items, Some(&reexport.names)));
+    }
+
+    let root_context = TypeContext::new(&public_structs, &result_alias_map, &file.items);
+    collect_items(&file.items, None, &root_context, collector);
+    for reexport in &reexports {
+        let context = TypeContext::new(&public_structs, &result_alias_map, &reexport.file.items);
+        collect_items(
+            &reexport.file.items,
+            Some(&reexport.names),
+            &context,
+            collector,
+        );
+    }
+    Ok(())
+}
+
+struct ReexportModule {
+    names: BTreeSet<String>,
+    file: syn::File,
+}
+
+struct ReexportEntry {
+    module_path: Vec<String>,
+    name: String,
+}
+
+fn parse_rust_file(path: &Path) -> Result<syn::File, KiroError> {
+    let source = fs::read_to_string(path).map_err(|e| {
         KiroError::new(
             ErrorCode::FileNotFound,
             ErrorPhase::Cli,
-            format!("Failed to read '{}': {}", root.display(), e),
+            format!("Failed to read '{}': {}", path.display(), e),
         )
     })?;
-    let file = syn::parse_file(&source).map_err(|e| {
+    syn::parse_file(&source).map_err(|e| {
         KiroError::new(
             ErrorCode::ParseFailed,
             ErrorPhase::Cli,
-            format!("Failed to parse Rust source '{}': {}", root.display(), e),
+            format!("Failed to parse Rust source '{}': {}", path.display(), e),
         )
-    })?;
+    })
+}
 
-    let mut public_structs = BTreeSet::new();
-    for item in &file.items {
+fn public_struct_names(
+    items: &[Item],
+    allowed_names: Option<&BTreeSet<String>>,
+) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for item in items {
         if let Item::Struct(item_struct) = item
             && is_public(&item_struct.vis)
+            && is_allowed_name(allowed_names, &item_struct.ident.to_string())
         {
-            public_structs.insert(item_struct.ident.to_string());
+            names.insert(item_struct.ident.to_string());
         }
     }
+    names
+}
 
-    for item in &file.items {
+fn result_aliases(
+    items: &[Item],
+    allowed_names: Option<&BTreeSet<String>>,
+) -> BTreeMap<String, String> {
+    let mut aliases = BTreeMap::new();
+    for item in items {
+        let Item::Type(item_type) = item else {
+            continue;
+        };
+        let alias_name = item_type.ident.to_string();
+        if !is_public(&item_type.vis) || !is_allowed_name(allowed_names, &alias_name) {
+            continue;
+        }
+        if item_type.generics.params.len() != 1 {
+            continue;
+        }
+        let Some(error_name) = result_alias_error_name(&item_type.ty, &item_type.generics) else {
+            continue;
+        };
+        aliases.insert(alias_name, error_name);
+    }
+    aliases
+}
+
+fn result_alias_error_name(ty: &Type, generics: &syn::Generics) -> Option<String> {
+    let generic_name = generics.params.iter().find_map(|param| match param {
+        syn::GenericParam::Type(param) => Some(param.ident.to_string()),
+        _ => None,
+    })?;
+    let Type::Path(type_path) = ty else {
+        return None;
+    };
+    let segment = type_path.path.segments.last()?;
+    if segment.ident != "Result" {
+        return None;
+    }
+    let PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return None;
+    };
+    let mut args = args.args.iter();
+    let Some(GenericArgument::Type(ok_ty)) = args.next() else {
+        return None;
+    };
+    if type_last_ident(ok_ty).as_deref() != Some(generic_name.as_str()) {
+        return None;
+    }
+    let Some(GenericArgument::Type(err_ty)) = args.next() else {
+        return None;
+    };
+    if args.next().is_some() {
+        return None;
+    }
+    type_last_ident(err_ty)
+}
+
+fn std_path_names(items: &[Item]) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for item in items {
+        let Item::Use(item_use) = item else {
+            continue;
+        };
+        collect_std_path_names(&item_use.tree, Vec::new(), &mut names);
+    }
+    names
+}
+
+fn collect_std_path_names(tree: &UseTree, prefix: Vec<String>, names: &mut BTreeSet<String>) {
+    match tree {
+        UseTree::Path(path) => {
+            let mut next = prefix;
+            next.push(path.ident.to_string());
+            collect_std_path_names(&path.tree, next, names);
+        }
+        UseTree::Group(group) => {
+            for item in &group.items {
+                collect_std_path_names(item, prefix.clone(), names);
+            }
+        }
+        UseTree::Name(name) => {
+            if prefix == ["std", "path"] && name.ident == "Path" {
+                names.insert("Path".to_string());
+            }
+        }
+        UseTree::Rename(rename) => {
+            if prefix == ["std", "path"] && rename.ident == "Path" {
+                names.insert(rename.rename.to_string());
+            }
+        }
+        UseTree::Glob(_) => {}
+    }
+}
+
+fn collect_items(
+    items: &[Item],
+    allowed_names: Option<&BTreeSet<String>>,
+    context: &TypeContext,
+    collector: &mut Collector,
+) {
+    for item in items {
         match item {
-            Item::Fn(item_fn) if is_public(&item_fn.vis) => {
+            Item::Fn(item_fn)
+                if is_public(&item_fn.vis)
+                    && is_allowed_name(allowed_names, &item_fn.sig.ident.to_string()) =>
+            {
                 match binding_from_fn(
                     item_fn,
                     BindingSource::CrateFunction {
                         path: format!("{}::{}", collector.crate_ident, item_fn.sig.ident),
                     },
-                    &public_structs,
+                    context,
                     false,
                 ) {
-                    Ok(binding) => collector.bindings.push(binding),
+                    Ok(binding) => collector.push_binding(binding),
                     Err(reason) => collector
                         .skipped
                         .push(format!("{}: {}", item_fn.sig.ident, reason)),
                 }
             }
-            Item::Impl(item_impl) => collect_impl(item_impl, &public_structs, collector),
+            Item::Impl(item_impl) => collect_impl(item_impl, allowed_names, context, collector),
             _ => {}
         }
     }
-    Ok(())
+}
+
+fn collect_root_reexports(
+    file: &syn::File,
+    base_dir: &Path,
+    collector: &mut Collector,
+) -> Result<Vec<ReexportModule>, KiroError> {
+    let mut module_exports: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
+    for item in &file.items {
+        let Item::Use(item_use) = item else {
+            continue;
+        };
+        if !is_public(&item_use.vis) {
+            continue;
+        }
+        let mut entries = Vec::new();
+        collect_reexport_entries(
+            &item_use.tree,
+            Vec::new(),
+            &mut entries,
+            &mut collector.skipped,
+        );
+        for entry in entries {
+            let Some(path) = resolve_local_module_file(base_dir, &entry.module_path) else {
+                collector.skipped.push(format!(
+                    "pub use {}::{}: local module file was not found",
+                    entry.module_path.join("::"),
+                    entry.name
+                ));
+                continue;
+            };
+            module_exports.entry(path).or_default().insert(entry.name);
+        }
+    }
+
+    let mut modules = Vec::new();
+    for (path, names) in module_exports {
+        let file = parse_rust_file(&path)?;
+        modules.push(ReexportModule { names, file });
+    }
+    Ok(modules)
+}
+
+fn collect_reexport_entries(
+    tree: &UseTree,
+    prefix: Vec<String>,
+    entries: &mut Vec<ReexportEntry>,
+    skipped: &mut Vec<String>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            let mut next = prefix;
+            next.push(path.ident.to_string());
+            collect_reexport_entries(&path.tree, next, entries, skipped);
+        }
+        UseTree::Group(group) => {
+            for item in &group.items {
+                collect_reexport_entries(item, prefix.clone(), entries, skipped);
+            }
+        }
+        UseTree::Name(name) => {
+            if prefix.is_empty() {
+                skipped.push(format!(
+                    "pub use {}: root-name re-exports are unsupported",
+                    name.ident
+                ));
+            } else {
+                entries.push(ReexportEntry {
+                    module_path: prefix,
+                    name: name.ident.to_string(),
+                });
+            }
+        }
+        UseTree::Rename(rename) => {
+            skipped.push(format!(
+                "pub use {}::{} as {}: alias re-exports are unsupported",
+                prefix.join("::"),
+                rename.ident,
+                rename.rename
+            ));
+        }
+        UseTree::Glob(_) => {
+            skipped.push(format!(
+                "pub use {}::*: glob re-exports are unsupported",
+                prefix.join("::")
+            ));
+        }
+    }
+}
+
+fn resolve_local_module_file(base_dir: &Path, module_path: &[String]) -> Option<PathBuf> {
+    if module_path.is_empty() {
+        return None;
+    }
+    let mut path = base_dir.to_path_buf();
+    for segment in module_path {
+        path.push(segment);
+    }
+    let rs_path = path.with_extension("rs");
+    if rs_path.exists() {
+        return Some(rs_path);
+    }
+    let mod_path = path.join("mod.rs");
+    if mod_path.exists() {
+        return Some(mod_path);
+    }
+    None
+}
+
+fn is_allowed_name(allowed_names: Option<&BTreeSet<String>>, name: &str) -> bool {
+    allowed_names.is_none_or(|names| names.contains(name))
 }
 
 fn collect_impl(
     item_impl: &ItemImpl,
-    public_structs: &BTreeSet<String>,
+    allowed_names: Option<&BTreeSet<String>>,
+    context: &TypeContext,
     collector: &mut Collector,
 ) {
     if item_impl.trait_.is_some() {
@@ -365,7 +677,10 @@ fn collect_impl(
     let Some(type_name) = impl_type_name(&item_impl.self_ty) else {
         return;
     };
-    if !public_structs.contains(&type_name) {
+    if !context.public_structs.contains(&type_name) {
+        return;
+    }
+    if !is_allowed_name(allowed_names, &type_name) {
         return;
     }
     for item in &item_impl.items {
@@ -386,16 +701,17 @@ fn collect_impl(
         if let Some(FnArg::Receiver(receiver)) = method.sig.inputs.first() {
             if receiver.reference.is_none() || receiver.mutability.is_some() {
                 collector.skipped.push(format!(
-                    "{}::{}: mutable or by-value receivers are unsupported",
+                    "{}::{}: mutable receiver generation is not implemented yet",
                     type_name, method.sig.ident
                 ));
                 continue;
             }
+            let method_context = context.with_self_type(type_name.clone());
             let mut params = vec![Param {
                 name: to_snake_case(&type_name),
                 rust_type: RustType::Handle(type_name.clone()),
             }];
-            match params_from_signature(method.sig.inputs.iter().skip(1), public_structs) {
+            match params_from_signature(method.sig.inputs.iter().skip(1), &method_context) {
                 Ok(mut rest) => params.append(&mut rest),
                 Err(reason) => {
                     collector
@@ -405,7 +721,7 @@ fn collect_impl(
                 }
             }
             let Ok((return_type, can_error, error_name)) =
-                return_type_from_signature(&method.sig.output, public_structs)
+                return_type_from_signature(&method.sig.output, &method_context)
             else {
                 collector.skipped.push(format!(
                     "{}::{}: unsupported return type",
@@ -414,7 +730,7 @@ fn collect_impl(
                 continue;
             };
             collector.handles.insert(type_name.clone());
-            collector.bindings.push(Binding {
+            collector.push_binding(Binding {
                 exported_name: format!("{}_{}", to_snake_case(&type_name), method.sig.ident),
                 source: BindingSource::Method {
                     crate_ident: collector.crate_ident.clone(),
@@ -426,7 +742,16 @@ fn collect_impl(
                 error_name,
                 pure: false,
             });
-        } else if matches_type(&method.sig.output, &type_name) {
+        } else {
+            let method_context = context.with_self_type(type_name.clone());
+            let Ok((resolved_return_type, _, _)) =
+                return_type_from_signature(&method.sig.output, &method_context)
+            else {
+                continue;
+            };
+            if resolved_return_type != RustType::Handle(type_name.clone()) {
+                continue;
+            }
             match binding_from_fn(
                 &ItemFn {
                     attrs: method.attrs.clone(),
@@ -443,14 +768,14 @@ fn collect_impl(
                         collector.crate_ident, type_name, method.sig.ident
                     ),
                 },
-                public_structs,
+                &method_context,
                 false,
             ) {
                 Ok(mut binding) => {
                     collector.handles.insert(type_name.clone());
                     binding.exported_name =
                         format!("{}_{}", to_snake_case(&type_name), method.sig.ident);
-                    collector.bindings.push(binding);
+                    collector.push_binding(binding);
                 }
                 Err(reason) => collector
                     .skipped
@@ -514,10 +839,10 @@ fn collect_manual_items(
                         module: collector.manual_module.clone(),
                         function: item_fn.sig.ident.to_string(),
                     },
-                    handles,
+                    &TypeContext::manual(handles),
                     pure,
                 ) {
-                    Ok(binding) => collector.bindings.push(binding),
+                    Ok(binding) => collector.push_binding(binding),
                     Err(reason) => collector.skipped.push(format!(
                         "{}::{}: {}",
                         collector.manual_module, item_fn.sig.ident, reason
@@ -532,7 +857,7 @@ fn collect_manual_items(
 fn binding_from_fn(
     item_fn: &ItemFn,
     source: BindingSource,
-    public_structs: &BTreeSet<String>,
+    context: &TypeContext,
     pure: bool,
 ) -> Result<Binding, String> {
     if !item_fn.sig.generics.params.is_empty() || item_fn.sig.generics.lt_token.is_some() {
@@ -541,9 +866,9 @@ fn binding_from_fn(
     if item_fn.sig.variadic.is_some() {
         return Err("variadic functions are unsupported".to_string());
     }
-    let params = params_from_signature(item_fn.sig.inputs.iter(), public_structs)?;
+    let params = params_from_signature(item_fn.sig.inputs.iter(), context)?;
     let (return_type, can_error, error_name) =
-        return_type_from_signature(&item_fn.sig.output, public_structs)?;
+        return_type_from_signature(&item_fn.sig.output, context)?;
     Ok(Binding {
         exported_name: item_fn.sig.ident.to_string(),
         source,
@@ -557,7 +882,7 @@ fn binding_from_fn(
 
 fn params_from_signature<'a>(
     inputs: impl Iterator<Item = &'a FnArg>,
-    public_structs: &BTreeSet<String>,
+    context: &TypeContext,
 ) -> Result<Vec<Param>, String> {
     let mut params = Vec::new();
     for arg in inputs {
@@ -567,7 +892,7 @@ fn params_from_signature<'a>(
         let Pat::Ident(name) = arg.pat.as_ref() else {
             return Err("only named parameters are supported".to_string());
         };
-        let rust_type = rust_type_from_syn(&arg.ty, public_structs)?;
+        let rust_type = rust_type_from_syn(&arg.ty, context)?;
         params.push(Param {
             name: name.ident.to_string(),
             rust_type,
@@ -578,31 +903,33 @@ fn params_from_signature<'a>(
 
 fn return_type_from_signature(
     output: &ReturnType,
-    public_structs: &BTreeSet<String>,
+    context: &TypeContext,
 ) -> Result<(RustType, bool, Option<String>), String> {
     match output {
         ReturnType::Default => Ok((RustType::Void, false, None)),
         ReturnType::Type(_, ty) => {
-            if let Some((ok, err)) = result_type(ty, public_structs)? {
+            if let Some((ok, err)) = result_type(ty, context)? {
                 Ok((ok, true, Some(err)))
             } else {
-                Ok((rust_type_from_syn(ty, public_structs)?, false, None))
+                Ok((rust_type_from_syn(ty, context)?, false, None))
             }
         }
     }
 }
 
-fn result_type(
-    ty: &Type,
-    public_structs: &BTreeSet<String>,
-) -> Result<Option<(RustType, String)>, String> {
+fn result_type(ty: &Type, context: &TypeContext) -> Result<Option<(RustType, String)>, String> {
     let Type::Path(type_path) = ty else {
         return Ok(None);
     };
     let Some(segment) = type_path.path.segments.last() else {
         return Ok(None);
     };
-    if segment.ident != "Result" {
+    let alias_name = segment.ident.to_string();
+    let alias_error = context
+        .result_aliases
+        .get(&alias_name)
+        .filter(|_| path_can_refer_to_result_alias(&type_path.path, &alias_name));
+    if alias_name != "Result" && alias_error.is_none() {
         return Ok(None);
     }
     let PathArguments::AngleBracketed(args) = &segment.arguments else {
@@ -612,15 +939,39 @@ fn result_type(
     let Some(GenericArgument::Type(ok_ty)) = args.next() else {
         return Err("Result ok type is unsupported".to_string());
     };
-    let Some(GenericArgument::Type(err_ty)) = args.next() else {
+    let ok = rust_type_from_syn(ok_ty, context)?;
+    let Some(next_arg) = args.next() else {
+        let Some(err) = alias_error else {
+            return Err(format!(
+                "{} with one type argument requires a public crate-local alias",
+                alias_name
+            ));
+        };
+        return Ok(Some((ok, err.clone())));
+    };
+    let GenericArgument::Type(err_ty) = next_arg else {
         return Err("Result error type is unsupported".to_string());
     };
-    let ok = rust_type_from_syn(ok_ty, public_structs)?;
     let err = type_last_ident(err_ty).unwrap_or_else(|| "HostError".to_string());
     Ok(Some((ok, err)))
 }
 
-fn rust_type_from_syn(ty: &Type, public_structs: &BTreeSet<String>) -> Result<RustType, String> {
+fn path_can_refer_to_result_alias(path: &syn::Path, alias_name: &str) -> bool {
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    matches!(
+        segments.as_slice(),
+        [single] if single == alias_name
+    ) || matches!(
+        segments.as_slice(),
+        [prefix, last] if matches!(prefix.as_str(), "crate" | "self" | "super") && last == alias_name
+    )
+}
+
+fn rust_type_from_syn(ty: &Type, context: &TypeContext) -> Result<RustType, String> {
     match ty {
         Type::Reference(reference) => {
             if reference.mutability.is_some() {
@@ -631,6 +982,7 @@ fn rust_type_from_syn(ty: &Type, public_structs: &BTreeSet<String>) -> Result<Ru
                 _ => Err("borrowed types are unsupported".to_string()),
             }
         }
+        Type::ImplTrait(impl_trait) => impl_trait_type(impl_trait, context),
         Type::Tuple(tuple) if tuple.elems.is_empty() => Ok(RustType::Void),
         Type::Path(type_path) => {
             let Some(segment) = type_path.path.segments.last() else {
@@ -638,6 +990,11 @@ fn rust_type_from_syn(ty: &Type, public_structs: &BTreeSet<String>) -> Result<Ru
             };
             let name = segment.ident.to_string();
             match name.as_str() {
+                "Self" => context
+                    .self_type
+                    .as_ref()
+                    .map(|name| RustType::Handle(name.clone()))
+                    .ok_or_else(|| "Self is only supported inside inherent impls".to_string()),
                 "String" => Ok(RustType::Str),
                 "f64" | "f32" | "i64" | "i32" | "i16" | "i8" | "isize" | "u64" | "u32" | "u16"
                 | "u8" | "usize" => Ok(RustType::Num { rust: name }),
@@ -645,27 +1002,66 @@ fn rust_type_from_syn(ty: &Type, public_structs: &BTreeSet<String>) -> Result<Ru
                 "Vec" => {
                     let inner = one_generic_type(segment, "Vec")?;
                     Ok(RustType::List(Box::new(rust_type_from_syn(
-                        inner,
-                        public_structs,
+                        inner, context,
                     )?)))
                 }
                 "HashMap" | "BTreeMap" => {
                     let (key, value) = two_generic_types(segment, &name)?;
-                    let key_ty = rust_type_from_syn(key, public_structs)?;
+                    let key_ty = rust_type_from_syn(key, context)?;
                     if key_ty != RustType::Str {
                         return Err("map keys must be String/str".to_string());
                     }
-                    Ok(RustType::Map(Box::new(rust_type_from_syn(
-                        value,
-                        public_structs,
-                    )?)))
+                    Ok(RustType::Map(Box::new(rust_type_from_syn(value, context)?)))
                 }
-                _ if public_structs.contains(&name) => Ok(RustType::Handle(name)),
+                _ if context.public_structs.contains(&name) => Ok(RustType::Handle(name)),
                 _ => Err(format!("unsupported type '{}'", name)),
             }
         }
         _ => Err("unsupported type".to_string()),
     }
+}
+
+fn impl_trait_type(ty: &syn::TypeImplTrait, context: &TypeContext) -> Result<RustType, String> {
+    let mut bounds = ty.bounds.iter();
+    let Some(TypeParamBound::Trait(bound)) = bounds.next() else {
+        return Err("impl Trait is unsupported".to_string());
+    };
+    if bounds.next().is_some() {
+        return Err("impl Trait with multiple bounds is unsupported".to_string());
+    }
+    if trait_bound_is_as_ref_path(bound, context) {
+        Ok(RustType::Str)
+    } else {
+        Err("impl Trait is unsupported except impl AsRef<std::path::Path>".to_string())
+    }
+}
+
+fn trait_bound_is_as_ref_path(bound: &syn::TraitBound, context: &TypeContext) -> bool {
+    let Some(segment) = bound.path.segments.last() else {
+        return false;
+    };
+    if segment.ident != "AsRef" {
+        return false;
+    }
+    let Ok(inner) = one_generic_type(segment, "AsRef") else {
+        return false;
+    };
+    is_std_path_type(inner, context)
+}
+
+fn is_std_path_type(ty: &Type, context: &TypeContext) -> bool {
+    let Type::Path(type_path) = ty else {
+        return false;
+    };
+    let segments = type_path
+        .path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    segments == ["std", "path", "Path"]
+        || segments == ["core", "path", "Path"]
+        || (segments.len() == 1 && context.std_path_names.contains(&segments[0]))
 }
 
 fn one_generic_type<'a>(segment: &'a syn::PathSegment, name: &str) -> Result<&'a Type, String> {
@@ -982,13 +1378,6 @@ fn type_last_ident(ty: &Type) -> Option<String> {
         .segments
         .last()
         .map(|segment| segment.ident.to_string())
-}
-
-fn matches_type(output: &ReturnType, name: &str) -> bool {
-    let ReturnType::Type(_, ty) = output else {
-        return false;
-    };
-    type_last_ident(ty).as_deref() == Some(name)
 }
 
 fn has_attr(attrs: &[Attribute], name: &str) -> bool {

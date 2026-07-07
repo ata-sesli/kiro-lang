@@ -493,7 +493,7 @@ dtoa.rs
 
 Use `kiro host gen dtoa --module dtoa_bindings` when you want to regenerate bindings or choose a custom module name.
 
-It generates all safely supported bindings it can identify: simple functions, obvious constructors, basic methods on opaque handles, `Result<T, E>` fallible returns, lists, maps, and primitive values. Rust APIs with generics, lifetimes, `impl Trait`, borrowed returns, `Option<T>`, enums, iterator returns, or macro-generated surfaces are skipped with a clear report.
+It generates all safely supported bindings it can identify from crate-root public items and named root `pub use` re-exports: simple functions, obvious constructors, basic methods on opaque handles, explicit `Result<T, E>` fallible returns, public crate-local `Result<T>` aliases, `Result<Self>` handle constructors, `impl AsRef<std::path::Path>` parameters as Kiro `str`, lists, maps, and primitive values. Rust APIs with generics, lifetimes, arbitrary `impl Trait`, borrowed returns, `Option<T>`, enums, mutable receivers, glob/alias re-exports, iterator returns, or macro-generated surfaces are skipped with a clear report.
 
 Manual fallback code lives in the generated module-specific manual block, such as `mod __kiro_manual_dtoa_bindings`, and is preserved across regeneration. Mark fallback functions with Rust-side no-op attributes such as `#[kiro_export]` or `#[kiro_export(pure)]`; these are host tooling markers, not Kiro language macros.
 
