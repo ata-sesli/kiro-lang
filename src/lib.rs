@@ -1,6 +1,7 @@
 pub mod analysis;
 pub mod build_manager;
 pub mod compiler;
+pub mod eir;
 pub mod engine;
 pub mod errors;
 pub mod formatter;
