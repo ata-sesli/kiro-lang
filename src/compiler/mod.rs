@@ -1,6 +1,7 @@
 use crate::grammar::grammar;
 use std::collections::{HashMap, HashSet};
 
+pub mod eir;
 pub mod expression;
 pub mod statement;
 pub mod types;

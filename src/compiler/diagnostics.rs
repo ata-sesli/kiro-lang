@@ -130,6 +130,14 @@ impl<'a> SemanticCtx<'a> {
         self.scopes.iter().rev().find_map(|scope| scope.get(name))
     }
 
+    fn binding_with_scope(&self, name: &str) -> Option<(usize, &Binding)> {
+        self.scopes
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, scope)| scope.get(name).map(|binding| (index, binding)))
+    }
+
     fn visible_names(&self) -> Vec<String> {
         let mut names = Vec::new();
         for scope in &self.scopes {
@@ -552,11 +560,37 @@ impl<'a> SemanticCtx<'a> {
             }
             grammar::Expression::Variable(v) => {
                 let name = crate::grammar::variable_name(v);
-                if let Some(binding) = self.binding(name) {
+                if let Some((scope, binding)) = self.binding_with_scope(name) {
+                    if self.in_pure && scope == 0 {
+                        return Err(self.error_at_span(
+                            ErrorCode::PureViolation,
+                            format!(
+                                "Pure function cannot capture external variable '{}'. Only parameters and local variables are allowed.",
+                                name
+                            ),
+                            crate::grammar::variable_span(v),
+                            "external capture in pure fn",
+                        ));
+                    }
                     return Ok(binding.ty.clone());
                 }
-                if self.imports.contains(name) || self.functions.contains_key(name) {
+                if self.imports.contains(name) {
                     return Ok(None);
+                }
+                if let Some(function) = self.functions.get(name) {
+                    return Ok(Some(grammar::KiroType::FnType(
+                        (),
+                        (),
+                        function.params.clone(),
+                        (),
+                        (),
+                        Box::new(
+                            function
+                                .return_type
+                                .clone()
+                                .unwrap_or(grammar::KiroType::Void),
+                        ),
+                    )));
                 }
                 let mut err = self.error_at_span(
                     ErrorCode::UnknownName,
@@ -801,10 +835,11 @@ impl<'a> SemanticCtx<'a> {
                     None => Ok(None),
                 }
             }
-            grammar::Expression::Ref(_, target) => {
-                self.infer_expr(target)?;
-                Ok(None)
-            }
+            grammar::Expression::Ref(_, target) => match self.infer_expr(target)? {
+                Some(function @ grammar::KiroType::FnType(_, _, _, _, _, _)) => Ok(Some(function)),
+                Some(inner) => Ok(Some(grammar::KiroType::Adr((), Box::new(inner)))),
+                None => Ok(None),
+            },
             grammar::Expression::Deref(deref_kw, target) => {
                 let target_ty = self.infer_expr(target)?;
                 if matches!(
@@ -984,6 +1019,22 @@ impl<'a> SemanticCtx<'a> {
         match func {
             grammar::Expression::Variable(v) => {
                 let name = crate::grammar::variable_name(v);
+                if let Some(Binding {
+                    ty: Some(grammar::KiroType::FnType(_, _, params, _, _, return_type)),
+                    ..
+                }) = self.binding(name)
+                {
+                    return Ok((
+                        name.to_string(),
+                        FunctionInfo {
+                            is_pure: false,
+                            can_error: false,
+                            params: params.clone(),
+                            return_type: Some((**return_type).clone()),
+                            doc: None,
+                        },
+                    ));
+                }
                 self.functions
                     .get(name)
                     .cloned()

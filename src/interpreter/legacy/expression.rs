@@ -3,6 +3,7 @@ use crate::grammar::grammar::{self, Expression, Statement};
 use crate::interpreter::values::RuntimeVal;
 use crate::interpreter::{HostCallCtx, HostMode, StatementResult};
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
@@ -204,12 +205,14 @@ impl Interpreter {
                     Ok(RuntimeVal::Pipe(
                         crate::interpreter::values::PipeSender::Bounded(tx),
                         Arc::new(Mutex::new(rx)),
+                        Arc::new(AtomicBool::new(false)),
                     ))
                 } else {
                     let (tx, rx) = mpsc::channel();
                     Ok(RuntimeVal::Pipe(
                         crate::interpreter::values::PipeSender::Unbounded(tx),
                         Arc::new(Mutex::new(rx)),
+                        Arc::new(AtomicBool::new(false)),
                     ))
                 }
             }
@@ -232,7 +235,7 @@ impl Interpreter {
                 }
                 let chan = self.eval_expr(*channel_expr)?;
 
-                if let RuntimeVal::Pipe(_, rx_mutex) = chan {
+                if let RuntimeVal::Pipe(_, rx_mutex, _) = chan {
                     let rx = rx_mutex.lock().unwrap();
                     let val = rx
                         .recv()

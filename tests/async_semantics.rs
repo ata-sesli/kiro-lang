@@ -187,7 +187,7 @@ fn worker() {
 }
 
 #[test]
-fn imported_pure_function_compiles_without_await() {
+fn imported_pure_function_compiles_through_eir() {
     let _guard = KIRO_BUILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = temp_project("imported_pure");
     let main_path = dir.join("main.kiro");
@@ -233,15 +233,14 @@ main()
     let generated =
         fs::read_to_string(".kiro/build/src/main.rs").expect("generated main Rust should exist");
     assert!(
-        generated.contains("math::add")
-            && !generated.contains("math::add((1.0).clone(), (2.0).clone()).await"),
-        "imported pure call should not be awaited:\n{}",
+        generated.contains("fn __kiro_eir_f") && !generated.contains("math::add"),
+        "imported pure call should compile from canonical EIR:\n{}",
         generated
     );
 }
 
 #[test]
-fn nested_imported_pure_function_compiles_without_await() {
+fn nested_imported_pure_function_compiles_through_eir() {
     let _guard = KIRO_BUILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = temp_project("nested_imported_pure");
     let main_path = dir.join("main.kiro");
@@ -287,15 +286,14 @@ main()
     let generated =
         fs::read_to_string(".kiro/build/src/main.rs").expect("generated main Rust should exist");
     assert!(
-        generated.contains("crate::app::math::add")
-            && !generated.contains("crate::app::math::add((1.0).clone(), (2.0).clone()).await"),
-        "nested imported pure call should not be awaited:\n{}",
+        generated.contains("fn __kiro_eir_f") && !generated.contains("app::math::add"),
+        "nested imported pure call should compile from canonical EIR:\n{}",
         generated
     );
 }
 
 #[test]
-fn imported_effectful_function_compiles_with_await() {
+fn imported_effectful_function_compiles_through_eir() {
     let _guard = KIRO_BUILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = temp_project("imported_effectful");
     let main_path = dir.join("main.kiro");
@@ -341,8 +339,8 @@ main()
     let generated =
         fs::read_to_string(".kiro/build/src/main.rs").expect("generated main Rust should exist");
     assert!(
-        generated.contains("math::add((1.0).clone(), (2.0).clone()).await"),
-        "imported effectful call should be awaited:\n{}",
+        generated.contains("fn __kiro_eir_f") && !generated.contains("math::add"),
+        "imported effectful call should compile from canonical EIR:\n{}",
         generated
     );
 }

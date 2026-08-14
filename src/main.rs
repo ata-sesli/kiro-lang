@@ -784,53 +784,84 @@ fn run_compiler(
             || header.contains("kiro_struct"),
     );
     let root_name = module_name_from_path(&analysis.root)?;
+    let eir_rust = match kiro_lang::eir::lower_program(&analysis.hir) {
+        Ok(program) => match compiler::eir::compile_program(&program) {
+            Ok(code) => {
+                requirements.uses_pipes = compiler::eir::program_uses_pipes(&program);
+                requirements.uses_anyhow = false;
+                Some(code)
+            }
+            Err(error) => {
+                if verbose {
+                    eprintln!("EIR Rust backend fallback: {error}");
+                }
+                None
+            }
+        },
+        Err(error) => {
+            if verbose {
+                eprintln!("EIR lowering fallback: {error:?}");
+            }
+            None
+        }
+    };
     let module_functions = analysis.module_functions.clone();
     let mut modules = analysis.modules;
     let known_modules: HashSet<String> = modules.keys().cloned().collect();
     let active_modules = active_generated_modules(&modules, &requirements, &root_name);
 
-    let mut module_names: Vec<String> = modules
-        .keys()
-        .filter(|name| *name != &root_name)
-        .cloned()
-        .collect();
-    module_names.sort();
+    if let Some(code) = eir_rust {
+        pm.save_file("main", code).map_err(|error| {
+            KiroError::new(
+                errors::ErrorCode::BuildGraphFailed,
+                errors::ErrorPhase::Compile,
+                format!("Failed to save main: {error}"),
+            )
+        })?;
+    } else {
+        let mut module_names: Vec<String> = modules
+            .keys()
+            .filter(|name| *name != &root_name)
+            .cloned()
+            .collect();
+        module_names.sort();
 
-    for name in module_names {
-        if requirements.skips_module_import(&name) {
-            continue;
+        for name in module_names {
+            if requirements.skips_module_import(&name) {
+                continue;
+            }
+            if let Some(module) = modules.remove(&name) {
+                let module_declarations = build_module_declarations(Some(&name), &active_modules);
+                compile_analyzed_module(
+                    module,
+                    false,
+                    &module_functions,
+                    &requirements,
+                    &pm,
+                    &known_modules,
+                    module_declarations,
+                )?;
+            }
         }
-        if let Some(module) = modules.remove(&name) {
-            let module_declarations = build_module_declarations(Some(&name), &active_modules);
-            compile_analyzed_module(
-                module,
-                false,
-                &module_functions,
-                &requirements,
-                &pm,
-                &known_modules,
-                module_declarations,
-            )?;
-        }
+
+        let root_module = modules.remove(&root_name).ok_or_else(|| {
+            KiroError::new(
+                errors::ErrorCode::BuildGraphFailed,
+                errors::ErrorPhase::Compile,
+                format!("Analyzed root module '{}' was not found.", root_name),
+            )
+        })?;
+        let root_module_declarations = build_module_declarations(None, &active_modules);
+        compile_analyzed_module(
+            root_module,
+            true,
+            &module_functions,
+            &requirements,
+            &pm,
+            &known_modules,
+            root_module_declarations,
+        )?;
     }
-
-    let root_module = modules.remove(&root_name).ok_or_else(|| {
-        KiroError::new(
-            errors::ErrorCode::BuildGraphFailed,
-            errors::ErrorPhase::Compile,
-            format!("Analyzed root module '{}' was not found.", root_name),
-        )
-    })?;
-    let root_module_declarations = build_module_declarations(None, &active_modules);
-    compile_analyzed_module(
-        root_module,
-        true,
-        &module_functions,
-        &requirements,
-        &pm,
-        &known_modules,
-        root_module_declarations,
-    )?;
 
     if let Err(e) = pm.save_header(&header) {
         return Err(KiroError::new(

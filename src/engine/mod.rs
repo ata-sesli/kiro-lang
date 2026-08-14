@@ -665,6 +665,9 @@ mod eir_tests {
             .expect("test anchor should be valid");
         let program = EirProgram {
             types: TypeTable::new(),
+            errors: Vec::new(),
+            globals: Vec::new(),
+            host_functions: Vec::new(),
             constants: vec![Constant::Num(7.0)],
             functions: vec![EirFunction {
                 id: FunctionId::new(0),

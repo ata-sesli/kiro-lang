@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 
-use crate::hir::{Effects, FunctionId, SourceAnchor, TypeId};
+use crate::hir::{Effects, FunctionId, HostFunctionId, SemType, SourceAnchor, TypeId};
 
 use super::{
     BlockId, EirFunction, EirProgram, Instruction, InstructionKind, SlotId, Terminator,
@@ -20,10 +20,13 @@ pub struct VerifyError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyErrorKind {
     InvalidFunction(FunctionId),
+    InvalidHostFunction(HostFunctionId),
     InvalidBlock(BlockId),
     InvalidSlot(SlotId),
     InvalidType(TypeId),
     InvalidConstant(super::ConstId),
+    InvalidGlobal(super::GlobalId),
+    InvalidAggregateOperand(SlotId),
     FunctionOrder {
         expected: FunctionId,
         actual: FunctionId,
@@ -94,6 +97,18 @@ impl std::error::Error for VerifyError {}
 
 pub fn verify_program(program: &EirProgram) -> Result<(), Vec<VerifyError>> {
     let mut errors = Vec::new();
+    for (index, function) in program.host_functions.iter().enumerate() {
+        let expected = HostFunctionId::try_from(index).expect("host function index must fit u32");
+        if function.id != expected {
+            errors.push(VerifyError {
+                function: FunctionId::new(0),
+                block: BlockId::new(0),
+                instruction: None,
+                anchor: function.anchor,
+                kind: VerifyErrorKind::InvalidHostFunction(function.id),
+            });
+        }
+    }
     for (index, function) in program.functions.iter().enumerate() {
         let expected = FunctionId::try_from(index).expect("EIR function index must fit u32");
         if function.id != expected {
@@ -243,6 +258,291 @@ fn verify_instruction(
             };
             check_slot_type(function, *dst, source_ty, &location, errors, false);
         }
+        InstructionKind::LoadGlobal { dst, global } => {
+            let Some(global_type) = global_type(program, *global) else {
+                errors.push(location(VerifyErrorKind::InvalidGlobal(*global)));
+                return;
+            };
+            check_slot_type(function, *dst, global_type, &location, errors, false);
+        }
+        InstructionKind::MoveGlobal { dst, global } => {
+            let Some(global_type) = global_type(program, *global) else {
+                errors.push(location(VerifyErrorKind::InvalidGlobal(*global)));
+                return;
+            };
+            check_slot_type(function, *dst, global_type, &location, errors, false);
+        }
+        InstructionKind::StoreGlobal { global, src } => {
+            let Some(global_type) = global_type(program, *global) else {
+                errors.push(location(VerifyErrorKind::InvalidGlobal(*global)));
+                return;
+            };
+            check_slot_type(function, *src, global_type, &location, errors, false);
+        }
+        InstructionKind::MakeError { dst, error } => {
+            let Some(destination_type) = slot_type(function, *dst, &location, errors) else {
+                return;
+            };
+            if program.types.get(destination_type) != Some(&SemType::Error(*error)) {
+                errors.push(location(VerifyErrorKind::InvalidAggregateOperand(*dst)));
+            }
+        }
+        InstructionKind::MakeFunction {
+            dst,
+            function: callee,
+        } => {
+            let Some(callee) = program.function(*callee) else {
+                errors.push(location(VerifyErrorKind::InvalidFunction(*callee)));
+                return;
+            };
+            check_function_value_type(
+                program,
+                function,
+                *dst,
+                &callee.signature,
+                &location,
+                errors,
+            );
+        }
+        InstructionKind::MakeHostFunction {
+            dst,
+            function: callee,
+        } => {
+            let Some(callee) = program
+                .host_functions
+                .get(usize::try_from(*callee).unwrap_or(usize::MAX))
+            else {
+                errors.push(location(VerifyErrorKind::InvalidHostFunction(*callee)));
+                return;
+            };
+            check_function_value_type(
+                program,
+                function,
+                *dst,
+                &callee.signature,
+                &location,
+                errors,
+            );
+        }
+        InstructionKind::IsError { dst, value }
+        | InstructionKind::ErrorMatches { dst, value, .. }
+        | InstructionKind::IsTruthy { dst, value } => {
+            slot_type(function, *value, &location, errors);
+            check_slot_type(function, *dst, TypeId::BOOL, &location, errors, false);
+        }
+        InstructionKind::Check { condition, message } => {
+            check_slot_type(function, *condition, TypeId::BOOL, &location, errors, false);
+            if let Some(message) = message
+                && !matches!(
+                    constant_at(program, *message),
+                    Some(super::Constant::Str(_))
+                )
+            {
+                errors.push(location(VerifyErrorKind::InvalidConstant(*message)));
+            }
+            if !function.signature.effects().contains(Effects::MAY_FAIL) {
+                errors.push(location(VerifyErrorKind::ThrowWithoutEffect));
+            }
+        }
+        InstructionKind::MakeAddress { dst } => {
+            let destination_type = slot_type(function, *dst, &location, errors);
+            if !destination_type
+                .and_then(|ty| program.types.get(ty))
+                .is_some_and(|ty| matches!(ty, SemType::Address(_)))
+            {
+                errors.push(location(VerifyErrorKind::InvalidAggregateOperand(*dst)));
+            }
+        }
+        InstructionKind::MakeRef { dst, value } => {
+            let Some(destination_type) = slot_type(function, *dst, &location, errors) else {
+                return;
+            };
+            let Some(SemType::Address(inner)) = program.types.get(destination_type) else {
+                errors.push(location(VerifyErrorKind::InvalidAggregateOperand(*dst)));
+                return;
+            };
+            check_slot_type(function, *value, *inner, &location, errors, false);
+        }
+        InstructionKind::Deref { dst, address } => {
+            let Some(address_type) = slot_type(function, *address, &location, errors) else {
+                return;
+            };
+            let Some(SemType::Address(inner)) = program.types.get(address_type) else {
+                errors.push(location(VerifyErrorKind::InvalidAggregateOperand(*address)));
+                return;
+            };
+            check_slot_type(function, *dst, *inner, &location, errors, false);
+        }
+        InstructionKind::StoreDeref { address, src } => {
+            let Some(address_type) = slot_type(function, *address, &location, errors) else {
+                return;
+            };
+            let Some(SemType::Address(inner)) = program.types.get(address_type) else {
+                errors.push(location(VerifyErrorKind::InvalidAggregateOperand(*address)));
+                return;
+            };
+            check_slot_type(function, *src, *inner, &location, errors, false);
+        }
+        InstructionKind::MakeList { dst, items } => {
+            let Some(destination_type) = slot_type(function, *dst, &location, errors) else {
+                return;
+            };
+            let Some(SemType::List(item_type)) = program.types.get(destination_type) else {
+                errors.push(location(VerifyErrorKind::InvalidAggregateOperand(*dst)));
+                return;
+            };
+            for item in items {
+                check_slot_type(function, *item, *item_type, &location, errors, false);
+            }
+        }
+        InstructionKind::MakeMap { dst, entries } => {
+            let Some(destination_type) = slot_type(function, *dst, &location, errors) else {
+                return;
+            };
+            let Some(SemType::Map(key_type, value_type)) = program.types.get(destination_type)
+            else {
+                errors.push(location(VerifyErrorKind::InvalidAggregateOperand(*dst)));
+                return;
+            };
+            for (key, value) in entries {
+                check_slot_type(function, *key, *key_type, &location, errors, false);
+                check_slot_type(function, *value, *value_type, &location, errors, false);
+            }
+        }
+        InstructionKind::MakeStruct {
+            dst,
+            structure,
+            fields,
+        } => {
+            let Some(destination_type) = slot_type(function, *dst, &location, errors) else {
+                return;
+            };
+            if program.types.get(destination_type) != Some(&SemType::Struct(*structure)) {
+                errors.push(location(VerifyErrorKind::InvalidAggregateOperand(*dst)));
+            }
+            for (_, value) in fields {
+                slot_type(function, *value, &location, errors);
+            }
+        }
+        InstructionKind::GetField { dst, target, .. } => {
+            let target_type = slot_type(function, *target, &location, errors);
+            slot_type(function, *dst, &location, errors);
+            if !target_type
+                .and_then(|ty| program.types.get(ty))
+                .is_some_and(|ty| matches!(ty, SemType::Struct(_)))
+            {
+                errors.push(location(VerifyErrorKind::InvalidAggregateOperand(*target)));
+            }
+        }
+        InstructionKind::SetField {
+            target,
+            fields,
+            src,
+        } => {
+            let target_type = slot_type(function, *target, &location, errors);
+            slot_type(function, *src, &location, errors);
+            if fields.is_empty()
+                || !target_type
+                    .and_then(|ty| program.types.get(ty))
+                    .is_some_and(|ty| matches!(ty, SemType::Struct(_)))
+            {
+                errors.push(location(VerifyErrorKind::InvalidAggregateOperand(*target)));
+            }
+        }
+        InstructionKind::GetIndex {
+            dst,
+            collection,
+            key,
+        } => {
+            let Some(collection_type) = slot_type(function, *collection, &location, errors) else {
+                return;
+            };
+            match program.types.get(collection_type) {
+                Some(SemType::List(item_type)) => {
+                    check_slot_type(function, *key, TypeId::NUM, &location, errors, false);
+                    check_slot_type(function, *dst, *item_type, &location, errors, false);
+                }
+                Some(SemType::Map(key_type, value_type)) => {
+                    check_slot_type(function, *key, *key_type, &location, errors, false);
+                    check_slot_type(function, *dst, *value_type, &location, errors, false);
+                }
+                _ => errors.push(location(VerifyErrorKind::InvalidAggregateOperand(
+                    *collection,
+                ))),
+            }
+        }
+        InstructionKind::Push { collection, value } => {
+            let Some(collection_type) = slot_type(function, *collection, &location, errors) else {
+                return;
+            };
+            if let Some(SemType::List(item_type)) = program.types.get(collection_type) {
+                check_slot_type(function, *value, *item_type, &location, errors, false);
+            } else {
+                errors.push(location(VerifyErrorKind::InvalidAggregateOperand(
+                    *collection,
+                )));
+            }
+        }
+        InstructionKind::Len { dst, collection } => {
+            check_slot_type(function, *dst, TypeId::NUM, &location, errors, false);
+            let collection_type = slot_type(function, *collection, &location, errors);
+            if !collection_type
+                .and_then(|ty| program.types.get(ty))
+                .is_some_and(|ty| {
+                    matches!(ty, SemType::Str | SemType::List(_) | SemType::Map(_, _))
+                })
+            {
+                errors.push(location(VerifyErrorKind::InvalidAggregateOperand(
+                    *collection,
+                )));
+            }
+        }
+        InstructionKind::MakeRange { dst, start, end } => {
+            check_slot_type(function, *start, TypeId::NUM, &location, errors, false);
+            check_slot_type(function, *end, TypeId::NUM, &location, errors, false);
+            let ty = slot_type(function, *dst, &location, errors);
+            if !ty
+                .and_then(|ty| program.types.get(ty))
+                .is_some_and(|ty| *ty == SemType::Range)
+            {
+                errors.push(location(VerifyErrorKind::InvalidAggregateOperand(*dst)));
+            }
+        }
+        InstructionKind::IterInit { dst, iterable } => {
+            check_slot_type(function, *dst, TypeId::NUM, &location, errors, false);
+            check_iterable(program, function, *iterable, &location, errors);
+        }
+        InstructionKind::IterHasNext {
+            dst,
+            iterable,
+            index,
+        } => {
+            check_slot_type(function, *dst, TypeId::BOOL, &location, errors, false);
+            check_slot_type(function, *index, TypeId::NUM, &location, errors, false);
+            check_iterable(program, function, *iterable, &location, errors);
+        }
+        InstructionKind::IterGet {
+            dst,
+            iterable,
+            index,
+        } => {
+            check_slot_type(function, *index, TypeId::NUM, &location, errors, false);
+            let Some(ty) = slot_type(function, *iterable, &location, errors) else {
+                return;
+            };
+            let item = match program.types.get(ty) {
+                Some(SemType::Range) => TypeId::NUM,
+                Some(SemType::List(inner)) => *inner,
+                Some(SemType::Str) => TypeId::STR,
+                _ => {
+                    errors.push(location(VerifyErrorKind::InvalidAggregateOperand(
+                        *iterable,
+                    )));
+                    return;
+                }
+            };
+            check_slot_type(function, *dst, item, &location, errors, false);
+        }
         InstructionKind::AddNum { dst, lhs, rhs }
         | InstructionKind::SubNum { dst, lhs, rhs }
         | InstructionKind::MulNum { dst, lhs, rhs }
@@ -371,6 +671,145 @@ fn verify_instruction(
                 }));
             }
         }
+        InstructionKind::CallHost {
+            dst,
+            function: callee,
+            args,
+        } => {
+            let Some(callee) = program
+                .host_functions
+                .get(usize::try_from(*callee).unwrap_or(usize::MAX))
+            else {
+                errors.push(location(VerifyErrorKind::InvalidHostFunction(*callee)));
+                return;
+            };
+            check_call_signature(function, *dst, args, &callee.signature, &location, errors);
+        }
+        InstructionKind::CallIndirect { dst, callee, args } => {
+            let Some(ty) = slot_type(function, *callee, &location, errors) else {
+                return;
+            };
+            let Some(SemType::Function {
+                params,
+                return_type,
+            }) = program.types.get(ty)
+            else {
+                errors.push(location(VerifyErrorKind::InvalidAggregateOperand(*callee)));
+                return;
+            };
+            let signature = crate::hir::Signature::new(params.clone(), *return_type, Effects::NONE);
+            check_call_signature(function, *dst, args, &signature, &location, errors);
+        }
+        InstructionKind::MakePipe { dst, .. } => {
+            let ty = slot_type(function, *dst, &location, errors);
+            if !ty
+                .and_then(|ty| program.types.get(ty))
+                .is_some_and(|ty| matches!(ty, SemType::Pipe(_)))
+            {
+                errors.push(location(VerifyErrorKind::InvalidAggregateOperand(*dst)));
+            }
+        }
+        InstructionKind::Give { channel, value } => {
+            let Some(ty) = slot_type(function, *channel, &location, errors) else {
+                return;
+            };
+            if let Some(SemType::Pipe(inner)) = program.types.get(ty) {
+                check_slot_type(function, *value, *inner, &location, errors, false);
+            } else {
+                errors.push(location(VerifyErrorKind::InvalidAggregateOperand(*channel)));
+            }
+        }
+        InstructionKind::Take { dst, channel } => {
+            let Some(ty) = slot_type(function, *channel, &location, errors) else {
+                return;
+            };
+            if let Some(SemType::Pipe(inner)) = program.types.get(ty) {
+                check_slot_type(function, *dst, *inner, &location, errors, false);
+            } else {
+                errors.push(location(VerifyErrorKind::InvalidAggregateOperand(*channel)));
+            }
+        }
+        InstructionKind::Close { channel } => {
+            let ty = slot_type(function, *channel, &location, errors);
+            if !ty
+                .and_then(|ty| program.types.get(ty))
+                .is_some_and(|ty| matches!(ty, SemType::Pipe(_)))
+            {
+                errors.push(location(VerifyErrorKind::InvalidAggregateOperand(*channel)));
+            }
+        }
+        InstructionKind::Rest => {}
+        InstructionKind::Spawn {
+            function: callee,
+            args,
+        } => {
+            let Some(callee) = program.function(*callee) else {
+                errors.push(location(VerifyErrorKind::InvalidFunction(*callee)));
+                return;
+            };
+            check_call_signature(function, None, args, &callee.signature, &location, errors);
+        }
+    }
+}
+
+fn check_iterable(
+    program: &EirProgram,
+    function: &EirFunction,
+    slot: SlotId,
+    location: &impl Fn(VerifyErrorKind) -> VerifyError,
+    errors: &mut Vec<VerifyError>,
+) {
+    let ty = slot_type(function, slot, location, errors);
+    if !ty
+        .and_then(|ty| program.types.get(ty))
+        .is_some_and(|ty| matches!(ty, SemType::Range | SemType::List(_) | SemType::Str))
+    {
+        errors.push(location(VerifyErrorKind::InvalidAggregateOperand(slot)));
+    }
+}
+
+fn check_function_value_type(
+    program: &EirProgram,
+    owner: &EirFunction,
+    slot: SlotId,
+    signature: &crate::hir::Signature,
+    location: &impl Fn(VerifyErrorKind) -> VerifyError,
+    errors: &mut Vec<VerifyError>,
+) {
+    let Some(ty) = slot_type(owner, slot, location, errors) else {
+        return;
+    };
+    let expected = SemType::Function {
+        params: signature.params().into(),
+        return_type: signature.return_type(),
+    };
+    if program.types.get(ty) != Some(&expected) {
+        errors.push(location(VerifyErrorKind::InvalidAggregateOperand(slot)));
+    }
+}
+
+fn check_call_signature(
+    owner: &EirFunction,
+    dst: Option<SlotId>,
+    args: &[SlotId],
+    signature: &crate::hir::Signature,
+    location: &impl Fn(VerifyErrorKind) -> VerifyError,
+    errors: &mut Vec<VerifyError>,
+) {
+    for (argument, expected) in args.iter().zip(signature.params()) {
+        if *expected != TypeId::UNKNOWN {
+            check_slot_type(owner, *argument, *expected, location, errors, false);
+        }
+    }
+    match (signature.return_type(), dst) {
+        (TypeId::VOID, None) => {}
+        (TypeId::VOID, Some(slot)) => {
+            errors.push(location(VerifyErrorKind::InvalidAggregateOperand(slot)))
+        }
+        (return_type, Some(slot)) => {
+            check_slot_type(owner, slot, return_type, location, errors, false)
+        }
+        (_, None) => {}
     }
 }
 
@@ -405,7 +844,19 @@ fn verify_terminator(
                 errors.push(location(VerifyErrorKind::UnexpectedReturnValue))
             }
             (expected, Some(slot)) => {
-                check_slot_type(function, slot, expected, &location, errors, false)
+                let Some(actual) = slot_type(function, slot, &location, errors) else {
+                    return;
+                };
+                let returns_declared_error =
+                    function.signature.effects().contains(Effects::MAY_FAIL)
+                        && matches!(_program.types.get(actual), Some(SemType::Error(_)));
+                if actual != expected && !returns_declared_error {
+                    errors.push(location(VerifyErrorKind::SlotType {
+                        slot,
+                        expected,
+                        actual,
+                    }));
+                }
             }
             (expected, None) => {
                 errors.push(location(VerifyErrorKind::MissingReturnValue(expected)))
@@ -642,6 +1093,11 @@ fn check_initialized(
 fn constant_at(program: &EirProgram, id: super::ConstId) -> Option<&super::Constant> {
     let index = usize::try_from(id).ok()?;
     program.constants.get(index)
+}
+
+fn global_type(program: &EirProgram, id: super::GlobalId) -> Option<TypeId> {
+    let index = usize::try_from(id).ok()?;
+    program.globals.get(index).copied()
 }
 
 fn terminator_targets(terminator: &TerminatorKind) -> Vec<BlockId> {

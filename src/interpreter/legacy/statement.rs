@@ -416,7 +416,7 @@ impl Interpreter {
                 let chan = self.eval_expr(channel_expr)?;
                 let val = self.eval_expr(value_expr)?;
 
-                if let RuntimeVal::Pipe(tx, _) = chan {
+                if let RuntimeVal::Pipe(tx, _, _) = chan {
                     match tx {
                         crate::interpreter::values::PipeSender::Unbounded(tx) => tx
                             .send(val)

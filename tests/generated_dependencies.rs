@@ -413,7 +413,7 @@ io.print("hello")"#,
 }
 
 #[test]
-fn generated_anyhow_is_kept_when_error_values_need_it() {
+fn eir_error_values_do_not_need_anyhow() {
     let (cargo_toml, main_rs) = build_source(
         "error_def",
         r#"
@@ -426,13 +426,13 @@ io.print("ok")
     );
 
     assert!(
-        cargo_toml.contains("anyhow"),
-        "error definitions still need anyhow in generated dependencies:\n{}",
+        !cargo_toml.contains("anyhow"),
+        "EIR error IDs should not need anyhow in generated dependencies:\n{}",
         cargo_toml
     );
     assert!(
-        main_rs.contains("anyhow::"),
-        "error definitions should still generate anyhow usage:\n{}",
+        main_rs.contains("\"Bad\" => __KiroValue::Error("),
+        "error definitions should generate the host-error-to-EIR mapping:\n{}",
         main_rs
     );
 }
@@ -596,13 +596,13 @@ main()
         cargo_toml
     );
     assert!(
-        main_rs.contains("use async_channel;"),
-        "pipe script should import async_channel:\n{}",
+        main_rs.contains("async_channel::"),
+        "pipe script should use async_channel:\n{}",
         main_rs
     );
     assert!(
-        main_rs.contains("struct KiroPipe"),
-        "pipe script should define KiroPipe:\n{}",
+        main_rs.contains("struct __KiroPipe"),
+        "pipe script should define the EIR pipe value:\n{}",
         main_rs
     );
 }
@@ -626,19 +626,19 @@ io.write("done")
         cargo_toml
     );
     assert!(
-        main_rs.contains("println!(\"{}\", (42.0).clone());"),
+        main_rs.contains("println!(\"{}\", __kiro_display"),
         "io.print should lower to stdout newline display:\n{}",
         main_rs
     );
     assert!(
-        main_rs.contains("print!(\"{}\", (String::from(\"done\")).clone());"),
+        main_rs.contains("print!(\"{}\", __kiro_display"),
         "io.write should lower to stdout display without newline:\n{}",
         main_rs
     );
 }
 
 #[test]
-fn pipe_type_only_enables_async_channel_and_kiro_pipe() {
+fn unused_pipe_type_does_not_enable_async_channel() {
     let (cargo_toml, main_rs) = build_source(
         "pipe_type",
         r#"
@@ -657,13 +657,13 @@ main()
     );
 
     assert!(
-        cargo_toml.contains("async-channel"),
-        "pipe type should depend on async-channel:\n{}",
+        !cargo_toml.contains("async-channel"),
+        "a type-erased unused pipe parameter should not need async-channel:\n{}",
         cargo_toml
     );
     assert!(
-        main_rs.contains("KiroPipe<f64>"),
-        "pipe type should compile to KiroPipe<f64>:\n{}",
+        !main_rs.contains("struct __KiroPipe"),
+        "a type-erased unused pipe parameter should not emit pipe storage:\n{}",
         main_rs
     );
 }

@@ -4,9 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use kiro_lang::analysis::{SourceOverlays, analyze_path_with_info};
 use kiro_lang::eir::{
-    BasicBlock, BlockId, EirFunction, EirProgram, Instruction, InstructionKind, LowerErrorKind,
-    SlotId, Terminator, TerminatorKind, VerifyErrorKind, lower_program, print_program,
-    verify_program,
+    BasicBlock, BlockId, EirFunction, EirProgram, Instruction, InstructionKind, SlotId, Terminator,
+    TerminatorKind, VerifyErrorKind, lower_program, print_program, verify_program,
 };
 
 fn analyze_main(source: &str) -> kiro_lang::analysis::AnalysisResult {
@@ -48,6 +47,9 @@ fn function(
 fn verifier_accepts_typed_straight_line_function_and_printer_is_deterministic() {
     let program = EirProgram {
         types: TypeTable::new(),
+        errors: Vec::new(),
+        globals: Vec::new(),
+        host_functions: Vec::new(),
         constants: Vec::new(),
         functions: vec![function(
             0,
@@ -99,6 +101,9 @@ module_initializers:
 fn verifier_reports_typed_instruction_location_and_anchor() {
     let program = EirProgram {
         types: TypeTable::new(),
+        errors: Vec::new(),
+        globals: Vec::new(),
+        host_functions: Vec::new(),
         constants: Vec::new(),
         functions: vec![function(
             0,
@@ -143,6 +148,9 @@ fn verifier_reports_typed_instruction_location_and_anchor() {
 fn verifier_rejects_uninitialized_reads_and_invalid_branch_targets() {
     let program = EirProgram {
         types: TypeTable::new(),
+        errors: Vec::new(),
+        globals: Vec::new(),
+        host_functions: Vec::new(),
         constants: Vec::new(),
         functions: vec![function(
             0,
@@ -223,6 +231,9 @@ fn verifier_rejects_impure_direct_call_from_pure_function() {
     );
     let program = EirProgram {
         types: TypeTable::new(),
+        errors: Vec::new(),
+        globals: Vec::new(),
+        host_functions: Vec::new(),
         constants: Vec::new(),
         functions: vec![callee, caller],
         module_initializers: Vec::new(),
@@ -239,6 +250,9 @@ fn verifier_rejects_impure_direct_call_from_pure_function() {
 fn verifier_rejects_reading_a_slot_after_it_is_moved() {
     let program = EirProgram {
         types: TypeTable::new(),
+        errors: Vec::new(),
+        globals: Vec::new(),
+        host_functions: Vec::new(),
         constants: Vec::new(),
         functions: vec![function(
             0,
@@ -309,6 +323,9 @@ fn verifier_rejects_direct_calls_with_unreported_effects() {
     );
     let program = EirProgram {
         types: TypeTable::new(),
+        errors: Vec::new(),
+        globals: Vec::new(),
+        host_functions: Vec::new(),
         constants: Vec::new(),
         functions: vec![callee, caller],
         module_initializers: Vec::new(),
@@ -325,6 +342,9 @@ fn verifier_rejects_direct_calls_with_unreported_effects() {
 fn verifier_rejects_invalid_signature_return_type() {
     let program = EirProgram {
         types: TypeTable::new(),
+        errors: Vec::new(),
+        globals: Vec::new(),
+        host_functions: Vec::new(),
         constants: Vec::new(),
         functions: vec![function(
             0,
@@ -385,7 +405,16 @@ fn main() -> num {
                 } if function == FunctionId::new(0)
             ))
     );
-    assert!(print_program(&program).contains("fn f2 main::$init() -> t1 effects=NONE"));
+    let initializer_effects = program.functions[2].signature.effects();
+    for effect in [
+        kiro_lang::hir::Effects::MAY_FAIL,
+        kiro_lang::hir::Effects::MAY_BLOCK,
+        kiro_lang::hir::Effects::MAY_SPAWN,
+        kiro_lang::hir::Effects::HOST_CALL,
+        kiro_lang::hir::Effects::INDIRECT_CALL,
+    ] {
+        assert!(initializer_effects.contains(effect));
+    }
 }
 
 #[test]
@@ -452,7 +481,7 @@ fn choose(flag: bool) -> num {
 }
 
 #[test]
-fn lowering_rejects_unsupported_hir_without_an_implicit_fallback() {
+fn lowering_emits_explicit_aggregate_instructions() {
     let analysis = analyze_main(
         r#"
 fn make() -> list num {
@@ -461,9 +490,12 @@ fn make() -> list num {
 "#,
     );
 
-    let error = lower_program(&analysis.hir).expect_err("list construction is not in this slice");
-    assert!(matches!(
-        error.kind,
-        LowerErrorKind::Unsupported { operation } if operation == "list initialization"
-    ));
+    let program = lower_program(&analysis.hir).expect("list construction should lower explicitly");
+    verify_program(&program).expect("aggregate EIR should verify");
+    assert!(
+        program.functions[0].blocks[0]
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction.kind, InstructionKind::MakeList { .. }))
+    );
 }

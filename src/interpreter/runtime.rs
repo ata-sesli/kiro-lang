@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -470,7 +471,7 @@ impl SessionRuntime {
                 let channel = self.eval_expr(channel)?;
                 let value = self.eval_expr(value)?;
                 match channel {
-                    RuntimeVal::Pipe(sender, _) => {
+                    RuntimeVal::Pipe(sender, _, _) => {
                         match sender {
                             PipeSender::Unbounded(tx) => tx.send(value).map_err(|_| {
                                 self.record_runtime_site(
@@ -774,12 +775,14 @@ impl SessionRuntime {
                     Ok(RuntimeVal::Pipe(
                         PipeSender::Bounded(tx),
                         Arc::new(Mutex::new(rx)),
+                        Arc::new(AtomicBool::new(false)),
                     ))
                 } else {
                     let (tx, rx) = mpsc::channel();
                     Ok(RuntimeVal::Pipe(
                         PipeSender::Unbounded(tx),
                         Arc::new(Mutex::new(rx)),
+                        Arc::new(AtomicBool::new(false)),
                     ))
                 }
             }
@@ -788,7 +791,7 @@ impl SessionRuntime {
                     return Err("Pure Function Error: 'take' is forbidden.".to_string());
                 }
                 match self.eval_expr(*target)? {
-                    RuntimeVal::Pipe(_, rx) => {
+                    RuntimeVal::Pipe(_, rx, _) => {
                         let rx = rx.lock().unwrap();
                         rx.recv().map_err(|_| {
                             self.record_runtime_site(

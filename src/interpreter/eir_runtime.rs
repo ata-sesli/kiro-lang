@@ -1,5 +1,10 @@
+use std::collections::HashMap;
 use std::fmt;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use crate::eir::{
     BlockId, Constant, EirProgram, Instruction, InstructionKind, SlotId, Terminator,
@@ -8,7 +13,9 @@ use crate::eir::{
 use crate::hir::{FunctionId, SemType, SourceAnchor, SourceId, TypeId};
 
 use super::values::RuntimeVal;
-use super::{CancellationToken, InterpreterLimits};
+use super::{
+    CancellationToken, HostCallCtx, HostFnHandler, HostMode, HostRegistry, InterpreterLimits,
+};
 
 #[derive(Debug)]
 pub struct EirRuntimeError {
@@ -29,6 +36,27 @@ pub enum EirRuntimeErrorKind {
         actual: &'static str,
     },
     UninitializedSlot(SlotId),
+    UninitializedGlobal(crate::eir::GlobalId),
+    EmptyAddress,
+    PoisonedAddress,
+    MissingField(crate::hir::FieldId),
+    ListIndexOutOfBounds {
+        index: usize,
+        length: usize,
+    },
+    MapKeyNotFound(String),
+    CheckFailed(String),
+    InvalidCallable(String),
+    HostCallDenied {
+        module: String,
+        function: String,
+    },
+    HostFunctionNotRegistered {
+        module: String,
+        function: String,
+    },
+    HostCallFailed(String),
+    PipeClosed,
     StepLimitExceeded {
         steps: u64,
         limit: u64,
@@ -74,6 +102,44 @@ impl fmt::Display for EirRuntimeError {
             EirRuntimeErrorKind::UninitializedSlot(slot) => {
                 write!(formatter, "read uninitialized slot s{}", slot.raw())
             }
+            EirRuntimeErrorKind::UninitializedGlobal(global) => {
+                write!(formatter, "read uninitialized global g{}", global.raw())
+            }
+            EirRuntimeErrorKind::EmptyAddress => {
+                formatter.write_str("dereferenced an empty address")
+            }
+            EirRuntimeErrorKind::PoisonedAddress => {
+                formatter.write_str("address storage is poisoned")
+            }
+            EirRuntimeErrorKind::MissingField(field) => {
+                write!(formatter, "missing struct field field{}", field.raw())
+            }
+            EirRuntimeErrorKind::ListIndexOutOfBounds { index, length } => {
+                write!(
+                    formatter,
+                    "list index {index} out of bounds for length {length}"
+                )
+            }
+            EirRuntimeErrorKind::MapKeyNotFound(key) => {
+                write!(formatter, "map key not found: {key}")
+            }
+            EirRuntimeErrorKind::CheckFailed(message) => {
+                write!(formatter, "check failed: {message}")
+            }
+            EirRuntimeErrorKind::InvalidCallable(value) => {
+                write!(formatter, "invalid callable {value}")
+            }
+            EirRuntimeErrorKind::HostCallDenied { module, function } => {
+                write!(formatter, "host call denied for '{module}.{function}'")
+            }
+            EirRuntimeErrorKind::HostFunctionNotRegistered { module, function } => {
+                write!(
+                    formatter,
+                    "host function '{module}.{function}' is not registered"
+                )
+            }
+            EirRuntimeErrorKind::HostCallFailed(message) => formatter.write_str(message),
+            EirRuntimeErrorKind::PipeClosed => formatter.write_str("pipe is closed"),
             EirRuntimeErrorKind::StepLimitExceeded { steps, limit } => {
                 write!(formatter, "step limit exceeded ({steps} > {limit})")
             }
@@ -108,10 +174,14 @@ struct Frame {
 pub struct EirRuntime<'program> {
     program: &'program EirProgram,
     frames: Vec<Frame>,
+    globals: Vec<Option<RuntimeVal>>,
     limits: InterpreterLimits,
     cancellation: Option<CancellationToken>,
     step_count: u64,
     started_at: Option<Instant>,
+    host_mode: HostMode,
+    host_registry: HostRegistry,
+    spawned: Vec<JoinHandle<Result<RuntimeVal, EirRuntimeError>>>,
 }
 
 impl<'program> EirRuntime<'program> {
@@ -128,10 +198,14 @@ impl<'program> EirRuntime<'program> {
         Ok(Self {
             program,
             frames: Vec::new(),
+            globals: vec![None; program.globals.len()],
             limits: InterpreterLimits::default(),
             cancellation: None,
             step_count: 0,
             started_at: None,
+            host_mode: HostMode::default(),
+            host_registry: HostRegistry::default(),
+            spawned: Vec::new(),
         })
     }
 
@@ -141,6 +215,19 @@ impl<'program> EirRuntime<'program> {
 
     pub fn set_cancellation_token(&mut self, cancellation: CancellationToken) {
         self.cancellation = Some(cancellation);
+    }
+
+    pub fn set_host_mode(&mut self, mode: HostMode) {
+        self.host_mode = mode;
+    }
+
+    pub fn register_host_fn(
+        &mut self,
+        module: impl Into<String>,
+        name: impl Into<String>,
+        handler: HostFnHandler,
+    ) {
+        self.host_registry.register(module, name, handler);
     }
 
     pub const fn step_count(&self) -> u64 {
@@ -243,7 +330,7 @@ impl<'program> EirRuntime<'program> {
             self.tick(anchor)?;
             let action = {
                 let frame = self.frames.last_mut().expect("execution has a root frame");
-                step_frame(self.program, frame)?
+                step_frame(self.program, &mut self.globals, frame)?
             };
             match action {
                 StepAction::Continue => {}
@@ -252,9 +339,31 @@ impl<'program> EirRuntime<'program> {
                     args,
                     destination,
                 } => self.push_frame(function, args, destination, anchor)?,
+                StepAction::HostCall {
+                    function,
+                    args,
+                    destination,
+                } => {
+                    let value = self.call_host(function, args, anchor)?;
+                    if let Some(destination) = destination {
+                        let frame = self.frames.last_mut().expect("host call has caller frame");
+                        write_slot(frame, destination, value, anchor)?;
+                    }
+                }
+                StepAction::Spawn { function, args } => self.spawn(function, args, anchor)?,
                 StepAction::Return(value) => {
                     let completed = self.frames.pop().expect("return has an active frame");
                     let Some(caller) = self.frames.last_mut() else {
+                        for task in self.spawned.drain(..) {
+                            task.join().map_err(|_| {
+                                runtime_error(
+                                    anchor,
+                                    EirRuntimeErrorKind::HostCallFailed(
+                                        "spawned task panicked".to_string(),
+                                    ),
+                                )
+                            })??;
+                        }
                         return Ok(value);
                     };
                     if let Some(destination) = completed.return_destination {
@@ -270,6 +379,97 @@ impl<'program> EirRuntime<'program> {
                 }
             }
         }
+    }
+
+    fn call_host(
+        &self,
+        function: crate::hir::HostFunctionId,
+        args: Vec<RuntimeVal>,
+        anchor: SourceAnchor,
+    ) -> Result<RuntimeVal, EirRuntimeError> {
+        let metadata =
+            &self.program.host_functions[usize::try_from(function).expect("verified host ID")];
+        match self.host_mode {
+            HostMode::Deny => Err(runtime_error(
+                anchor,
+                EirRuntimeErrorKind::HostCallDenied {
+                    module: metadata.module.clone(),
+                    function: metadata.name.clone(),
+                },
+            )),
+            HostMode::Simulate => Ok(mock_value(metadata.signature.return_type(), self.program)),
+            HostMode::Execute => {
+                let handler = self
+                    .host_registry
+                    .get(&metadata.module, &metadata.name)
+                    .ok_or_else(|| {
+                        runtime_error(
+                            anchor,
+                            EirRuntimeErrorKind::HostFunctionNotRegistered {
+                                module: metadata.module.clone(),
+                                function: metadata.name.clone(),
+                            },
+                        )
+                    })?;
+                let args = args
+                    .iter()
+                    .map(RuntimeVal::to_host_runtime)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|message| {
+                        runtime_error(anchor, EirRuntimeErrorKind::HostCallFailed(message))
+                    })?;
+                let value = match handler(
+                    HostCallCtx {
+                        module_name: metadata.module.clone(),
+                        function_name: metadata.name.clone(),
+                        step_count: self.step_count,
+                    },
+                    args,
+                ) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        if let Some(error_id) = self.program.error_id_by_name(&error.name) {
+                            return Ok(RuntimeVal::Error(
+                                format!("error{}", error_id.raw()),
+                                error.message.unwrap_or_default(),
+                            ));
+                        }
+                        return Err(runtime_error(
+                            anchor,
+                            EirRuntimeErrorKind::HostCallFailed(error.to_string()),
+                        ));
+                    }
+                };
+                RuntimeVal::from_host_runtime(value).map_err(|message| {
+                    runtime_error(anchor, EirRuntimeErrorKind::HostCallFailed(message))
+                })
+            }
+        }
+    }
+
+    fn spawn(
+        &mut self,
+        function: FunctionId,
+        args: Vec<RuntimeVal>,
+        anchor: SourceAnchor,
+    ) -> Result<(), EirRuntimeError> {
+        let program = self.program.clone();
+        let limits = self.limits.clone();
+        let cancellation = self.cancellation.clone();
+        let host_mode = self.host_mode;
+        let host_registry = self.host_registry.clone();
+        self.spawned.push(std::thread::spawn(move || {
+            let mut runtime = EirRuntime::new(&program)?;
+            runtime.set_limits(limits);
+            runtime.host_mode = host_mode;
+            runtime.host_registry = host_registry;
+            if let Some(cancellation) = cancellation {
+                runtime.set_cancellation_token(cancellation);
+            }
+            runtime.call_function(function, args)
+        }));
+        let _ = anchor;
+        Ok(())
     }
 
     fn tick(&mut self, anchor: SourceAnchor) -> Result<(), EirRuntimeError> {
@@ -317,18 +517,31 @@ enum StepAction {
         args: Vec<RuntimeVal>,
         destination: Option<SlotId>,
     },
+    HostCall {
+        function: crate::hir::HostFunctionId,
+        args: Vec<RuntimeVal>,
+        destination: Option<SlotId>,
+    },
+    Spawn {
+        function: FunctionId,
+        args: Vec<RuntimeVal>,
+    },
     Return(RuntimeVal),
     Throw(RuntimeVal),
 }
 
-fn step_frame(program: &EirProgram, frame: &mut Frame) -> Result<StepAction, EirRuntimeError> {
+fn step_frame(
+    program: &EirProgram,
+    globals: &mut [Option<RuntimeVal>],
+    frame: &mut Frame,
+) -> Result<StepAction, EirRuntimeError> {
     let function_index = usize::try_from(frame.function).expect("verified function ID fits usize");
     let function = &program.functions[function_index];
     let block_index = usize::try_from(frame.block).expect("verified block ID fits usize");
     let block = &function.blocks[block_index];
     if let Some(instruction) = block.instructions.get(frame.instruction) {
         frame.instruction += 1;
-        execute_instruction(program, frame, instruction)
+        execute_instruction(program, globals, frame, instruction)
     } else {
         execute_terminator(frame, &block.terminator)
     }
@@ -346,6 +559,7 @@ fn active_anchor(program: &EirProgram, frame: &Frame) -> SourceAnchor {
 
 fn execute_instruction(
     program: &EirProgram,
+    globals: &mut [Option<RuntimeVal>],
     frame: &mut Frame,
     instruction: &Instruction,
 ) -> Result<StepAction, EirRuntimeError> {
@@ -366,6 +580,259 @@ fn execute_instruction(
         }
         InstructionKind::Move { dst, src } => {
             let value = take_slot(frame, *src, anchor)?;
+            write_slot(frame, *dst, value, anchor)?;
+        }
+        InstructionKind::MoveGlobal { dst, global } => {
+            let index = usize::try_from(*global).expect("verified global ID fits usize");
+            let value = globals[index].take().ok_or_else(|| {
+                runtime_error(anchor, EirRuntimeErrorKind::UninitializedGlobal(*global))
+            })?;
+            write_slot(frame, *dst, value, anchor)?;
+        }
+        InstructionKind::LoadGlobal { dst, global } => {
+            let index = usize::try_from(*global).expect("verified global ID fits usize");
+            let value = globals[index].as_ref().cloned().ok_or_else(|| {
+                runtime_error(anchor, EirRuntimeErrorKind::UninitializedGlobal(*global))
+            })?;
+            write_slot(frame, *dst, value, anchor)?;
+        }
+        InstructionKind::StoreGlobal { global, src } => {
+            let index = usize::try_from(*global).expect("verified global ID fits usize");
+            globals[index] = Some(read_slot(frame, *src, anchor)?.clone());
+        }
+        InstructionKind::MakeError { dst, error } => {
+            write_slot(
+                frame,
+                *dst,
+                RuntimeVal::Error(format!("error{}", error.raw()), String::new()),
+                anchor,
+            )?;
+        }
+        InstructionKind::MakeFunction { dst, function } => {
+            write_slot(
+                frame,
+                *dst,
+                RuntimeVal::FunctionRef(format!("f{}", function.raw())),
+                anchor,
+            )?;
+        }
+        InstructionKind::MakeHostFunction { dst, function } => {
+            write_slot(
+                frame,
+                *dst,
+                RuntimeVal::FunctionRef(format!("h{}", function.raw())),
+                anchor,
+            )?;
+        }
+        InstructionKind::IsError { dst, value } => {
+            let value = matches!(read_slot(frame, *value, anchor)?, RuntimeVal::Error(_, _));
+            write_slot(frame, *dst, RuntimeVal::Bool(value), anchor)?;
+        }
+        InstructionKind::ErrorMatches { dst, value, error } => {
+            let expected = format!("error{}", error.raw());
+            let matches = matches!(
+                read_slot(frame, *value, anchor)?,
+                RuntimeVal::Error(actual, _) if actual == &expected
+            );
+            write_slot(frame, *dst, RuntimeVal::Bool(matches), anchor)?;
+        }
+        InstructionKind::IsTruthy { dst, value } => {
+            let value = read_slot(frame, *value, anchor)?.is_truthy();
+            write_slot(frame, *dst, RuntimeVal::Bool(value), anchor)?;
+        }
+        InstructionKind::Check { condition, message } => {
+            if !read_bool(frame, *condition, anchor)? {
+                let message = message
+                    .and_then(|message| {
+                        usize::try_from(message)
+                            .ok()
+                            .and_then(|index| program.constants.get(index))
+                    })
+                    .and_then(|constant| match constant {
+                        Constant::Str(message) => Some(message.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "check failed".to_string());
+                return Err(runtime_error(
+                    anchor,
+                    EirRuntimeErrorKind::CheckFailed(message),
+                ));
+            }
+        }
+        InstructionKind::MakeAddress { dst } => {
+            write_slot(frame, *dst, RuntimeVal::AdrHandle(None), anchor)?;
+        }
+        InstructionKind::MakeRef { dst, value } => {
+            let value = read_slot(frame, *value, anchor)?.clone();
+            write_slot(
+                frame,
+                *dst,
+                RuntimeVal::Pointer(Arc::new(Mutex::new(value))),
+                anchor,
+            )?;
+        }
+        InstructionKind::Deref { dst, address } => {
+            let target = address_target(read_slot(frame, *address, anchor)?, anchor)?;
+            let value = target
+                .lock()
+                .map_err(|_| runtime_error(anchor, EirRuntimeErrorKind::PoisonedAddress))?
+                .clone();
+            write_slot(frame, *dst, value, anchor)?;
+        }
+        InstructionKind::StoreDeref { address, src } => {
+            let value = read_slot(frame, *src, anchor)?.clone();
+            let target = address_target(read_slot(frame, *address, anchor)?, anchor)?;
+            *target
+                .lock()
+                .map_err(|_| runtime_error(anchor, EirRuntimeErrorKind::PoisonedAddress))? = value;
+        }
+        InstructionKind::MakeList { dst, items } => {
+            let values = items
+                .iter()
+                .map(|slot| read_slot(frame, *slot, anchor).cloned())
+                .collect::<Result<Vec<_>, _>>()?;
+            write_slot(frame, *dst, RuntimeVal::List(values), anchor)?;
+        }
+        InstructionKind::MakeMap { dst, entries } => {
+            let mut values = HashMap::with_capacity(entries.len());
+            for (key, value) in entries {
+                let key = map_key(read_slot(frame, *key, anchor)?);
+                let value = read_slot(frame, *value, anchor)?.clone();
+                values.insert(key, value);
+            }
+            write_slot(frame, *dst, RuntimeVal::Map(values), anchor)?;
+        }
+        InstructionKind::MakeStruct {
+            dst,
+            structure,
+            fields,
+        } => {
+            let mut values = HashMap::with_capacity(fields.len());
+            for (field, value) in fields {
+                values.insert(field_key(*field), read_slot(frame, *value, anchor)?.clone());
+            }
+            write_slot(
+                frame,
+                *dst,
+                RuntimeVal::Struct(format!("struct{}", structure.raw()), values),
+                anchor,
+            )?;
+        }
+        InstructionKind::GetField { dst, target, field } => {
+            let RuntimeVal::Struct(_, fields) = read_slot(frame, *target, anchor)? else {
+                return Err(type_mismatch(
+                    anchor,
+                    "struct",
+                    read_slot(frame, *target, anchor)?,
+                ));
+            };
+            let value = fields
+                .get(&field_key(*field))
+                .cloned()
+                .ok_or_else(|| runtime_error(anchor, EirRuntimeErrorKind::MissingField(*field)))?;
+            write_slot(frame, *dst, value, anchor)?;
+        }
+        InstructionKind::SetField {
+            target,
+            fields,
+            src,
+        } => {
+            let value = read_slot(frame, *src, anchor)?.clone();
+            let target = slot_mut(frame, *target, anchor)?;
+            set_field_path(target, fields, value, anchor)?;
+        }
+        InstructionKind::GetIndex {
+            dst,
+            collection,
+            key,
+        } => {
+            let key = read_slot(frame, *key, anchor)?.clone();
+            let value = match read_slot(frame, *collection, anchor)? {
+                RuntimeVal::List(items) => {
+                    let RuntimeVal::Float(index) = key else {
+                        return Err(type_mismatch(anchor, "num", &key));
+                    };
+                    let index = index as usize;
+                    items.get(index).cloned().ok_or_else(|| {
+                        runtime_error(
+                            anchor,
+                            EirRuntimeErrorKind::ListIndexOutOfBounds {
+                                index,
+                                length: items.len(),
+                            },
+                        )
+                    })?
+                }
+                RuntimeVal::Map(entries) => {
+                    let key = map_key(&key);
+                    entries.get(&key).cloned().ok_or_else(|| {
+                        runtime_error(anchor, EirRuntimeErrorKind::MapKeyNotFound(key))
+                    })?
+                }
+                actual => return Err(type_mismatch(anchor, "list or map", actual)),
+            };
+            write_slot(frame, *dst, value, anchor)?;
+        }
+        InstructionKind::Push { collection, value } => {
+            let value = read_slot(frame, *value, anchor)?.clone();
+            match slot_mut(frame, *collection, anchor)? {
+                RuntimeVal::List(items) => items.push(value),
+                actual => return Err(type_mismatch(anchor, "list", actual)),
+            }
+        }
+        InstructionKind::Len { dst, collection } => {
+            let length = match read_slot(frame, *collection, anchor)? {
+                RuntimeVal::String(value) => value.len(),
+                RuntimeVal::List(value) => value.len(),
+                RuntimeVal::Map(value) => value.len(),
+                actual => return Err(type_mismatch(anchor, "str, list, or map", actual)),
+            };
+            write_slot(frame, *dst, RuntimeVal::Float(length as f64), anchor)?;
+        }
+        InstructionKind::MakeRange { dst, start, end } => {
+            let start = read_number(frame, *start, anchor)? as i64;
+            let end = read_number(frame, *end, anchor)? as i64;
+            write_slot(frame, *dst, RuntimeVal::Range(start, end), anchor)?;
+        }
+        InstructionKind::IterInit { dst, iterable } => {
+            let index = match read_slot(frame, *iterable, anchor)? {
+                RuntimeVal::Range(start, _) => *start as f64,
+                RuntimeVal::List(_) | RuntimeVal::String(_) => 0.0,
+                actual => return Err(type_mismatch(anchor, "iterable", actual)),
+            };
+            write_slot(frame, *dst, RuntimeVal::Float(index), anchor)?;
+        }
+        InstructionKind::IterHasNext {
+            dst,
+            iterable,
+            index,
+        } => {
+            let index = read_number(frame, *index, anchor)?;
+            let has_next = match read_slot(frame, *iterable, anchor)? {
+                RuntimeVal::Range(_, end) => index < *end as f64,
+                RuntimeVal::List(items) => index >= 0.0 && (index as usize) < items.len(),
+                RuntimeVal::String(text) => index >= 0.0 && (index as usize) < text.chars().count(),
+                actual => return Err(type_mismatch(anchor, "iterable", actual)),
+            };
+            write_slot(frame, *dst, RuntimeVal::Bool(has_next), anchor)?;
+        }
+        InstructionKind::IterGet {
+            dst,
+            iterable,
+            index,
+        } => {
+            let index = read_number(frame, *index, anchor)?;
+            let value = match read_slot(frame, *iterable, anchor)? {
+                RuntimeVal::Range(_, _) => RuntimeVal::Float(index),
+                RuntimeVal::List(items) => items[index as usize].clone(),
+                RuntimeVal::String(text) => RuntimeVal::String(
+                    text.chars()
+                        .nth(index as usize)
+                        .expect("verified iterator bound")
+                        .to_string(),
+                ),
+                actual => return Err(type_mismatch(anchor, "iterable", actual)),
+            };
             write_slot(frame, *dst, value, anchor)?;
         }
         InstructionKind::AddNum { dst, lhs, rhs } => {
@@ -435,6 +902,136 @@ fn execute_instruction(
                 function: *function,
                 args: values,
                 destination: *dst,
+            });
+        }
+        InstructionKind::CallHost {
+            dst,
+            function,
+            args,
+        } => {
+            let values = args
+                .iter()
+                .map(|slot| read_slot(frame, *slot, anchor).cloned())
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(StepAction::HostCall {
+                function: *function,
+                args: values,
+                destination: *dst,
+            });
+        }
+        InstructionKind::CallIndirect { dst, callee, args } => {
+            let RuntimeVal::FunctionRef(callable) = read_slot(frame, *callee, anchor)? else {
+                return Err(type_mismatch(
+                    anchor,
+                    "function",
+                    read_slot(frame, *callee, anchor)?,
+                ));
+            };
+            let values = args
+                .iter()
+                .map(|slot| read_slot(frame, *slot, anchor).cloned())
+                .collect::<Result<Vec<_>, _>>()?;
+            if let Some(id) = callable
+                .strip_prefix('f')
+                .and_then(|id| id.parse::<u32>().ok())
+            {
+                return Ok(StepAction::Call {
+                    function: FunctionId::new(id),
+                    args: values,
+                    destination: *dst,
+                });
+            }
+            if let Some(id) = callable
+                .strip_prefix('h')
+                .and_then(|id| id.parse::<u32>().ok())
+            {
+                return Ok(StepAction::HostCall {
+                    function: crate::hir::HostFunctionId::new(id),
+                    args: values,
+                    destination: *dst,
+                });
+            }
+            return Err(runtime_error(
+                anchor,
+                EirRuntimeErrorKind::InvalidCallable(callable.clone()),
+            ));
+        }
+        InstructionKind::MakePipe { dst, capacity } => {
+            let value = if let Some(capacity) = capacity {
+                let (sender, receiver) = std::sync::mpsc::sync_channel(*capacity);
+                RuntimeVal::Pipe(
+                    super::values::PipeSender::Bounded(sender),
+                    Arc::new(Mutex::new(receiver)),
+                    Arc::new(AtomicBool::new(false)),
+                )
+            } else {
+                let (sender, receiver) = std::sync::mpsc::channel();
+                RuntimeVal::Pipe(
+                    super::values::PipeSender::Unbounded(sender),
+                    Arc::new(Mutex::new(receiver)),
+                    Arc::new(AtomicBool::new(false)),
+                )
+            };
+            write_slot(frame, *dst, value, anchor)?;
+        }
+        InstructionKind::Give { channel, value } => {
+            let value = read_slot(frame, *value, anchor)?.clone();
+            match read_slot(frame, *channel, anchor)? {
+                RuntimeVal::Pipe(_, _, closed) if closed.load(Ordering::Acquire) => {
+                    return Err(runtime_error(anchor, EirRuntimeErrorKind::PipeClosed));
+                }
+                RuntimeVal::Pipe(super::values::PipeSender::Unbounded(sender), _, _) => {
+                    sender.send(value)
+                }
+                RuntimeVal::Pipe(super::values::PipeSender::Bounded(sender), _, _) => {
+                    sender.send(value)
+                }
+                actual => return Err(type_mismatch(anchor, "pipe", actual)),
+            }
+            .map_err(|_| runtime_error(anchor, EirRuntimeErrorKind::PipeClosed))?;
+        }
+        InstructionKind::Take { dst, channel } => {
+            let (receiver, closed) = match read_slot(frame, *channel, anchor)? {
+                RuntimeVal::Pipe(_, receiver, closed) => (Arc::clone(receiver), Arc::clone(closed)),
+                actual => return Err(type_mismatch(anchor, "pipe", actual)),
+            };
+            let receiver = receiver
+                .lock()
+                .map_err(|_| runtime_error(anchor, EirRuntimeErrorKind::PipeClosed))?;
+            let value = loop {
+                match receiver.recv_timeout(Duration::from_millis(1)) {
+                    Ok(value) => break value,
+                    Err(RecvTimeoutError::Timeout) if closed.load(Ordering::Acquire) => {
+                        return Err(runtime_error(anchor, EirRuntimeErrorKind::PipeClosed));
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => {
+                        return Err(runtime_error(anchor, EirRuntimeErrorKind::PipeClosed));
+                    }
+                }
+            };
+            drop(receiver);
+            write_slot(frame, *dst, value, anchor)?;
+        }
+        InstructionKind::Close { channel } => {
+            let RuntimeVal::Pipe(_, _, closed) = read_slot(frame, *channel, anchor)? else {
+                return Err(type_mismatch(
+                    anchor,
+                    "pipe",
+                    read_slot(frame, *channel, anchor)?,
+                ));
+            };
+            closed.store(true, Ordering::Release);
+        }
+        InstructionKind::Rest => std::thread::yield_now(),
+        InstructionKind::Spawn { function, args } => {
+            let values = args
+                .iter()
+                .map(|slot| read_slot(frame, *slot, anchor).cloned())
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(StepAction::Spawn {
+                function: *function,
+                args: values,
             });
         }
     }
@@ -553,6 +1150,48 @@ fn take_slot(
         .ok_or_else(|| runtime_error(anchor, EirRuntimeErrorKind::UninitializedSlot(slot)))
 }
 
+fn slot_mut(
+    frame: &mut Frame,
+    slot: SlotId,
+    anchor: SourceAnchor,
+) -> Result<&mut RuntimeVal, EirRuntimeError> {
+    let index = usize::try_from(slot).expect("verified slot ID fits usize");
+    frame.slots[index]
+        .as_mut()
+        .ok_or_else(|| runtime_error(anchor, EirRuntimeErrorKind::UninitializedSlot(slot)))
+}
+
+fn set_field_path(
+    target: &mut RuntimeVal,
+    fields: &[crate::hir::FieldId],
+    value: RuntimeVal,
+    anchor: SourceAnchor,
+) -> Result<(), EirRuntimeError> {
+    let Some((field, rest)) = fields.split_first() else {
+        return Err(type_mismatch(anchor, "struct field path", target));
+    };
+    let RuntimeVal::Struct(_, values) = target else {
+        return Err(type_mismatch(anchor, "struct", target));
+    };
+    let target = values
+        .get_mut(&field_key(*field))
+        .ok_or_else(|| runtime_error(anchor, EirRuntimeErrorKind::MissingField(*field)))?;
+    if rest.is_empty() {
+        *target = value;
+        Ok(())
+    } else {
+        set_field_path(target, rest, value, anchor)
+    }
+}
+
+fn field_key(field: crate::hir::FieldId) -> String {
+    format!("field{}", field.raw())
+}
+
+fn map_key(value: &RuntimeVal) -> String {
+    value.to_string()
+}
+
 fn write_slot(
     frame: &mut Frame,
     slot: SlotId,
@@ -570,8 +1209,41 @@ fn value_matches_type(value: &RuntimeVal, ty: TypeId, program: &EirProgram) -> b
         (RuntimeVal::Float(_), Some(SemType::Num))
             | (RuntimeVal::String(_), Some(SemType::Str))
             | (RuntimeVal::Bool(_), Some(SemType::Bool))
+            | (RuntimeVal::Range(_, _), Some(SemType::Range))
             | (RuntimeVal::Void, Some(SemType::Void))
+            | (RuntimeVal::List(_), Some(SemType::List(_)))
+            | (RuntimeVal::Map(_), Some(SemType::Map(_, _)))
+            | (RuntimeVal::Struct(_, _), Some(SemType::Struct(_)))
+            | (RuntimeVal::FunctionRef(_), Some(SemType::Function { .. }))
+            | (RuntimeVal::Pipe(_, _, _), Some(SemType::Pipe(_)))
+            | (RuntimeVal::Pointer(_), Some(SemType::Address(_)))
+            | (RuntimeVal::AdrHandle(_), Some(SemType::Address(_)))
     )
+}
+
+fn mock_value(ty: TypeId, program: &EirProgram) -> RuntimeVal {
+    match program.types.get(ty) {
+        Some(SemType::Num) => RuntimeVal::Float(0.0),
+        Some(SemType::Str) => RuntimeVal::String(String::new()),
+        Some(SemType::Bool) => RuntimeVal::Bool(false),
+        Some(SemType::List(_)) => RuntimeVal::List(Vec::new()),
+        Some(SemType::Map(_, _)) => RuntimeVal::Map(HashMap::new()),
+        _ => RuntimeVal::Void,
+    }
+}
+
+fn address_target(
+    value: &RuntimeVal,
+    anchor: SourceAnchor,
+) -> Result<Arc<Mutex<RuntimeVal>>, EirRuntimeError> {
+    match value {
+        RuntimeVal::Pointer(target) => Ok(Arc::clone(target)),
+        RuntimeVal::AdrHandle(Some(target)) => Ok(Arc::clone(target)),
+        RuntimeVal::AdrHandle(None) => {
+            Err(runtime_error(anchor, EirRuntimeErrorKind::EmptyAddress))
+        }
+        actual => Err(type_mismatch(anchor, "address", actual)),
+    }
 }
 
 fn type_name(ty: TypeId, program: &EirProgram) -> String {
@@ -588,7 +1260,7 @@ const fn runtime_value_name(value: &RuntimeVal) -> &'static str {
         RuntimeVal::Bool(_) => "bool",
         RuntimeVal::Range(_, _) => "range",
         RuntimeVal::Void => "void",
-        RuntimeVal::Pipe(_, _) => "pipe",
+        RuntimeVal::Pipe(_, _, _) => "pipe",
         RuntimeVal::Struct(_, _) => "struct",
         RuntimeVal::List(_) => "list",
         RuntimeVal::Map(_) => "map",

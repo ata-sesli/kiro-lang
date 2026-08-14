@@ -234,6 +234,28 @@ fn predeclare_functions(
                 _ => {}
             }
         }
+        if crate::is_std_io_module_name(input.name) {
+            for name in ["print", "write"] {
+                let key = (input.name.to_string(), name.to_string());
+                if declarations.host_functions.contains_key(&key) {
+                    continue;
+                }
+                let id = HostFunctionId::try_from(symbols.host_functions.len())
+                    .map_err(|error| error.to_string())?;
+                declarations.host_functions.insert(
+                    key,
+                    HostFunctionDecl {
+                        id,
+                        params: vec![TypeId::UNKNOWN],
+                        return_type: TypeId::VOID,
+                        effects: Effects::HOST_CALL,
+                    },
+                );
+                symbols
+                    .host_functions
+                    .push(format!("{}.{}", input.name, name));
+            }
+        }
     }
     Ok(())
 }
@@ -354,6 +376,10 @@ impl<'a> ModuleLowerer<'a> {
 
     fn lower_module(&mut self, id: ModuleId, program: &ast::Program) -> Result<HirModule, String> {
         self.collect_imports(program);
+        self.owner = None;
+        self.next_local = 0;
+        self.scopes = vec![HashMap::new()];
+        let statements = self.lower_statements(&program.statements)?;
         let mut functions = Vec::new();
         let mut host_functions = Vec::new();
         let mut structs = Vec::new();
@@ -367,10 +393,25 @@ impl<'a> ModuleLowerer<'a> {
                 _ => {}
             }
         }
-        self.owner = None;
-        self.next_local = 0;
-        self.scopes = vec![HashMap::new()];
-        let statements = self.lower_statements(&program.statements)?;
+        if crate::is_std_io_module_name(self.module) {
+            for name in ["print", "write"] {
+                let declaration = self.declarations.host_functions
+                    [&(self.module.to_string(), name.to_string())]
+                    .clone();
+                host_functions.push(HirHostFunction {
+                    id: declaration.id,
+                    name: name.to_string(),
+                    params: Vec::new(),
+                    signature: Signature::new(
+                        declaration.params,
+                        declaration.return_type,
+                        declaration.effects,
+                    ),
+                    anchor: self.anchor((0, 0)),
+                });
+            }
+            host_functions.sort_by_key(|function| function.id);
+        }
         Ok(HirModule::new(
             id,
             self.module.to_string(),
@@ -399,8 +440,11 @@ impl<'a> ModuleLowerer<'a> {
         let name = grammar::function_name(&def.name).to_string();
         let declaration =
             self.declarations.functions[&(self.module.to_string(), name.clone())].clone();
-        let saved_scopes = std::mem::replace(&mut self.scopes, vec![HashMap::new()]);
-        let saved_next_local = std::mem::replace(&mut self.next_local, 0);
+        let global_scope = self.scopes.first().cloned().unwrap_or_default();
+        let first_function_local = u32::try_from(global_scope.len())
+            .map_err(|_| "module global ID space exhausted".to_string())?;
+        let saved_scopes = std::mem::replace(&mut self.scopes, vec![global_scope, HashMap::new()]);
+        let saved_next_local = std::mem::replace(&mut self.next_local, first_function_local);
         let saved_owner = self.owner.replace(declaration.id);
         let saved_effects = std::mem::replace(&mut self.effects, declaration.effects);
 
@@ -567,6 +611,9 @@ impl<'a> ModuleLowerer<'a> {
                     .map(|clauses| self.lower_error_clauses(clauses))
                     .transpose()?
                     .unwrap_or_default();
+                if !error_clauses.is_empty() {
+                    self.effects |= Effects::MAY_FAIL;
+                }
                 let span = grammar::expr_span(condition_source(statement)).unwrap_or((0, 0));
                 (
                     HirStmtKind::On {
@@ -785,6 +832,13 @@ impl<'a> ModuleLowerer<'a> {
                 .errors
                 .get(&(self.module.to_string(), name.value.clone()))
                 .copied()
+                .or_else(|| {
+                    self.declarations
+                        .errors
+                        .iter()
+                        .find(|((_, candidate), _)| candidate == &name.value)
+                        .map(|(_, id)| *id)
+                })
         });
         output.push(HirErrorClause {
             error,
@@ -958,8 +1012,15 @@ impl<'a> ModuleLowerer<'a> {
             ),
             ast::Expression::Ref(_, target) => {
                 let target = self.lower_expr(target)?;
-                let ty = self.types.intern(SemType::Address(target.ty));
-                (HirExprKind::Ref(Box::new(target)), ty)
+                if matches!(
+                    target.kind,
+                    HirExprKind::Function(_) | HirExprKind::HostFunction(_)
+                ) {
+                    (target.kind, target.ty)
+                } else {
+                    let ty = self.types.intern(SemType::Address(target.ty));
+                    (HirExprKind::Ref(Box::new(target)), ty)
+                }
             }
             ast::Expression::Deref(_, target) => {
                 let target = self.lower_expr(target)?;

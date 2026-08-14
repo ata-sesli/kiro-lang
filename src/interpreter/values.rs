@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 
@@ -18,7 +19,11 @@ pub enum RuntimeVal {
     Bool(bool),
     Range(i64, i64),
     Void,
-    Pipe(PipeSender, Arc<Mutex<Receiver<RuntimeVal>>>),
+    Pipe(
+        PipeSender,
+        Arc<Mutex<Receiver<RuntimeVal>>>,
+        Arc<AtomicBool>,
+    ),
     Struct(String, HashMap<String, RuntimeVal>),
     List(Vec<RuntimeVal>),
     Map(HashMap<String, RuntimeVal>),
@@ -48,7 +53,7 @@ impl PartialEq for RuntimeVal {
             (RuntimeVal::Range(s1, e1), RuntimeVal::Range(s2, e2)) => s1 == s2 && e1 == e2,
             (RuntimeVal::Void, RuntimeVal::Void) => true,
             // Pipes are never equal (identity check is hard without ID)
-            (RuntimeVal::Pipe(_, _), RuntimeVal::Pipe(_, _)) => false,
+            (RuntimeVal::Pipe(_, _, _), RuntimeVal::Pipe(_, _, _)) => false,
             // Structs equality
             (RuntimeVal::Struct(n1, d1), RuntimeVal::Struct(n2, d2)) => n1 == n2 && d1 == d2,
             // Collections equality
@@ -161,7 +166,7 @@ impl fmt::Display for RuntimeVal {
             RuntimeVal::Bool(b) => write!(f, "{}", b),
             RuntimeVal::Range(s, e) => write!(f, "{}..{}", s, e),
             RuntimeVal::Void => write!(f, "void"),
-            RuntimeVal::Pipe(_, _) => write!(f, "<Pipe>"),
+            RuntimeVal::Pipe(_, _, _) => write!(f, "<Pipe>"),
             RuntimeVal::Struct(name, _) => write!(f, "<Struct {}>", name),
             RuntimeVal::List(l) => write!(f, "<List len={}>", l.len()),
             RuntimeVal::Map(m) => write!(f, "<Map len={}>", m.len()),

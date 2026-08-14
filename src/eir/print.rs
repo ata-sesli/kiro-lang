@@ -96,6 +96,126 @@ fn instruction_name(instruction: &InstructionKind) -> String {
         InstructionKind::Move { dst, src } => {
             format!("s{} = move s{}", dst.raw(), src.raw())
         }
+        InstructionKind::MoveGlobal { dst, global } => {
+            format!("s{} = move_global g{}", dst.raw(), global.raw())
+        }
+        InstructionKind::LoadGlobal { dst, global } => {
+            format!("s{} = load_global g{}", dst.raw(), global.raw())
+        }
+        InstructionKind::StoreGlobal { global, src } => {
+            format!("store_global g{}, s{}", global.raw(), src.raw())
+        }
+        InstructionKind::MakeError { dst, error } => {
+            format!("s{} = make_error error{}", dst.raw(), error.raw())
+        }
+        InstructionKind::MakeFunction { dst, function } => {
+            format!("s{} = function f{}", dst.raw(), function.raw())
+        }
+        InstructionKind::MakeHostFunction { dst, function } => {
+            format!("s{} = host_function h{}", dst.raw(), function.raw())
+        }
+        InstructionKind::IsError { dst, value } => {
+            format!("s{} = is_error s{}", dst.raw(), value.raw())
+        }
+        InstructionKind::ErrorMatches { dst, value, error } => format!(
+            "s{} = error_matches s{}, error{}",
+            dst.raw(),
+            value.raw(),
+            error.raw()
+        ),
+        InstructionKind::IsTruthy { dst, value } => {
+            format!("s{} = is_truthy s{}", dst.raw(), value.raw())
+        }
+        InstructionKind::Check { condition, message } => match message {
+            Some(message) => format!("check s{}, c{}", condition.raw(), message.raw()),
+            None => format!("check s{}", condition.raw()),
+        },
+        InstructionKind::MakeAddress { dst } => format!("s{} = make_address", dst.raw()),
+        InstructionKind::MakeRef { dst, value } => {
+            format!("s{} = make_ref s{}", dst.raw(), value.raw())
+        }
+        InstructionKind::Deref { dst, address } => {
+            format!("s{} = deref s{}", dst.raw(), address.raw())
+        }
+        InstructionKind::StoreDeref { address, src } => {
+            format!("store_deref s{}, s{}", address.raw(), src.raw())
+        }
+        InstructionKind::MakeList { dst, items } => {
+            format!("s{} = make_list [{}]", dst.raw(), slot_list(items))
+        }
+        InstructionKind::MakeMap { dst, entries } => format!(
+            "s{} = make_map [{}]",
+            dst.raw(),
+            entries
+                .iter()
+                .map(|(key, value)| format!("s{}: s{}", key.raw(), value.raw()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        InstructionKind::MakeStruct {
+            dst,
+            structure,
+            fields,
+        } => format!(
+            "s{} = make_struct struct{} [{}]",
+            dst.raw(),
+            structure.raw(),
+            fields
+                .iter()
+                .map(|(field, value)| format!("field{}: s{}", field.raw(), value.raw()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        InstructionKind::GetField { dst, target, field } => format!(
+            "s{} = get_field s{}, field{}",
+            dst.raw(),
+            target.raw(),
+            field.raw()
+        ),
+        InstructionKind::SetField {
+            target,
+            fields,
+            src,
+        } => format!(
+            "set_field s{}, [{}], s{}",
+            target.raw(),
+            fields
+                .iter()
+                .map(|field| format!("field{}", field.raw()))
+                .collect::<Vec<_>>()
+                .join("."),
+            src.raw()
+        ),
+        InstructionKind::GetIndex {
+            dst,
+            collection,
+            key,
+        } => format!(
+            "s{} = get_index s{}, s{}",
+            dst.raw(),
+            collection.raw(),
+            key.raw()
+        ),
+        InstructionKind::Push { collection, value } => {
+            format!("push s{}, s{}", collection.raw(), value.raw())
+        }
+        InstructionKind::Len { dst, collection } => {
+            format!("s{} = len s{}", dst.raw(), collection.raw())
+        }
+        InstructionKind::MakeRange { dst, start, end } => binary("make_range", *dst, *start, *end),
+        InstructionKind::IterInit { dst, iterable } => {
+            format!("s{} = iter_init s{}", dst.raw(), iterable.raw())
+        }
+        InstructionKind::IterHasNext {
+            dst,
+            iterable,
+            index,
+        } => binary("iter_has_next", *dst, *iterable, *index),
+        InstructionKind::IterGet {
+            dst,
+            iterable,
+            index,
+        } => binary("iter_get", *dst, *iterable, *index),
         InstructionKind::AddNum { dst, lhs, rhs } => binary("add_num", *dst, *lhs, *rhs),
         InstructionKind::ConcatString { dst, lhs, rhs } => {
             binary("concat_string", *dst, *lhs, *rhs)
@@ -128,7 +248,47 @@ fn instruction_name(instruction: &InstructionKind) -> String {
                 None => format!("call f{}({args})", function.raw()),
             }
         }
+        InstructionKind::CallHost {
+            dst,
+            function,
+            args,
+        } => call_name("call_host", *dst, format!("h{}", function.raw()), args),
+        InstructionKind::CallIndirect { dst, callee, args } => {
+            call_name("call_indirect", *dst, format!("s{}", callee.raw()), args)
+        }
+        InstructionKind::MakePipe { dst, capacity } => {
+            format!("s{} = make_pipe {:?}", dst.raw(), capacity)
+        }
+        InstructionKind::Give { channel, value } => {
+            format!("give s{}, s{}", channel.raw(), value.raw())
+        }
+        InstructionKind::Take { dst, channel } => {
+            format!("s{} = take s{}", dst.raw(), channel.raw())
+        }
+        InstructionKind::Close { channel } => format!("close s{}", channel.raw()),
+        InstructionKind::Rest => "rest".to_string(),
+        InstructionKind::Spawn { function, args } => {
+            call_name("spawn", None, format!("f{}", function.raw()), args)
+        }
     }
+}
+
+fn call_name(
+    name: &str,
+    dst: Option<super::SlotId>,
+    target: String,
+    args: &[super::SlotId],
+) -> String {
+    let call = format!("{name} {target}({})", slot_list(args));
+    dst.map_or(call.clone(), |dst| format!("s{} = {call}", dst.raw()))
+}
+
+fn slot_list(slots: &[super::SlotId]) -> String {
+    slots
+        .iter()
+        .map(|slot| format!("s{}", slot.raw()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn terminator_name(terminator: &TerminatorKind) -> String {

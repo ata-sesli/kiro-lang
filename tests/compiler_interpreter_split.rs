@@ -146,6 +146,7 @@ fn calculate(limit: num) -> num {
     }
     return current
 }
+
 "#;
     let dir = temp_project("eir_generated_parity");
     link_runtime(&dir);
@@ -178,6 +179,147 @@ fn calculate(limit: num) -> num {
         marked_lines(&compiled.stdout, "EIR_PHASE6:"),
         ["EIR_PHASE6:4"]
     );
+    let generated = fs::read_to_string(dir.join(".kiro/build/src/main.rs"))
+        .expect("generated Rust should be available for backend inspection");
+    assert!(
+        generated.contains("fn __kiro_eir_f"),
+        "supported modules must generate from EIR:\n{generated}"
+    );
+}
+
+#[test]
+fn eir_and_generated_rust_agree_on_phase7_values() {
+    const MARKER: &str = "EIR_PHASE8_VALUES:";
+    let source = r#"
+import io
+
+error Missing = "missing"
+
+struct Item {
+    value: num
+}
+
+fn values() -> num! {
+    var item = Item { value: 40 }
+    item.value = item.value + 2
+    var items = list num { item.value }
+    var pointer = ref items
+    var dereferenced = deref pointer
+    on (Missing) {
+        return 0
+    } error Missing {
+        return dereferenced at 0
+    }
+    return 0
+}
+
+check values() == 42, "EIR values mismatch"
+io.print("EIR_PHASE8_VALUES:ok")
+"#;
+    let pair = execute_both("phase8_values", source);
+
+    assert_success(&pair.interpreted, "Phase 7 values should interpret");
+    assert_success(&pair.compiled, "Phase 7 values should generate and run");
+    let (interpreted, compiled) = pair.marked_stdout(MARKER);
+    assert_eq!(compiled, interpreted);
+    assert_eq!(compiled, ["EIR_PHASE8_VALUES:ok"]);
+}
+
+#[test]
+fn eir_and_generated_rust_agree_on_phase7_effects() {
+    const MARKER: &str = "EIR_PHASE8_EFFECTS:";
+    let source = r#"
+import io
+
+pure fn double(value: num) -> num {
+    return value * 2
+}
+
+fn worker(channel: pipe num) {
+    give channel 20
+}
+
+fn effects() -> num {
+    var operation = ref double
+    var channel = pipe num
+    run worker(channel)
+    rest
+    var total = operation(take channel)
+    loop value in 1..3 {
+        total = total + value
+    }
+    close channel
+    return total
+}
+
+check effects() == 43, "EIR effects mismatch"
+io.print("EIR_PHASE8_EFFECTS:ok")
+"#;
+    let pair = execute_both("phase8_effects", source);
+
+    assert_success(&pair.interpreted, "Phase 7 effects should interpret");
+    assert_success(&pair.compiled, "Phase 7 effects should generate and run");
+    let (interpreted, compiled) = pair.marked_stdout(MARKER);
+    assert_eq!(compiled, interpreted);
+    assert_eq!(compiled, ["EIR_PHASE8_EFFECTS:ok"]);
+}
+
+#[test]
+fn generated_rust_preserves_zero_capacity_rendezvous() {
+    const MARKER: &str = "EIR_RENDEZVOUS:";
+    let source = r#"
+import io
+
+var completed = false
+var channel = pipe num 0
+var completion = pipe num 1
+
+fn producer(channel: pipe num, completion: pipe num) {
+    give channel 42
+    completed = true
+    give completion 1
+}
+
+fn main() {
+    run producer(channel, completion)
+    loop tick in 0..100 {
+        rest
+    }
+    check completed == false, "zero-capacity give completed before take"
+    var value = take channel
+    take completion
+    check value == 42, "rendezvous value mismatch"
+    io.print("EIR_RENDEZVOUS:ok")
+}
+
+main()
+"#;
+    let dir = temp_project("zero_capacity_rendezvous");
+    link_runtime(&dir);
+    fs::write(dir.join("main.kiro"), source).expect("main module should be written");
+    let compiled = run_kiro(&["run", "main.kiro"], &dir);
+
+    assert_success(&compiled, "zero-capacity pipe should compile and run");
+    let compiled = marked_lines(&compiled.stdout, MARKER);
+    assert_eq!(compiled, ["EIR_RENDEZVOUS:ok"]);
+}
+
+#[test]
+fn eir_and_generated_rust_agree_on_aggregate_display() {
+    const MARKER: &str = "EIR_DISPLAY:";
+    let source = r#"
+import io
+
+io.write("EIR_DISPLAY:")
+io.print(list num { 1, 2 })
+"#;
+    let pair = execute_both("aggregate_display", source);
+
+    assert_success(&pair.interpreted, "aggregate display should interpret");
+    assert_success(&pair.compiled, "aggregate display should compile and run");
+    let (interpreted, compiled) = pair.marked_stdout(MARKER);
+    assert_eq!(compiled, interpreted);
+    assert_eq!(compiled, ["EIR_DISPLAY:<List len=2>"]);
 }
 
 #[test]

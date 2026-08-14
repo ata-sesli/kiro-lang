@@ -60,3 +60,4 @@ macro_rules! eir_id {
 eir_id!(BlockId);
 eir_id!(SlotId);
 eir_id!(ConstId);
+eir_id!(GlobalId);
