@@ -1,7 +1,6 @@
 use crate::grammar::grammar;
 use std::collections::{HashMap, HashSet};
 
-pub mod diagnostics;
 pub mod expression;
 pub mod statement;
 pub mod types;
@@ -20,10 +19,24 @@ pub struct FunctionInfo {
     pub doc: Option<String>,
 }
 
+impl Compiler {
+    pub fn validate_semantics(
+        &mut self,
+        program: &grammar::Program,
+        module: &str,
+        source: &str,
+    ) -> Result<(), crate::errors::KiroError> {
+        crate::analysis::validate_program_semantics(self, program, module, source)
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct CompilerOptions {
     pub uses_pipes: bool,
     pub skipped_module_imports: HashSet<String>,
+    pub module_declarations: String,
+    pub current_module: String,
+    pub known_modules: HashSet<String>,
 }
 
 pub struct Compiler {
@@ -31,12 +44,15 @@ pub struct Compiler {
     pub imported_modules: HashSet<String>,
     pub functions: HashMap<String, FunctionInfo>,
     pub module_functions: HashMap<(String, String), FunctionInfo>,
+    pub known_modules: HashSet<String>,
     pub in_pure_context: bool,
     pub in_failable_fn: bool,
     pub pure_scope_params: HashSet<String>, // Parameters allowed in pure function scope
     pub moved_vars: HashSet<String>,        // Track moved variables to prevent use-after-move
     pub fn_ref_vars: HashSet<String>,       // Vars holding pure function refs
     pub fn_returning_fn: HashSet<String>,   // Function names returning fn(...) -> ...
+    pub current_module: String,
+    pub import_aliases: HashMap<String, String>,
     pub options: CompilerOptions,
 }
 
@@ -731,12 +747,15 @@ impl Compiler {
             imported_modules: HashSet::new(),
             functions: HashMap::new(),
             module_functions: HashMap::new(),
+            known_modules: HashSet::new(),
             in_pure_context: false,
             in_failable_fn: false,
             pure_scope_params: HashSet::new(),
             moved_vars: HashSet::new(),
             fn_ref_vars: HashSet::new(),
             fn_returning_fn: HashSet::new(),
+            current_module: "main".to_string(),
+            import_aliases: HashMap::new(),
             options: CompilerOptions::default(),
         }
     }
@@ -754,8 +773,25 @@ impl Compiler {
         options: CompilerOptions,
     ) -> Self {
         let mut compiler = Self::with_module_functions(module_functions);
+        compiler.current_module = options.current_module.clone();
+        compiler.known_modules = options.known_modules.clone();
         compiler.options = options;
         compiler
+    }
+
+    pub fn resolve_import_name(&self, import_name: &str) -> String {
+        crate::grammar::resolve_relative_module_path(
+            import_name,
+            &self.current_module,
+            &self.known_modules,
+        )
+    }
+
+    pub fn canonical_import_name(&self, import_name: &str) -> String {
+        self.import_aliases
+            .get(import_name)
+            .cloned()
+            .unwrap_or_else(|| self.resolve_import_name(import_name))
     }
 
     pub fn collect_program_functions(program: &grammar::Program) -> HashMap<String, FunctionInfo> {
@@ -839,17 +875,13 @@ impl Compiler {
                 .functions
                 .get(crate::grammar::variable_name(v))
                 .cloned(),
-            grammar::Expression::FieldAccess(target, _, field) => {
-                if let grammar::Expression::Variable(module) = &**target
-                    && self
-                        .imported_modules
-                        .contains(crate::grammar::variable_name(module))
+            grammar::Expression::FieldAccess(_, _, _) => {
+                if let Some((module, function)) =
+                    crate::grammar::module_call_target(func, &self.imported_modules)
                 {
+                    let canonical_module = self.canonical_import_name(&module);
                     self.module_functions
-                        .get(&(
-                            crate::grammar::variable_name(module).to_string(),
-                            crate::grammar::field_name(field).to_string(),
-                        ))
+                        .get(&(canonical_module, function))
                         .cloned()
                 } else {
                     None
@@ -862,16 +894,10 @@ impl Compiler {
     pub fn call_name(&self, func: &grammar::Expression) -> String {
         match func {
             grammar::Expression::Variable(v) => crate::grammar::variable_name(v).to_string(),
-            grammar::Expression::FieldAccess(target, _, field) => {
-                if let grammar::Expression::Variable(module) = &**target {
-                    format!(
-                        "{}.{}",
-                        crate::grammar::variable_name(module),
-                        crate::grammar::field_name(field)
-                    )
-                } else {
-                    "<computed function>".to_string()
-                }
+            grammar::Expression::FieldAccess(_, _, _) => {
+                crate::grammar::expression_path_segments(func)
+                    .map(|segments| segments.join("."))
+                    .unwrap_or_else(|| "<computed function>".to_string())
             }
             _ => "<computed function>".to_string(),
         }
@@ -1001,6 +1027,7 @@ impl Compiler {
             // Import header module for rust fn glue
             output.push_str("mod header;\n");
             output.push_str("pub use kiro_runtime::*;\n");
+            output.push_str(&self.options.module_declarations);
             // ONLY DEFINED IN MAIN (Shared Runtime)
             // We make everything 'pub' so submodules can use them via 'use crate::*;'
             if emits_pipes {

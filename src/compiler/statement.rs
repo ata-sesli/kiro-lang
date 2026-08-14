@@ -62,13 +62,11 @@ impl Compiler {
             }
             // 6. Import Statement
             Statement::Import { module_name, .. } => {
-                let module_name = crate::grammar::variable_name(&module_name).to_string();
+                let module_name = crate::grammar::module_path_name(&module_name).to_string();
+                let canonical_module = self.resolve_import_name(&module_name);
                 self.imported_modules.insert(module_name.clone());
-                if self.options.skipped_module_imports.contains(&module_name) {
-                    String::new()
-                } else {
-                    format!("pub mod {};", module_name)
-                }
+                self.import_aliases.insert(module_name, canonical_module);
+                String::new()
             }
             // 1. Variable Declaration
             Statement::VarDecl { ident, value, .. } => {

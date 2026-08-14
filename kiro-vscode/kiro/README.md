@@ -21,14 +21,14 @@ The extension ships with a TextMate grammar for `.kiro` files and highlights:
 - Control flow: `on`, `off`, `loop`, `in`, `per`, `break`, `continue`, `return`, `check`, `run`, `rest`
 - Type keywords: `num`, `str`, `bool`, `void`, `adr`, `pipe`, `list`, `map`
 - Operators and commands: `ref`, `deref`, `move`, `give`, `take`, `close`, `at`, `push`, `len`
-- Strings, comments, punctuation, and grouping tokens
+- Strings, comments, dotted import paths, punctuation, and grouping tokens
 
 ### Hover Documentation
 Built-in hover docs are provided for:
 
 - Language keywords and core constructs
 - Standard modules such as `std_fs`, `std_env`, `std_net`, `std_time`, and `std_io`
-- Qualified module calls like `std_fs.read` and `std_io.input`
+- Qualified module calls like `std_fs.read`, `std_io.input`, and nested paths such as `app.math.add`
 
 ### Language Configuration
 - Bracket pairing for `{}`, `()`, and `[]`

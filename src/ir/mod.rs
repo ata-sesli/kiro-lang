@@ -384,8 +384,8 @@ fn lower_statement(stmt: ast::Statement) -> IrStmt {
             span: Some(keyword.span),
         },
         ast::Statement::Import { module_name, .. } => IrStmt::Import {
-            module_name: grammar::variable_name(&module_name).to_string(),
-            span: Some(module_name.span),
+            module_name: grammar::module_path_name(&module_name).to_string(),
+            span: Some(grammar::module_path_span(&module_name)),
         },
         ast::Statement::ExprStmt(expr) => IrStmt::Expr(lower_expr(expr)),
         ast::Statement::Documented { item, .. } => match item {

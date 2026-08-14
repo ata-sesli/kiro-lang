@@ -14,7 +14,7 @@ use kiro_lang::{
     std_asset_path, unsupported_let_statement,
 };
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 
 use clap::{Parser, Subcommand};
@@ -786,6 +786,8 @@ fn run_compiler(
     let root_name = module_name_from_path(&analysis.root)?;
     let module_functions = analysis.module_functions.clone();
     let mut modules = analysis.modules;
+    let known_modules: HashSet<String> = modules.keys().cloned().collect();
+    let active_modules = active_generated_modules(&modules, &requirements, &root_name);
 
     let mut module_names: Vec<String> = modules
         .keys()
@@ -799,7 +801,16 @@ fn run_compiler(
             continue;
         }
         if let Some(module) = modules.remove(&name) {
-            compile_analyzed_module(module, false, &module_functions, &requirements, &pm)?;
+            let module_declarations = build_module_declarations(Some(&name), &active_modules);
+            compile_analyzed_module(
+                module,
+                false,
+                &module_functions,
+                &requirements,
+                &pm,
+                &known_modules,
+                module_declarations,
+            )?;
         }
     }
 
@@ -810,7 +821,16 @@ fn run_compiler(
             format!("Analyzed root module '{}' was not found.", root_name),
         )
     })?;
-    compile_analyzed_module(root_module, true, &module_functions, &requirements, &pm)?;
+    let root_module_declarations = build_module_declarations(None, &active_modules);
+    compile_analyzed_module(
+        root_module,
+        true,
+        &module_functions,
+        &requirements,
+        &pm,
+        &known_modules,
+        root_module_declarations,
+    )?;
 
     if let Err(e) = pm.save_header(&header) {
         return Err(KiroError::new(
@@ -830,6 +850,68 @@ fn run_compiler(
             format!("Build error: {}", e),
         )),
     }
+}
+
+fn active_generated_modules(
+    modules: &HashMap<String, analysis::AnalyzedModule>,
+    requirements: &BuildRequirements,
+    root_name: &str,
+) -> HashSet<String> {
+    modules
+        .keys()
+        .filter(|name| *name != root_name)
+        .filter(|name| !requirements.skips_module_import(name))
+        .cloned()
+        .collect()
+}
+
+fn build_module_declarations(owner: Option<&str>, module_names: &HashSet<String>) -> String {
+    render_module_children(owner, module_names, 0)
+}
+
+fn render_module_children(
+    owner: Option<&str>,
+    module_names: &HashSet<String>,
+    indent: usize,
+) -> String {
+    let mut children = BTreeSet::new();
+    for name in module_names {
+        let rest = match owner {
+            Some(owner) => name
+                .strip_prefix(owner)
+                .and_then(|rest| rest.strip_prefix('.')),
+            None => Some(name.as_str()),
+        };
+        let Some(rest) = rest else {
+            continue;
+        };
+        let Some(child) = rest.split('.').next() else {
+            continue;
+        };
+        if !child.is_empty() {
+            children.insert(child.to_string());
+        }
+    }
+
+    let mut output = String::new();
+    let padding = " ".repeat(indent);
+    for child in children {
+        let child_path = match owner {
+            Some(owner) => format!("{}.{}", owner, child),
+            None => child.clone(),
+        };
+        if module_names.contains(&child_path) {
+            output.push_str(&format!("{}pub mod {};\n", padding, child));
+        } else {
+            let nested = render_module_children(Some(&child_path), module_names, indent + 4);
+            if !nested.is_empty() {
+                output.push_str(&format!("{}pub mod {} {{\n", padding, child));
+                output.push_str(&nested);
+                output.push_str(&format!("{}}}\n", padding));
+            }
+        }
+    }
+    output
 }
 
 fn execute_binary(path: PathBuf) -> Result<(), String> {
@@ -967,6 +1049,8 @@ fn compile_analyzed_module(
     module_functions: &HashMap<(String, String), compiler::FunctionInfo>,
     requirements: &BuildRequirements,
     pm: &BuildManager,
+    known_modules: &HashSet<String>,
+    module_declarations: String,
 ) -> Result<(), KiroError> {
     let module_name = module.name;
     let mut c = compiler::Compiler::with_options(
@@ -974,6 +1058,9 @@ fn compile_analyzed_module(
         compiler::CompilerOptions {
             uses_pipes: requirements.uses_pipes,
             skipped_module_imports: requirements.skipped_module_imports.clone(),
+            module_declarations,
+            current_module: module_name.clone(),
+            known_modules: known_modules.clone(),
         },
     );
     let code = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -988,8 +1075,14 @@ fn compile_analyzed_module(
         }
     };
 
-    let save_name = if is_root { "main" } else { &module_name };
-    if let Err(e) = pm.save_file(save_name, code) {
+    let save_name = if is_root {
+        "main".to_string()
+    } else {
+        grammar::module_path_file_stem(&module_name)
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
+    if let Err(e) = pm.save_file(&save_name, code) {
         return Err(KiroError::new(
             errors::ErrorCode::BuildGraphFailed,
             errors::ErrorPhase::Compile,

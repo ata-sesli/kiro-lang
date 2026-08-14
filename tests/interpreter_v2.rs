@@ -259,3 +259,51 @@ fn main() -> num {
         RuntimeVal::Float(50.0)
     );
 }
+
+#[derive(Clone)]
+struct NestedMemoryLoader;
+
+impl ModuleLoader for NestedMemoryLoader {
+    fn load(
+        &self,
+        module_name: &str,
+        _current_dir: &std::path::Path,
+    ) -> Result<LoadedModule, String> {
+        if module_name != "app.math" {
+            return Err(format!("unexpected module {module_name}"));
+        }
+        Ok(LoadedModule {
+            cache_key: "mem://app.math".to_string(),
+            source: r#"
+pure fn add(a: num, b: num) -> num {
+    return a + b
+}
+"#
+            .to_string(),
+            base_dir: PathBuf::from("."),
+        })
+    }
+}
+
+#[test]
+fn v2_session_imports_nested_modules_and_calls_full_path() {
+    let module = lower_main(
+        r#"
+import app.math
+
+fn main() -> num {
+    return app.math.add(2, 3)
+}
+"#,
+    );
+
+    let mut runtime = SessionRuntime::new(module, PathBuf::from("."));
+    runtime.set_module_loader(Arc::new(NestedMemoryLoader));
+
+    assert_eq!(
+        runtime
+            .call_function("main", "main", vec![])
+            .expect("nested imported module function should run"),
+        RuntimeVal::Float(5.0)
+    );
+}

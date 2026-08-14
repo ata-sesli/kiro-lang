@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::errors::{ErrorCode, KiroError, SourceSpan};
 use crate::grammar::grammar;
 
-use super::{Compiler, FunctionInfo};
+use crate::compiler::{Compiler, FunctionInfo};
 
 struct SourceIndex {
     file: String,
@@ -39,9 +39,11 @@ struct SemanticCtx<'a> {
     source: SourceIndex,
     functions: &'a HashMap<String, FunctionInfo>,
     module_functions: &'a HashMap<(String, String), FunctionInfo>,
+    known_modules: &'a HashSet<String>,
     structs: HashMap<String, HashMap<String, grammar::KiroType>>,
     handles: HashSet<String>,
     imports: HashSet<String>,
+    import_aliases: HashMap<String, String>,
     scopes: Vec<HashMap<String, Binding>>,
     in_pure: bool,
     fn_name: Option<String>,
@@ -51,18 +53,22 @@ struct SemanticCtx<'a> {
 impl<'a> SemanticCtx<'a> {
     fn new(
         module: &'a str,
+        file: &'a str,
         source: &'a str,
         functions: &'a HashMap<String, FunctionInfo>,
         module_functions: &'a HashMap<(String, String), FunctionInfo>,
+        known_modules: &'a HashSet<String>,
     ) -> Self {
         Self {
             module,
-            source: SourceIndex::new(module, source),
+            source: SourceIndex::new(file, source),
             functions,
             module_functions,
+            known_modules,
             structs: HashMap::new(),
             handles: HashSet::new(),
             imports: HashSet::new(),
+            import_aliases: HashMap::new(),
             scopes: vec![HashMap::new()],
             in_pure: false,
             fn_name: None,
@@ -139,16 +145,28 @@ impl<'a> SemanticCtx<'a> {
     }
 
     fn imported_function_names(&self, module: &str) -> Vec<String> {
+        let canonical_module = self.canonical_import_name(module);
         self.module_functions
             .keys()
             .filter_map(|(known_module, function)| {
-                if known_module == module {
-                    Some(format!("{}.{}", known_module, function))
+                if known_module == &canonical_module {
+                    Some(format!("{}.{}", module, function))
                 } else {
                     None
                 }
             })
             .collect()
+    }
+
+    fn resolve_import_name(&self, import_name: &str) -> String {
+        crate::grammar::resolve_relative_module_path(import_name, self.module, self.known_modules)
+    }
+
+    fn canonical_import_name(&self, import_name: &str) -> String {
+        self.import_aliases
+            .get(import_name)
+            .cloned()
+            .unwrap_or_else(|| self.resolve_import_name(import_name))
     }
 
     fn suggest_name(&self, name: &str, candidates: Vec<String>) -> Option<String> {
@@ -193,8 +211,10 @@ impl<'a> SemanticCtx<'a> {
                 Ok(())
             }
             grammar::Statement::Import { module_name, .. } => {
-                self.imports
-                    .insert(crate::grammar::variable_name(module_name).to_string());
+                let import_name = crate::grammar::module_path_name(module_name).to_string();
+                let canonical_name = self.resolve_import_name(&import_name);
+                self.imports.insert(import_name.clone());
+                self.import_aliases.insert(import_name, canonical_name);
                 Ok(())
             }
             grammar::Statement::VarDecl { ident, value, .. } => {
@@ -608,15 +628,14 @@ impl<'a> SemanticCtx<'a> {
                 }
                 Ok(Some(grammar::KiroType::Custom(name.value.clone())))
             }
-            grammar::Expression::FieldAccess(target, _, field) => {
-                if let grammar::Expression::Variable(module) = &**target
-                    && self.imports.contains(crate::grammar::variable_name(module))
+            grammar::Expression::FieldAccess(_, _, field) => {
+                if let Some((module_name, member_name)) =
+                    crate::grammar::module_call_target(expr, &self.imports)
                 {
-                    let module_name = crate::grammar::variable_name(module);
-                    let member_name = crate::grammar::field_name(field);
+                    let canonical_module = self.canonical_import_name(&module_name);
                     if self
                         .module_functions
-                        .contains_key(&(module_name.to_string(), member_name.to_string()))
+                        .contains_key(&(canonical_module, member_name.clone()))
                     {
                         return Ok(None);
                     }
@@ -629,12 +648,15 @@ impl<'a> SemanticCtx<'a> {
                         "unknown imported function",
                     );
                     if let Some(suggestion) =
-                        self.suggest_name(&call_name, self.imported_function_names(module_name))
+                        self.suggest_name(&call_name, self.imported_function_names(&module_name))
                     {
                         err = err.with_suggestion(suggestion);
                     }
                     return Err(err);
                 }
+                let grammar::Expression::FieldAccess(target, _, field) = expr else {
+                    unreachable!("field access arm should only receive field access expressions");
+                };
                 let target_ty = self.infer_expr(target)?;
                 if let Some(grammar::KiroType::Custom(name)) = &target_ty
                     && self.handles.contains(&name.value)
@@ -981,15 +1003,14 @@ impl<'a> SemanticCtx<'a> {
                         err
                     })
             }
-            grammar::Expression::FieldAccess(target, _, field) => {
-                if let grammar::Expression::Variable(module) = &**target
-                    && self.imports.contains(crate::grammar::variable_name(module))
+            grammar::Expression::FieldAccess(_, _, _) => {
+                if let Some((module_name, member_name)) =
+                    crate::grammar::module_call_target(func, &self.imports)
                 {
-                    let module_name = crate::grammar::variable_name(module);
-                    let member_name = crate::grammar::field_name(field);
+                    let canonical_module = self.canonical_import_name(&module_name);
                     return self
                         .module_functions
-                        .get(&(module_name.to_string(), member_name.to_string()))
+                        .get(&(canonical_module, member_name.clone()))
                         .cloned()
                         .map(|info| (format!("{}.{}", module_name, member_name), info))
                         .ok_or_else(|| {
@@ -997,17 +1018,28 @@ impl<'a> SemanticCtx<'a> {
                             let mut err = self.error_at_span(
                                 ErrorCode::ImportError,
                                 format!("Unknown function '{}'.", call_name),
-                                crate::grammar::call_target_span(func)
-                                    .unwrap_or_else(|| crate::grammar::field_span(field)),
+                                self.required_call_target_span(func),
                                 "unknown imported function",
                             );
-                            if let Some(suggestion) = self
-                                .suggest_name(&call_name, self.imported_function_names(module_name))
-                            {
+                            if let Some(suggestion) = self.suggest_name(
+                                &call_name,
+                                self.imported_function_names(&module_name),
+                            ) {
                                 err = err.with_suggestion(suggestion);
                             }
                             err
                         });
+                }
+                if let Some(segments) = crate::grammar::expression_path_segments(func)
+                    && segments.len() > 1
+                {
+                    let call_name = segments.join(".");
+                    return Err(self.error_at_span(
+                        ErrorCode::UnknownName,
+                        format!("Unknown function '{}'.", call_name),
+                        self.required_call_target_span(func),
+                        "unknown function",
+                    ));
                 }
                 Err(self.error_at_span(
                     ErrorCode::UnknownName,
@@ -1028,16 +1060,10 @@ impl<'a> SemanticCtx<'a> {
     fn call_name(&self, func: &grammar::Expression) -> String {
         match func {
             grammar::Expression::Variable(v) => crate::grammar::variable_name(v).to_string(),
-            grammar::Expression::FieldAccess(target, _, field) => {
-                if let grammar::Expression::Variable(module) = &**target {
-                    format!(
-                        "{}.{}",
-                        crate::grammar::variable_name(module),
-                        crate::grammar::field_name(field)
-                    )
-                } else {
-                    "<computed function>".to_string()
-                }
+            grammar::Expression::FieldAccess(_, _, _) => {
+                crate::grammar::expression_path_segments(func)
+                    .map(|segments| segments.join("."))
+                    .unwrap_or_else(|| "<computed function>".to_string())
             }
             _ => "<computed function>".to_string(),
         }
@@ -1067,22 +1093,32 @@ fn statement_guarantees_return(stmt: &grammar::Statement, expected: &grammar::Ki
     }
 }
 
-impl Compiler {
-    pub fn validate_semantics(
-        &mut self,
-        program: &grammar::Program,
-        module: &str,
-        source: &str,
-    ) -> Result<(), KiroError> {
-        self.functions = Self::collect_program_functions(program);
-        self.validate_effectful_recursion(program, module, Some(source))?;
-        let mut ctx = SemanticCtx::new(module, source, &self.functions, &self.module_functions);
-        ctx.collect_program_types(program)?;
-        for stmt in &program.statements {
-            ctx.analyze_statement(stmt)?;
-        }
-        Ok(())
+pub(crate) fn validate_semantics(
+    compiler: &mut Compiler,
+    program: &grammar::Program,
+    module: &str,
+    source: &str,
+) -> Result<(), KiroError> {
+    compiler.functions = Compiler::collect_program_functions(program);
+    compiler.validate_effectful_recursion(program, module, Some(source))?;
+    let current_module = if compiler.current_module.is_empty() {
+        module
+    } else {
+        &compiler.current_module
+    };
+    let mut ctx = SemanticCtx::new(
+        current_module,
+        module,
+        source,
+        &compiler.functions,
+        &compiler.module_functions,
+        &compiler.known_modules,
+    );
+    ctx.collect_program_types(program)?;
+    for stmt in &program.statements {
+        ctx.analyze_statement(stmt)?;
     }
+    Ok(())
 }
 
 impl SemanticCtx<'_> {

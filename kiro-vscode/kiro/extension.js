@@ -26,7 +26,7 @@ function resolveModuleContext(document, position) {
     position
   );
   const before = document.getText(range);
-  const match = before.match(/([a-z_][a-zA-Z0-9_]*)\s*\.\s*[a-z_][a-zA-Z0-9_]*\s*$/);
+  const match = before.match(/([a-z_][a-zA-Z0-9_]*(?:\.[a-z_][a-zA-Z0-9_]*)*)\s*\.\s*[a-z_][a-zA-Z0-9_]*\s*$/);
   return match ? match[1] : null;
 }
 

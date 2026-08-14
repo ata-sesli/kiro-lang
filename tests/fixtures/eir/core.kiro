@@ -1,0 +1,11 @@
+import io
+
+fn choose(value: num) -> num {
+    on (value > 3) {
+        return value + 1
+    }
+    return 0
+}
+
+check choose(4) == 5, "core parity failed"
+io.print("EIR_PARITY:ok")

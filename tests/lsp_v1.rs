@@ -1096,6 +1096,131 @@ fn lsp_context_completion_handles_imports_modules_and_invalid_source() {
 }
 
 #[test]
+fn lsp_handles_nested_module_completion_and_definition() {
+    let dir = temp_project("nested_modules");
+    let main = dir.join("main.kiro");
+    let app_dir = dir.join("app");
+    fs::create_dir_all(&app_dir).expect("nested module dir should be created");
+    fs::write(&main, "import app.math\napp.math.add(1, 2)\n").expect("main file should be written");
+    fs::write(
+        app_dir.join("math.kiro"),
+        "pure fn add(a: num, b: num) -> num { return a + b }\n",
+    )
+    .expect("nested math file should be written");
+
+    let main_uri = file_uri(&main);
+    let math_uri = file_uri(&app_dir.join("math.kiro"));
+    let (child, mut stdin, mut stdout) = start_lsp(&dir);
+    initialize(&mut stdin, &mut stdout, &dir);
+    let source = fs::read_to_string(&main).expect("main source should read");
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": main_uri,
+                    "languageId": "kiro",
+                    "version": 1,
+                    "text": source
+                }
+            }
+        }),
+    );
+
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 51,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": { "uri": main_uri },
+                "position": { "line": 1, "character": 10 }
+            }
+        }),
+    );
+    let definition = read_response(&mut stdout, 51);
+    assert_eq!(definition["result"]["uri"], math_uri);
+    assert_eq!(definition["result"]["range"]["start"]["line"], 0);
+
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": main_uri, "version": 2 },
+                "contentChanges": [{ "text": "import app.math\napp.math.\n" }]
+            }
+        }),
+    );
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 50,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": main_uri },
+                "position": { "line": 1, "character": 9 }
+            }
+        }),
+    );
+    let completion = read_response(&mut stdout, 50);
+    let labels = completion["result"]
+        .as_array()
+        .expect("module completion should be array")
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        labels.contains(&"add"),
+        "nested module completion missing add: {:?}",
+        labels
+    );
+
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": main_uri, "version": 3 },
+                "contentChanges": [{ "text": "import app.\n" }]
+            }
+        }),
+    );
+    send_lsp(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 52,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": main_uri },
+                "position": { "line": 0, "character": 11 }
+            }
+        }),
+    );
+    let completion = read_response(&mut stdout, 52);
+    let labels = completion["result"]
+        .as_array()
+        .expect("import completion should be array")
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        labels.contains(&"app.math"),
+        "nested import completion missing app.math: {:?}",
+        labels
+    );
+
+    shutdown(child, &mut stdin, &mut stdout);
+}
+
+#[test]
 fn lsp_definition_does_not_return_fake_file_uri_for_embedded_std_modules() {
     let dir = temp_project("std_definition");
     let main = dir.join("main.kiro");

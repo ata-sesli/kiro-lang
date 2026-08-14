@@ -185,6 +185,29 @@ fn main() {
 }
 
 #[test]
+fn format_source_accepts_nested_module_imports() {
+    let input = r#"
+import app.math
+
+fn main(){
+app.math.add(1,2)
+}
+"#;
+
+    let formatted = format_source(input).expect("nested import source should format");
+
+    assert_eq!(
+        formatted,
+        r#"import app.math
+
+fn main() {
+    app.math.add(1, 2)
+}
+"#
+    );
+}
+
+#[test]
 fn cli_fmt_rewrites_file_in_place() {
     let dir = temp_project("rewrite");
     let file = dir.join("main.kiro");

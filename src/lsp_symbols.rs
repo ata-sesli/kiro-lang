@@ -141,7 +141,7 @@ impl SymbolIndex {
         position: Position,
     ) -> Option<SignatureHelp> {
         let ctx = call_context_at(source, position)?;
-        if let Some((module, member)) = ctx.call_name.split_once('.')
+        if let Some((module, member)) = ctx.call_name.rsplit_once('.')
             && let Some(signature) = std_io_display_signature_label(module, member)
         {
             return signature_help(
@@ -151,7 +151,7 @@ impl SymbolIndex {
                 ctx.active_parameter,
             );
         }
-        let decl = if let Some((module, member)) = ctx.call_name.split_once('.') {
+        let decl = if let Some((module, member)) = ctx.call_name.rsplit_once('.') {
             self.find_module_member(module, member)?
         } else {
             let current = self.module_for_path(path)?;
@@ -199,6 +199,24 @@ impl SymbolIndex {
         };
         let mut modules = HashMap::new();
         modules.insert(name, module);
+        Self { modules }
+    }
+
+    pub fn parse_module_as(module_name: &str, path: &Path, overlays: &SourceOverlays) -> Self {
+        let normalized = normalize_path(path);
+        let source = overlays
+            .get(&normalized)
+            .cloned()
+            .or_else(|| std::fs::read_to_string(&normalized).ok());
+        let Some(source) = source else {
+            return Self::default();
+        };
+        let module = match grammar::parse(&source) {
+            Ok(program) => index_module(module_name, normalized, source, &program),
+            Err(_) => index_module_line_first(module_name, normalized, source),
+        };
+        let mut modules = HashMap::new();
+        modules.insert(module_name.to_string(), module);
         Self { modules }
     }
 
@@ -281,21 +299,44 @@ pub fn sibling_and_std_modules(path: &Path) -> Vec<String> {
         .iter()
         .map(|name| (*name).to_string())
         .collect::<Vec<_>>();
-    if let Some(parent) = path.parent()
-        && let Ok(entries) = std::fs::read_dir(parent)
-    {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) == Some("kiro")
-                && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
-            {
-                names.push(stem.to_string());
-            }
-        }
+    if let Some(parent) = path.parent() {
+        collect_local_modules(parent, "", &mut names);
     }
     names.sort();
     names.dedup();
     names
+}
+
+fn collect_local_modules(dir: &Path, prefix: &str, names: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if file_name.starts_with('.') || matches!(file_name, "target" | ".kiro") {
+            continue;
+        }
+        if path.is_dir() {
+            let nested_prefix = if prefix.is_empty() {
+                file_name.to_string()
+            } else {
+                format!("{}.{}", prefix, file_name)
+            };
+            collect_local_modules(&path, &nested_prefix, names);
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("kiro")
+            && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+        {
+            let name = if prefix.is_empty() {
+                stem.to_string()
+            } else {
+                format!("{}.{}", prefix, stem)
+            };
+            names.push(name);
+        }
+    }
 }
 
 pub fn word_at(source: &str, position: Position) -> Option<String> {
@@ -308,7 +349,7 @@ pub fn module_prefix_at(source: &str, position: Position) -> Option<String> {
     let prefix = line.get(..byte_idx.min(line.len()))?;
     let before_dot = prefix.strip_suffix('.')?;
     let module = before_dot
-        .rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
         .next()?;
     (!module.is_empty()).then(|| module.to_string())
 }
@@ -520,13 +561,13 @@ fn collect_statement(
             module,
             path,
             source,
-            crate::grammar::variable_name(module_name),
+            crate::grammar::module_path_name(module_name),
             IndexedKind::Import,
             "import",
             None,
             Vec::new(),
             doc,
-            Some(crate::grammar::variable_span(module_name)),
+            Some(crate::grammar::module_path_span(module_name)),
         )),
         ast::Statement::FunctionDef(def) => {
             push_function(module, path, source, def, doc, declarations)
@@ -887,7 +928,7 @@ fn member_access_at(source: &str, position: Position) -> Option<(String, String)
     if start > 0 && line.as_bytes().get(start - 1) == Some(&b'.') {
         let module_end = start - 1;
         let module_start = line[..module_end]
-            .rfind(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .rfind(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '.'))
             .map(|idx| idx + 1)
             .unwrap_or(0);
         let module = line[module_start..module_end].to_string();

@@ -438,7 +438,7 @@ impl Interpreter {
             }
             // 7. Import Logic
             Statement::Import { module_name, .. } => {
-                let module_name = crate::grammar::variable_name(&module_name).to_string();
+                let module_name = crate::grammar::module_path_name(&module_name).to_string();
                 // 1. Resolve Source
                 let loaded = if let Some(loader) = &self.module_loader {
                     loader.load(&module_name, &self.current_dir)?
@@ -447,8 +447,9 @@ impl Interpreter {
                         if let Some(canonical) = crate::canonical_std_module_name(&module_name) {
                             format!("std://{}", canonical)
                         } else {
-                            let filename = format!("{}.kiro", module_name);
-                            let full_path = self.current_dir.join(filename);
+                            let full_path = self
+                                .current_dir
+                                .join(crate::grammar::module_path_file_path(&module_name));
                             std::fs::canonicalize(&full_path)
                                 .unwrap_or(full_path)
                                 .to_string_lossy()
@@ -476,8 +477,9 @@ impl Interpreter {
                             module_name
                         ));
                     } else {
-                        let filename = format!("{}.kiro", module_name);
-                        let full_path = self.current_dir.join(&filename);
+                        let full_path = self
+                            .current_dir
+                            .join(crate::grammar::module_path_file_path(&module_name));
                         let resolved =
                             std::fs::canonicalize(&full_path).unwrap_or(full_path.clone());
                         let content = std::fs::read_to_string(&resolved)

@@ -48,6 +48,32 @@ pub mod grammar {
     }
 
     #[derive(Debug, Clone)]
+    pub struct ModulePathVal {
+        #[rust_sitter::leaf(
+            pattern = r"[a-z_][a-zA-Z0-9_]*(\.[a-z_][a-zA-Z0-9_]*)*",
+            transform = |s| s.to_string()
+        )]
+        pub value: String,
+    }
+    impl ModulePathVal {
+        pub fn name(&self) -> &str {
+            &self.value
+        }
+    }
+    impl std::ops::Deref for ModulePathVal {
+        type Target = str;
+
+        fn deref(&self) -> &Self::Target {
+            &self.value
+        }
+    }
+    impl std::fmt::Display for ModulePathVal {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            self.value.fmt(f)
+        }
+    }
+
+    #[derive(Debug, Clone)]
     pub struct FunctionNameVal {
         #[rust_sitter::leaf(pattern = r"[a-z_]+", transform = |s| s.to_string())]
         pub value: String,
@@ -365,7 +391,7 @@ pub mod grammar {
         Import {
             #[rust_sitter::leaf(text = "import")]
             _import: Spanned<()>,
-            module_name: Spanned<VariableVal>,
+            module_name: Spanned<ModulePathVal>,
         },
 
         /// Expression as statement.
@@ -803,6 +829,61 @@ pub fn variable_span(value: &rust_sitter::Spanned<VariableVal>) -> AstSpan {
     value.span
 }
 
+pub fn module_path_name(value: &rust_sitter::Spanned<ModulePathVal>) -> &str {
+    value.name()
+}
+
+pub fn module_path_segments(value: &rust_sitter::Spanned<ModulePathVal>) -> Vec<&str> {
+    value.name().split('.').collect()
+}
+
+pub fn module_path_span(value: &rust_sitter::Spanned<ModulePathVal>) -> AstSpan {
+    value.span
+}
+
+pub fn module_path_rust_ident(name: &str) -> String {
+    name.replace('.', "__")
+}
+
+pub fn module_path_rust_path(name: &str) -> String {
+    name.replace('.', "::")
+}
+
+pub fn module_path_file_stem(name: &str) -> std::path::PathBuf {
+    name.split('.').collect()
+}
+
+pub fn module_path_file_path(name: &str) -> std::path::PathBuf {
+    let mut path = std::path::PathBuf::new();
+    let mut segments = name.split('.').peekable();
+    while let Some(segment) = segments.next() {
+        if segments.peek().is_some() {
+            path.push(segment);
+        } else {
+            path.push(format!("{}.kiro", segment));
+        }
+    }
+    path
+}
+
+pub fn resolve_relative_module_path(
+    import_name: &str,
+    current_module: &str,
+    known_modules: &std::collections::HashSet<String>,
+) -> String {
+    if let Some((parent, _)) = current_module.rsplit_once('.') {
+        let relative = format!("{}.{}", parent, import_name);
+        if known_modules.contains(&relative) {
+            return relative;
+        }
+    }
+    if known_modules.contains(import_name) {
+        import_name.to_string()
+    } else {
+        import_name.to_string()
+    }
+}
+
 pub fn param_name(value: &FuncParam) -> &str {
     variable_name(&value.name)
 }
@@ -907,14 +988,14 @@ pub fn loop_iterator_span(value: &Statement) -> Option<AstSpan> {
 
 pub fn import_name(value: &Statement) -> Option<&str> {
     match value {
-        Statement::Import { module_name, .. } => Some(variable_name(module_name)),
+        Statement::Import { module_name, .. } => Some(module_path_name(module_name)),
         _ => None,
     }
 }
 
 pub fn import_span(value: &Statement) -> Option<AstSpan> {
     match value {
-        Statement::Import { module_name, .. } => Some(variable_span(module_name)),
+        Statement::Import { module_name, .. } => Some(module_path_span(module_name)),
         _ => None,
     }
 }
@@ -956,7 +1037,7 @@ pub fn stmt_span(stmt: &Statement) -> Option<AstSpan> {
         | Statement::Rest(keyword)
         | Statement::Check(keyword, _, _) => Some(keyword.span),
         Statement::Break(keyword) | Statement::Continue(keyword) => Some(keyword.span),
-        Statement::Import { module_name, .. } => Some(variable_span(module_name)),
+        Statement::Import { module_name, .. } => Some(module_path_span(module_name)),
         Statement::ExprStmt(expr) => expr_span(expr),
         Statement::Documented { item, .. } => match item {
             AnnotatableItem::HandleDef(def) => Some(handle_span(def)),
@@ -1030,6 +1111,35 @@ pub fn expr_span(expr: &Expression) -> Option<AstSpan> {
             let end = expr_span(rhs)?;
             Some((start.0, end.1))
         }
+    }
+}
+
+pub fn expression_path_segments(expr: &Expression) -> Option<Vec<String>> {
+    match expr {
+        Expression::Variable(value) => Some(vec![variable_name(value).to_string()]),
+        Expression::FieldAccess(target, _, field) => {
+            let mut segments = expression_path_segments(target)?;
+            segments.push(field_name(field).to_string());
+            Some(segments)
+        }
+        _ => None,
+    }
+}
+
+pub fn module_call_target(
+    expr: &Expression,
+    imported_modules: &std::collections::HashSet<String>,
+) -> Option<(String, String)> {
+    let segments = expression_path_segments(expr)?;
+    if segments.len() < 2 {
+        return None;
+    }
+    let function = segments.last()?.clone();
+    let module = segments[..segments.len() - 1].join(".");
+    if imported_modules.contains(&module) {
+        Some((module, function))
+    } else {
+        None
     }
 }
 

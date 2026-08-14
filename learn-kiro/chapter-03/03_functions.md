@@ -80,7 +80,7 @@ Current rule: function references are for named pure functions only. This keeps 
 
 Modules are just `.kiro` files. Import by module name without the extension.
 
-In V1, local modules are flat siblings. `import mylib` looks for `mylib.kiro` beside the file doing the import. There are no dotted imports, path imports, aliases, or nested module trees yet.
+Flat modules still work: `import mylib` looks for `mylib.kiro` beside the file doing the import. Nested module paths are directory-backed: `import app.math` looks for `app/math.kiro`. Calls use the full imported path; `math.add(...)` is not created as an alias for `app.math.add(...)`.
 
 `mylib.kiro`:
 
@@ -97,6 +97,19 @@ import io
 
 import mylib
 io.print(mylib.pi())
+```
+
+Nested module example:
+
+```text
+main.kiro
+app/math.kiro
+```
+
+```kiro
+import app.math
+
+app.math.add(2, 3)
 ```
 
 This module boundary is the foundation for larger projects. A project can add an optional `kiro.toml` at the root:

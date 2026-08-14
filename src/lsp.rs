@@ -18,6 +18,7 @@ use url::Url;
 use crate::analysis::{self, SourceOverlays};
 use crate::errors::{ErrorCode, ErrorPhase, KiroError};
 use crate::formatter;
+use crate::grammar;
 use crate::lsp_symbols::{self, IndexedKind, SymbolDecl, SymbolIndex};
 
 pub fn run() -> Result<(), KiroError> {
@@ -338,12 +339,12 @@ impl LspState {
     }
 
     fn index_for_sibling_module(&mut self, path: &Path, module: &str) -> Option<SymbolIndex> {
-        let module_path = path.parent()?.join(format!("{}.kiro", module));
+        let module_path = path.parent()?.join(grammar::module_path_file_path(module));
         if let Some(index) = self.symbol_cache.get(&module_path) {
             return Some(index.clone());
         }
         let overlays = self.source_overlays();
-        let index = SymbolIndex::build(&module_path, &overlays);
+        let index = SymbolIndex::parse_module_as(module, &module_path, &overlays);
         self.symbol_cache.insert(module_path, index.clone());
         Some(index)
     }

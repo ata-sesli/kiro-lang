@@ -554,3 +554,137 @@ pure fn add(a: num, b: num) -> num {
         String::from_utf8_lossy(&output.stdout)
     );
 }
+
+#[test]
+fn nested_local_module_paths_resolve_to_nested_files() {
+    let dir = temp_project("nested_modules");
+    link_runtime(&dir);
+    write_manifest(&dir, "main.kiro");
+    fs::create_dir_all(dir.join("app")).expect("nested module dir should be created");
+    fs::write(
+        dir.join("main.kiro"),
+        r#"
+import io
+import app.math
+
+io.print(app.math.add(2, 3))
+"#,
+    )
+    .expect("main should be written");
+    fs::write(
+        dir.join("app/math.kiro"),
+        r#"
+pure fn add(a: num, b: num) -> num {
+    return a + b
+}
+"#,
+    )
+    .expect("nested module should be written");
+
+    let output = run_kiro(&["run"], &dir);
+
+    assert!(
+        output.status.success(),
+        "nested module import should run\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("5"),
+        "stdout should contain nested module result:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn nested_module_can_import_sibling_with_relative_name() {
+    let dir = temp_project("nested_relative_sibling");
+    link_runtime(&dir);
+    write_manifest(&dir, "main.kiro");
+    fs::create_dir_all(dir.join("app")).expect("nested module dir should be created");
+    fs::write(
+        dir.join("main.kiro"),
+        r#"
+import io
+import app.worker
+
+io.print(app.worker.run())
+"#,
+    )
+    .expect("main should be written");
+    fs::write(
+        dir.join("app/worker.kiro"),
+        r#"
+import util
+
+fn run() -> num {
+    return util.answer()
+}
+"#,
+    )
+    .expect("worker module should be written");
+    fs::write(
+        dir.join("app/util.kiro"),
+        r#"
+pure fn answer() -> num {
+    return 42
+}
+"#,
+    )
+    .expect("util module should be written");
+
+    let output = run_kiro(&["run"], &dir);
+
+    assert!(
+        output.status.success(),
+        "nested sibling import should run\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("42"),
+        "stdout should contain sibling module result:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn nested_import_does_not_create_leaf_module_alias() {
+    let dir = temp_project("nested_no_leaf_alias");
+    link_runtime(&dir);
+    write_manifest(&dir, "main.kiro");
+    fs::create_dir_all(dir.join("app")).expect("nested module dir should be created");
+    fs::write(
+        dir.join("main.kiro"),
+        r#"
+import io
+import app.math
+
+io.print(math.add(2, 3))
+"#,
+    )
+    .expect("main should be written");
+    fs::write(
+        dir.join("app/math.kiro"),
+        r#"
+pure fn add(a: num, b: num) -> num {
+    return a + b
+}
+"#,
+    )
+    .expect("nested module should be written");
+
+    let output = run_kiro(&["check"], &dir);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "leaf alias should not be imported implicitly"
+    );
+    assert!(
+        stderr.contains("Unknown variable 'math'")
+            || stderr.contains("Unknown function 'math.add'"),
+        "unexpected stderr:\n{}",
+        stderr
+    );
+}

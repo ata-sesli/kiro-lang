@@ -80,6 +80,54 @@ fn assert_success(output: &std::process::Output, context: &str) {
     );
 }
 
+struct ExecutionPair {
+    interpreted: std::process::Output,
+    compiled: std::process::Output,
+}
+
+impl ExecutionPair {
+    fn marked_stdout(&self, marker: &str) -> (Vec<&str>, Vec<&str>) {
+        (
+            marked_lines(&self.interpreted.stdout, marker),
+            marked_lines(&self.compiled.stdout, marker),
+        )
+    }
+}
+
+fn execute_both(name: &str, source: &str) -> ExecutionPair {
+    let dir = temp_project(name);
+    link_runtime(&dir);
+    fs::write(dir.join("main.kiro"), source).expect("main module should be written");
+
+    ExecutionPair {
+        interpreted: run_kiro(&["interpret", "main.kiro"], &dir),
+        compiled: run_kiro(&["run", "main.kiro"], &dir),
+    }
+}
+
+fn marked_lines<'a>(stdout: &'a [u8], marker: &str) -> Vec<&'a str> {
+    std::str::from_utf8(stdout)
+        .expect("kiro stdout should be utf-8")
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with(marker))
+        .collect()
+}
+
+#[test]
+fn interpreted_and_compiled_modes_agree_on_marked_core_output() {
+    const MARKER: &str = "EIR_PARITY:";
+    let source = include_str!("fixtures/eir/core.kiro");
+    let pair = execute_both("core_parity", source);
+
+    assert_success(&pair.interpreted, "core fixture should interpret");
+    assert_success(&pair.compiled, "core fixture should compile and run");
+
+    let (interpreted, compiled) = pair.marked_stdout(MARKER);
+    assert_eq!(interpreted, vec!["EIR_PARITY:ok"]);
+    assert_eq!(compiled, interpreted);
+}
+
 #[test]
 fn run_uses_compiled_path_without_interpreter_prepass() {
     let dir = temp_project("run_compiled");

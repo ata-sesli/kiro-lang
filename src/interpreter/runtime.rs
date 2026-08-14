@@ -897,17 +897,26 @@ impl SessionRuntime {
                     (self.current_module.clone(), name)
                 }
             }
-            IrExpr::FieldAccess { target, field, .. } => match *target {
-                IrExpr::Variable(module, _) => {
-                    let value = self.lookup_variable(&module)?;
-                    if matches!(value, RuntimeVal::Module(_, _)) {
-                        (module, field)
-                    } else {
-                        return Err("Target of field access is not a module.".to_string());
-                    }
+            IrExpr::FieldAccess {
+                target,
+                field,
+                span,
+            } => {
+                let target = IrExpr::FieldAccess {
+                    target,
+                    field,
+                    span,
+                };
+                if let Some((module, function)) = ir_module_call_target(&target, |module| {
+                    self.lookup_raw(module)
+                        .map(|value| matches!(value.data, RuntimeVal::Module(_, _)))
+                        .unwrap_or(false)
+                }) {
+                    (module, function)
+                } else {
+                    return Err("Expected module access for function call".to_string());
                 }
-                _ => return Err("Expected module access for function call".to_string()),
-            },
+            }
             _ => return Err("Expected function name or module access".to_string()),
         };
 
@@ -1070,7 +1079,9 @@ impl SessionRuntime {
         let cache_key = if let Some(canonical) = crate::canonical_std_module_name(module_name) {
             format!("std://{}", canonical)
         } else {
-            let full_path = self.current_dir.join(format!("{}.kiro", module_name));
+            let full_path = self
+                .current_dir
+                .join(crate::grammar::module_path_file_path(module_name));
             std::fs::canonicalize(&full_path)
                 .unwrap_or(full_path)
                 .to_string_lossy()
@@ -1096,7 +1107,9 @@ impl SessionRuntime {
                     module_name
                 ));
             } else {
-                let full_path = self.current_dir.join(format!("{}.kiro", module_name));
+                let full_path = self
+                    .current_dir
+                    .join(crate::grammar::module_path_file_path(module_name));
                 let resolved = std::fs::canonicalize(&full_path).unwrap_or(full_path.clone());
                 let content = std::fs::read_to_string(&resolved)
                     .map_err(|_| format!("Module '{}' not found", resolved.display()))?;
@@ -1287,6 +1300,35 @@ fn std_io_display_call(target: &IrExpr) -> Option<(String, String)> {
         return Some((module.clone(), field.clone()));
     }
     None
+}
+
+fn ir_path_segments(target: &IrExpr) -> Option<Vec<String>> {
+    match target {
+        IrExpr::Variable(name, _) => Some(vec![name.clone()]),
+        IrExpr::FieldAccess { target, field, .. } => {
+            let mut segments = ir_path_segments(target)?;
+            segments.push(field.clone());
+            Some(segments)
+        }
+        _ => None,
+    }
+}
+
+fn ir_module_call_target(
+    target: &IrExpr,
+    has_module: impl Fn(&str) -> bool,
+) -> Option<(String, String)> {
+    let segments = ir_path_segments(target)?;
+    if segments.len() < 2 {
+        return None;
+    }
+    let function = segments.last()?.clone();
+    let module = segments[..segments.len() - 1].join(".");
+    if has_module(&module) {
+        Some((module, function))
+    } else {
+        None
+    }
 }
 
 fn numbers(

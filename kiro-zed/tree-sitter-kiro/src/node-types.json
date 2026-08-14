@@ -934,7 +934,7 @@
         "required": true,
         "types": [
           {
-            "type": "identifier",
+            "type": "module_path",
             "named": true
           }
         ]
@@ -2040,6 +2040,10 @@
   },
   {
     "type": "minus_operator",
+    "named": true
+  },
+  {
+    "type": "module_path",
     "named": true
   },
   {

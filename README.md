@@ -122,12 +122,24 @@ Kiro uses a "sane default" approach to mutability.
 
 ### 2. Module System (Separate Files)
 
-Kiro supports code modularization with flat sibling modules. In V1, `import math` resolves to `math.kiro` beside the importing file. Dotted imports, path imports, aliases, and nested module trees are intentionally not part of the project layout yet.
+Kiro supports code modularization with sibling files and nested module paths. `import math` resolves to `math.kiro` beside the importing file. `import app.math` resolves to `app/math.kiro` beside the importing file.
+
+Nested imports keep their full path at call sites:
+
+```kiro
+import app.math
+
+app.math.add(2, 3)
+```
+
+`math.add(...)` is not implicitly valid unless `import math` also exists. Aliases and package-style path imports are intentionally out of scope.
 
 ```text
 my_app/
   kiro.toml
   main.kiro
+  app/
+    math.kiro
   math.kiro
   tools.kiro
   tools.rs

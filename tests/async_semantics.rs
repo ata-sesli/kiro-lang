@@ -241,6 +241,60 @@ main()
 }
 
 #[test]
+fn nested_imported_pure_function_compiles_without_await() {
+    let _guard = KIRO_BUILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = temp_project("nested_imported_pure");
+    let main_path = dir.join("main.kiro");
+    fs::create_dir_all(dir.join("app")).expect("nested module dir should be created");
+    fs::write(
+        dir.join("app/math.kiro"),
+        r#"
+pure fn add(a: num, b: num) -> num {
+    return a + b
+}
+"#,
+    )
+    .expect("nested math module should be written");
+    fs::write(
+        &main_path,
+        r#"
+import io
+import app.math
+
+fn main() {
+    io.print(app.math.add(1, 2))
+}
+
+main()
+"#,
+    )
+    .expect("main module should be written");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kiro-lang"))
+        .arg("build")
+        .arg(main_path)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("kiro-lang build should run");
+
+    assert!(
+        output.status.success(),
+        "nested imported pure module should compile successfully\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let generated =
+        fs::read_to_string(".kiro/build/src/main.rs").expect("generated main Rust should exist");
+    assert!(
+        generated.contains("crate::app::math::add")
+            && !generated.contains("crate::app::math::add((1.0).clone(), (2.0).clone()).await"),
+        "nested imported pure call should not be awaited:\n{}",
+        generated
+    );
+}
+
+#[test]
 fn imported_effectful_function_compiles_with_await() {
     let _guard = KIRO_BUILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = temp_project("imported_effectful");

@@ -203,7 +203,7 @@ module.exports = grammar({
       optional(seq(",", field("message", $.string))),
     ),
 
-    import_statement: $ => seq($.import_keyword, field("module", $.identifier)),
+    import_statement: $ => seq($.import_keyword, field("module", $.module_path)),
 
     expression_statement: $ => $.expression,
 
@@ -377,6 +377,8 @@ module.exports = grammar({
     escape_sequence: _ => token.immediate(seq("\\", /./)),
 
     identifier: _ => /[a-z_][a-zA-Z0-9_]*/,
+
+    module_path: _ => /[a-z_][a-zA-Z0-9_]*(\.[a-z_][a-zA-Z0-9_]*)*/,
 
     type_identifier: _ => /[A-Z][a-zA-Z0-9_]*/,
 

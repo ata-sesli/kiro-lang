@@ -81,6 +81,9 @@ impl BuildManager {
 
     pub fn save_file(&self, name_without_ext: &str, code: String) -> Result<(), String> {
         let file_path = format!("{}/src/{}.rs", self.build_dir, name_without_ext);
+        if let Some(parent) = Path::new(&file_path).parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
         if write_if_changed(&file_path, &code)? {
             println!("💾 Code saved to {}", file_path);
         }

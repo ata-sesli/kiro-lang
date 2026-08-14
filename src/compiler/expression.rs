@@ -130,18 +130,26 @@ impl Compiler {
 
             // 3. Compile Field Access
             Expression::FieldAccess(target, _, field) => {
-                // Check if the target is a known module (e.g., "math")
-                if let Expression::Variable(v) = &*target {
-                    let module_name = crate::grammar::variable_name(v);
-                    if self.imported_modules.contains(module_name) {
-                        return format!("{}::{}", module_name, crate::grammar::field_name(&field));
+                let member_name = crate::grammar::field_name(&field);
+                if let Some(mut segments) = crate::grammar::expression_path_segments(&target) {
+                    segments.push(member_name.to_string());
+                    if segments.len() >= 2 {
+                        let module_name = segments[..segments.len() - 1].join(".");
+                        if self.imported_modules.contains(&module_name) {
+                            let canonical_module = self.canonical_import_name(&module_name);
+                            return format!(
+                                "crate::{}::{}",
+                                crate::grammar::module_path_rust_path(&canonical_module),
+                                member_name
+                            );
+                        }
                     }
                 }
 
                 format!(
                     "{}.kiro_get(|v| v.{}.clone())",
                     self.compile_expr(*target),
-                    crate::grammar::field_name(&field)
+                    member_name
                 )
             }
 

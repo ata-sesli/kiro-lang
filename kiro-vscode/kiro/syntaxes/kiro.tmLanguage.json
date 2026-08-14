@@ -9,6 +9,9 @@
       "include": "#strings"
     },
     {
+      "include": "#imports"
+    },
+    {
       "include": "#keywords"
     },
     {
@@ -41,6 +44,21 @@
         {
           "name": "constant.character.escape.kiro",
           "match": "\\\\."
+        }
+      ]
+    },
+    "imports": {
+      "patterns": [
+        {
+          "match": "\\b(import)\\s+([a-z_][a-zA-Z0-9_]*(?:\\.[a-z_][a-zA-Z0-9_]*)*)",
+          "captures": {
+            "1": {
+              "name": "storage.type.kiro"
+            },
+            "2": {
+              "name": "entity.name.namespace.kiro"
+            }
+          }
         }
       ]
     },

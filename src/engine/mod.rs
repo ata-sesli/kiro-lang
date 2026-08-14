@@ -224,8 +224,7 @@ impl ModuleLoader for DefaultModuleLoader {
             )));
         }
 
-        let filename = format!("{}.kiro", module_name);
-        let full_path = from_dir.join(&filename);
+        let full_path = from_dir.join(crate::grammar::module_path_file_path(module_name));
         let resolved = std::fs::canonicalize(&full_path).unwrap_or(full_path.clone());
         let source = std::fs::read_to_string(&resolved)
             .map_err(|_| EngineError::Load(format!("Module '{}' not found", resolved.display())))?;
