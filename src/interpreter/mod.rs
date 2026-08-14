@@ -2,10 +2,12 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use kiro_runtime::{KiroError as HostError, RuntimeVal as HostRuntimeVal};
 
+pub mod eir_runtime;
 pub mod legacy;
 pub mod registry;
 pub mod runtime;
@@ -37,6 +39,25 @@ impl Default for InterpreterLimits {
             max_call_depth: None,
             timeout: None,
         }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CancellationToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl CancellationToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
     }
 }
 

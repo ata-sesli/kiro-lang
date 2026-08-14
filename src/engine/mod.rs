@@ -8,6 +8,8 @@ use std::time::Duration;
 use kiro_runtime::{KiroError as HostError, RuntimeVal as HostRuntimeVal};
 
 use crate::grammar::{self, Statement};
+#[cfg(test)]
+use crate::interpreter::eir_runtime::EirRuntime;
 use crate::interpreter::values::RuntimeVal as InterpreterRuntimeVal;
 use crate::interpreter::{
     HostCallCtx as InterpreterHostCallCtx, HostFnHandler, InterpreterLimits, SessionRuntime,
@@ -17,6 +19,8 @@ use crate::{
     StdAssets, canonical_std_module_name, removed_print_statement, std_asset_path,
     unsupported_let_line,
 };
+#[cfg(test)]
+use crate::{eir::EirProgram, hir::FunctionId};
 
 pub use crate::interpreter::HostMode;
 
@@ -470,6 +474,36 @@ impl Engine {
         interpreter_to_value(result)
     }
 
+    #[cfg(test)]
+    fn call_eir_function(
+        &self,
+        program: &EirProgram,
+        function: FunctionId,
+        args: Vec<Value>,
+        options: ExecOptions,
+    ) -> Result<Value, EngineError> {
+        let options = if options == ExecOptions::default() {
+            self.default_options.clone()
+        } else {
+            options
+        };
+        let mut runtime =
+            EirRuntime::new(program).map_err(|error| EngineError::Runtime(error.to_string()))?;
+        runtime.set_limits(InterpreterLimits {
+            max_steps: options.limits.max_steps,
+            max_call_depth: options.limits.max_call_depth,
+            timeout: options.limits.timeout_ms.map(Duration::from_millis),
+        });
+        let args = args
+            .into_iter()
+            .map(value_to_interpreter_runtime)
+            .collect::<Result<Vec<_>, _>>()?;
+        let value = runtime
+            .call_function(function, args)
+            .map_err(|error| EngineError::Runtime(error.to_string()))?;
+        interpreter_to_value(value)
+    }
+
     fn prepare_runtime(
         &self,
         script: &CompiledScript,
@@ -613,5 +647,58 @@ fn interpreter_to_value(value: InterpreterRuntimeVal) -> Result<Value, EngineErr
             "Unsupported interpreter return value for embedding: {}",
             other
         ))),
+    }
+}
+
+#[cfg(test)]
+mod eir_tests {
+    use super::*;
+    use crate::eir::{
+        BasicBlock, ConstId, Constant, EirFunction, EirProgram, Instruction, InstructionKind,
+        SlotId, Terminator, TerminatorKind,
+    };
+    use crate::hir::{Effects, FunctionId, Signature, SourceAnchor, SourceId, TypeId, TypeTable};
+
+    #[test]
+    fn engine_can_select_eir_execution_without_changing_the_default_path() {
+        let anchor = SourceAnchor::try_from_offsets(SourceId::new(0), 4, 11)
+            .expect("test anchor should be valid");
+        let program = EirProgram {
+            types: TypeTable::new(),
+            constants: vec![Constant::Num(7.0)],
+            functions: vec![EirFunction {
+                id: FunctionId::new(0),
+                name: "answer".to_string(),
+                signature: Signature::new([], TypeId::NUM, Effects::NONE),
+                slots: vec![TypeId::NUM],
+                parameter_count: 0,
+                blocks: vec![BasicBlock {
+                    instructions: vec![Instruction {
+                        kind: InstructionKind::Const {
+                            dst: SlotId::new(0),
+                            constant: ConstId::new(0),
+                        },
+                        anchor,
+                    }],
+                    terminator: Terminator {
+                        kind: TerminatorKind::Return(Some(SlotId::new(0))),
+                        anchor,
+                    },
+                }],
+            }],
+            module_initializers: Vec::new(),
+        };
+        let engine = Engine::builder().build();
+
+        let value = engine
+            .call_eir_function(
+                &program,
+                FunctionId::new(0),
+                Vec::new(),
+                ExecOptions::default(),
+            )
+            .expect("internal EIR path should execute");
+
+        assert_eq!(value, Value::Num(7.0));
     }
 }

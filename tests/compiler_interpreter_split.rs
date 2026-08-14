@@ -6,6 +6,11 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use kiro_lang::analysis::{SourceOverlays, analyze_path_with_info};
+use kiro_lang::eir::lower_program;
+use kiro_lang::interpreter::eir_runtime::EirRuntime;
+use kiro_lang::interpreter::values::RuntimeVal;
+
 static KIRO_BUILD_LOCK: Mutex<()> = Mutex::new(());
 
 fn temp_project(name: &str) -> PathBuf {
@@ -126,6 +131,53 @@ fn interpreted_and_compiled_modes_agree_on_marked_core_output() {
     let (interpreted, compiled) = pair.marked_stdout(MARKER);
     assert_eq!(interpreted, vec!["EIR_PARITY:ok"]);
     assert_eq!(compiled, interpreted);
+}
+
+#[test]
+fn eir_and_generated_rust_agree_on_the_first_execution_slice() {
+    const FUNCTION_SOURCE: &str = r#"
+fn calculate(limit: num) -> num {
+    var current = 0
+    loop on (current < limit) {
+        current = current + 1
+        on (current == 4) {
+            break
+        }
+    }
+    return current
+}
+"#;
+    let dir = temp_project("eir_generated_parity");
+    link_runtime(&dir);
+    let eir_path = dir.join("eir.kiro");
+    fs::write(&eir_path, FUNCTION_SOURCE).expect("EIR source should be written");
+    let analysis = analyze_path_with_info(&eir_path, &SourceOverlays::new())
+        .expect("EIR source should analyze");
+    let calculate = analysis.hir.modules[0]
+        .function("calculate")
+        .expect("calculate function")
+        .id;
+    let program = lower_program(&analysis.hir).expect("supported source should lower");
+    let mut runtime = EirRuntime::new(&program).expect("verified EIR runtime");
+    let eir_value = runtime
+        .call_function(calculate, vec![RuntimeVal::Float(10.0)])
+        .expect("EIR calculate should run");
+
+    fs::write(
+        dir.join("main.kiro"),
+        format!(
+            "import io\n\n{FUNCTION_SOURCE}\ncheck calculate(10) == 4, \"generated result mismatch\"\nio.print(\"EIR_PHASE6:4\")\n"
+        ),
+    )
+    .expect("compiled source should be written");
+    let compiled = run_kiro(&["run", "main.kiro"], &dir);
+
+    assert_eq!(eir_value, RuntimeVal::Float(4.0));
+    assert_success(&compiled, "generated Rust should preserve the EIR result");
+    assert_eq!(
+        marked_lines(&compiled.stdout, "EIR_PHASE6:"),
+        ["EIR_PHASE6:4"]
+    );
 }
 
 #[test]
