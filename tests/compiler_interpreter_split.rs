@@ -415,7 +415,7 @@ fn no_interpret_flag_is_removed_from_bare_invocation() {
 }
 
 #[test]
-fn interpret_executes_with_v2_interpreter() {
+fn interpret_executes_with_eir_runtime() {
     let dir = temp_project("interpret");
     fs::write(
         dir.join("main.kiro"),
@@ -620,5 +620,30 @@ io.print("must not run")
         !stderr.contains("error[E"),
         "ordinary analyzer errors should not leak Rust diagnostics:\n{}",
         stderr
+    );
+}
+
+#[test]
+fn interpret_executes_canonical_eir_collection_mutation() {
+    let dir = temp_project("interpret_eir_collection_mutation");
+    fs::write(
+        dir.join("main.kiro"),
+        r#"
+import io
+
+var values = list num { 1 }
+values push 2
+check len values == 2, "EIR mutation was not preserved"
+io.print("EIR_INTERPRET:ok")
+"#,
+    )
+    .expect("main module should be written");
+
+    let output = run_kiro(&["interpret", "main.kiro"], &dir);
+
+    assert_success(&output, "interpret should execute canonical EIR");
+    assert_eq!(
+        marked_lines(&output.stdout, "EIR_INTERPRET:"),
+        ["EIR_INTERPRET:ok"]
     );
 }

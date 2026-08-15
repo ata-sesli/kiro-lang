@@ -8,12 +8,7 @@ use std::time::Duration;
 use kiro_runtime::{KiroError as HostError, RuntimeVal as HostRuntimeVal};
 
 pub mod eir_runtime;
-pub mod legacy;
-pub mod registry;
-pub mod runtime;
 pub mod values;
-
-pub use runtime::SessionRuntime;
 
 use values::RuntimeVal;
 

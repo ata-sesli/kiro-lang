@@ -693,6 +693,7 @@ impl<'a> FunctionBuilder<'a> {
         error_clauses: &[crate::hir::HirErrorClause],
         anchor: SourceAnchor,
     ) -> Result<(), LowerError> {
+        let condition_type = condition.ty;
         let condition = self.require_value(condition)?;
         let is_error = self.allocate_slot(TypeId::BOOL, anchor)?;
         self.emit(
@@ -717,22 +718,28 @@ impl<'a> FunctionBuilder<'a> {
         );
 
         self.current = normal_dispatch;
-        let is_truthy = self.allocate_slot(TypeId::BOOL, anchor)?;
-        self.emit(
-            InstructionKind::IsTruthy {
-                dst: is_truthy,
-                value: condition,
-            },
-            anchor,
-        );
-        self.terminate(
-            TerminatorKind::Branch {
-                condition: is_truthy,
-                then_block,
-                else_block,
-            },
-            anchor,
-        );
+        if condition_type == TypeId::VOID {
+            // A non-error result from `void!` is successful even though plain
+            // Void is not generally truthy.
+            self.terminate(TerminatorKind::Jump(then_block), anchor);
+        } else {
+            let is_truthy = self.allocate_slot(TypeId::BOOL, anchor)?;
+            self.emit(
+                InstructionKind::IsTruthy {
+                    dst: is_truthy,
+                    value: condition,
+                },
+                anchor,
+            );
+            self.terminate(
+                TerminatorKind::Branch {
+                    condition: is_truthy,
+                    then_block,
+                    else_block,
+                },
+                anchor,
+            );
+        }
 
         self.current = then_block;
         self.lower_statements(body)?;
@@ -848,11 +855,10 @@ impl<'a> FunctionBuilder<'a> {
                     .iter()
                     .map(|argument| self.require_value(argument))
                     .collect::<Result<Vec<_>, _>>()?;
-                let dst = if expression.ty == TypeId::VOID {
-                    None
-                } else {
-                    Some(self.allocate_slot(expression.ty, expression.anchor)?)
-                };
+                // A failable `void!` call still produces a runtime value: either
+                // Void or the declared error. Keep a destination for every call
+                // so that value can be bound and inspected by an error clause.
+                let dst = Some(self.allocate_slot(expression.ty, expression.anchor)?);
                 let args = args.into_boxed_slice();
                 let instruction = match kind {
                     HirCallKind::Direct(function) => InstructionKind::CallDirect {

@@ -634,11 +634,14 @@ fn verify_instruction(
             let return_type = callee.signature.return_type();
             match (return_type, dst) {
                 (TypeId::VOID, None) => {}
-                (TypeId::VOID, Some(_)) => {
-                    errors.push(location(VerifyErrorKind::UnexpectedCallDestination {
-                        function: *callee_id,
-                    }))
-                }
+                (TypeId::VOID, Some(destination)) => check_slot_type(
+                    function,
+                    *destination,
+                    TypeId::VOID,
+                    &location,
+                    errors,
+                    false,
+                ),
                 (_, Some(destination)) => check_slot_type(
                     function,
                     *destination,
@@ -804,7 +807,7 @@ fn check_call_signature(
     match (signature.return_type(), dst) {
         (TypeId::VOID, None) => {}
         (TypeId::VOID, Some(slot)) => {
-            errors.push(location(VerifyErrorKind::InvalidAggregateOperand(slot)))
+            check_slot_type(owner, slot, TypeId::VOID, location, errors, false)
         }
         (return_type, Some(slot)) => {
             check_slot_type(owner, slot, return_type, location, errors, false)

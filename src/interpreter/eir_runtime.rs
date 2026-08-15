@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
@@ -37,6 +38,7 @@ pub enum EirRuntimeErrorKind {
     },
     UninitializedSlot(SlotId),
     UninitializedGlobal(crate::eir::GlobalId),
+    PoisonedGlobals,
     EmptyAddress,
     PoisonedAddress,
     MissingField(crate::hir::FieldId),
@@ -104,6 +106,9 @@ impl fmt::Display for EirRuntimeError {
             }
             EirRuntimeErrorKind::UninitializedGlobal(global) => {
                 write!(formatter, "read uninitialized global g{}", global.raw())
+            }
+            EirRuntimeErrorKind::PoisonedGlobals => {
+                formatter.write_str("module global storage is poisoned")
             }
             EirRuntimeErrorKind::EmptyAddress => {
                 formatter.write_str("dereferenced an empty address")
@@ -174,7 +179,7 @@ struct Frame {
 pub struct EirRuntime<'program> {
     program: &'program EirProgram,
     frames: Vec<Frame>,
-    globals: Vec<Option<RuntimeVal>>,
+    globals: Arc<Mutex<Vec<Option<RuntimeVal>>>>,
     limits: InterpreterLimits,
     cancellation: Option<CancellationToken>,
     step_count: u64,
@@ -198,7 +203,7 @@ impl<'program> EirRuntime<'program> {
         Ok(Self {
             program,
             frames: Vec::new(),
-            globals: vec![None; program.globals.len()],
+            globals: Arc::new(Mutex::new(vec![None; program.globals.len()])),
             limits: InterpreterLimits::default(),
             cancellation: None,
             step_count: 0,
@@ -330,7 +335,7 @@ impl<'program> EirRuntime<'program> {
             self.tick(anchor)?;
             let action = {
                 let frame = self.frames.last_mut().expect("execution has a root frame");
-                step_frame(self.program, &mut self.globals, frame)?
+                step_frame(self.program, &self.globals, frame)?
             };
             match action {
                 StepAction::Continue => {}
@@ -399,6 +404,43 @@ impl<'program> EirRuntime<'program> {
             )),
             HostMode::Simulate => Ok(mock_value(metadata.signature.return_type(), self.program)),
             HostMode::Execute => {
+                if crate::is_std_io_module_name(&metadata.module)
+                    && crate::is_std_io_display_function(&metadata.name)
+                {
+                    let value = args.first().ok_or_else(|| {
+                        runtime_error(
+                            anchor,
+                            EirRuntimeErrorKind::ArgumentCount {
+                                expected: 1,
+                                actual: 0,
+                            },
+                        )
+                    })?;
+                    match metadata.name.as_str() {
+                        "print" => println!("{value}"),
+                        "write" => {
+                            print!("{value}");
+                            io::stdout().flush().map_err(|error| {
+                                runtime_error(
+                                    anchor,
+                                    EirRuntimeErrorKind::HostCallFailed(error.to_string()),
+                                )
+                            })?;
+                        }
+                        "eprint" => {
+                            eprint!("{value}");
+                            io::stderr().flush().map_err(|error| {
+                                runtime_error(
+                                    anchor,
+                                    EirRuntimeErrorKind::HostCallFailed(error.to_string()),
+                                )
+                            })?;
+                        }
+                        "eprintline" => eprintln!("{value}"),
+                        _ => unreachable!("display helper checked above"),
+                    }
+                    return Ok(RuntimeVal::Void);
+                }
                 let handler = self
                     .host_registry
                     .get(&metadata.module, &metadata.name)
@@ -458,8 +500,10 @@ impl<'program> EirRuntime<'program> {
         let cancellation = self.cancellation.clone();
         let host_mode = self.host_mode;
         let host_registry = self.host_registry.clone();
+        let globals = self.globals.clone();
         self.spawned.push(std::thread::spawn(move || {
             let mut runtime = EirRuntime::new(&program)?;
+            runtime.globals = globals;
             runtime.set_limits(limits);
             runtime.host_mode = host_mode;
             runtime.host_registry = host_registry;
@@ -532,7 +576,7 @@ enum StepAction {
 
 fn step_frame(
     program: &EirProgram,
-    globals: &mut [Option<RuntimeVal>],
+    globals: &Arc<Mutex<Vec<Option<RuntimeVal>>>>,
     frame: &mut Frame,
 ) -> Result<StepAction, EirRuntimeError> {
     let function_index = usize::try_from(frame.function).expect("verified function ID fits usize");
@@ -559,7 +603,7 @@ fn active_anchor(program: &EirProgram, frame: &Frame) -> SourceAnchor {
 
 fn execute_instruction(
     program: &EirProgram,
-    globals: &mut [Option<RuntimeVal>],
+    globals: &Arc<Mutex<Vec<Option<RuntimeVal>>>>,
     frame: &mut Frame,
     instruction: &Instruction,
 ) -> Result<StepAction, EirRuntimeError> {
@@ -584,21 +628,33 @@ fn execute_instruction(
         }
         InstructionKind::MoveGlobal { dst, global } => {
             let index = usize::try_from(*global).expect("verified global ID fits usize");
+            let mut globals = globals
+                .lock()
+                .map_err(|_| runtime_error(anchor, EirRuntimeErrorKind::PoisonedGlobals))?;
             let value = globals[index].take().ok_or_else(|| {
                 runtime_error(anchor, EirRuntimeErrorKind::UninitializedGlobal(*global))
             })?;
+            drop(globals);
             write_slot(frame, *dst, value, anchor)?;
         }
         InstructionKind::LoadGlobal { dst, global } => {
             let index = usize::try_from(*global).expect("verified global ID fits usize");
+            let globals = globals
+                .lock()
+                .map_err(|_| runtime_error(anchor, EirRuntimeErrorKind::PoisonedGlobals))?;
             let value = globals[index].as_ref().cloned().ok_or_else(|| {
                 runtime_error(anchor, EirRuntimeErrorKind::UninitializedGlobal(*global))
             })?;
+            drop(globals);
             write_slot(frame, *dst, value, anchor)?;
         }
         InstructionKind::StoreGlobal { global, src } => {
             let index = usize::try_from(*global).expect("verified global ID fits usize");
-            globals[index] = Some(read_slot(frame, *src, anchor)?.clone());
+            let value = read_slot(frame, *src, anchor)?.clone();
+            globals
+                .lock()
+                .map_err(|_| runtime_error(anchor, EirRuntimeErrorKind::PoisonedGlobals))?[index] =
+                Some(value);
         }
         InstructionKind::MakeError { dst, error } => {
             write_slot(

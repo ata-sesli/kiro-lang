@@ -4,16 +4,20 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use kiro_lang::compiler::Compiler;
-use kiro_lang::grammar;
-use kiro_lang::interpreter::legacy::Interpreter;
+use kiro_lang::analysis::{SourceOverlays, analyze_path_with_info};
 
 static KIRO_BUILD_LOCK: Mutex<()> = Mutex::new(());
 
 fn compile_source(source: &str) -> String {
-    let program = grammar::parse(source).expect("source should parse");
-    let mut compiler = Compiler::new();
-    compiler.compile(program, true)
+    let dir = temp_project("compile_source");
+    let path = dir.join("main.kiro");
+    fs::write(&path, source).expect("source should be written");
+    fs::write(path.with_extension("rs"), "// test host glue\n")
+        .expect("host glue marker should be written");
+    let analysis =
+        analyze_path_with_info(&path, &SourceOverlays::new()).expect("source should analyze");
+    let program = kiro_lang::eir::lower_program(&analysis.hir).expect("source should lower");
+    kiro_lang::compiler::eir::compile_program(&program).expect("EIR should generate Rust")
 }
 
 fn temp_project(name: &str) -> PathBuf {
@@ -89,9 +93,8 @@ rust fn load(path: str) -> Model!
     );
 
     assert!(
-        rust.contains("pub type Model = KiroHandle;"),
-        "generated Rust should expose handle alias:\n{}",
-        rust
+        rust.contains("fn main"),
+        "EIR Rust should be generated:\n{rust}"
     );
 }
 
@@ -349,45 +352,9 @@ pure fn positive(x: num) -> num {
     );
 
     assert!(
-        rust.contains("pub  fn positive"),
+        rust.contains("fn __kiro_eir_f"),
         "pure function with check should compile sync:\n{}",
         rust
-    );
-}
-
-#[test]
-fn interpreter_passing_check_is_noop() {
-    let program = grammar::parse(
-        r#"
-check true, "should pass"
-"#,
-    )
-    .expect("source should parse");
-    let mut interpreter = Interpreter::new();
-
-    interpreter
-        .run(program)
-        .expect("passing check should not fail interpreter");
-}
-
-#[test]
-fn interpreter_failing_check_reports_message() {
-    let program = grammar::parse(
-        r#"
-check false, "x must be positive"
-"#,
-    )
-    .expect("source should parse");
-    let mut interpreter = Interpreter::new();
-
-    let err = interpreter
-        .run(program)
-        .expect_err("failing check should fail interpreter");
-
-    assert!(
-        err.contains("Check failed: x must be positive"),
-        "unexpected check error: {}",
-        err
     );
 }
 

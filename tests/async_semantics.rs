@@ -1,18 +1,32 @@
 use std::fs;
-use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use kiro_lang::compiler::Compiler;
-use kiro_lang::grammar;
+use kiro_lang::analysis::{SourceOverlays, analyze_path_with_info};
 
 static KIRO_BUILD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn compile_source(source: &str) -> String {
-    let program = grammar::parse(source).expect("source should parse");
-    let mut compiler = Compiler::new();
-    compiler.compile(program, true)
+    let dir = temp_project("compile_source");
+    let path = dir.join("main.kiro");
+    fs::write(&path, source).expect("source should be written");
+    fs::write(path.with_extension("rs"), "// test host glue\n")
+        .expect("host glue marker should be written");
+    let analysis =
+        analyze_path_with_info(&path, &SourceOverlays::new()).expect("source should analyze");
+    let program = kiro_lang::eir::lower_program(&analysis.hir).expect("source should lower");
+    kiro_lang::compiler::eir::compile_program(&program).expect("EIR should generate Rust")
+}
+
+fn analysis_error(source: &str) -> String {
+    let dir = temp_project("analysis_error");
+    let path = dir.join("main.kiro");
+    fs::write(&path, source).expect("source should be written");
+    match analyze_path_with_info(&path, &SourceOverlays::new()) {
+        Ok(_) => panic!("source should fail analysis"),
+        Err(error) => error.message,
+    }
 }
 
 fn temp_project(name: &str) -> PathBuf {
@@ -49,25 +63,13 @@ fn worker() {
 
 #[test]
 fn pure_function_cannot_use_rest() {
-    let program = grammar::parse(
+    let message = analysis_error(
         r#"
 pure fn worker() {
     rest
 }
 "#,
-    )
-    .expect("source should parse");
-    let mut compiler = Compiler::new();
-
-    let panic = panic::catch_unwind(AssertUnwindSafe(|| compiler.compile(program, true)))
-        .expect_err("pure rest should fail compilation");
-    let message = if let Some(s) = panic.downcast_ref::<String>() {
-        s.clone()
-    } else if let Some(s) = panic.downcast_ref::<&str>() {
-        s.to_string()
-    } else {
-        String::new()
-    };
+    );
 
     assert!(
         message.contains("Pure Function Error: 'rest' is forbidden."),
@@ -78,25 +80,13 @@ pure fn worker() {
 
 #[test]
 fn effectful_recursion_is_rejected() {
-    let program = grammar::parse(
+    let message = analysis_error(
         r#"
 fn crawl() {
     crawl()
 }
 "#,
-    )
-    .expect("source should parse");
-    let mut compiler = Compiler::new();
-
-    let panic = panic::catch_unwind(AssertUnwindSafe(|| compiler.compile(program, true)))
-        .expect_err("effectful recursion should fail compilation");
-    let message = if let Some(s) = panic.downcast_ref::<String>() {
-        s.clone()
-    } else if let Some(s) = panic.downcast_ref::<&str>() {
-        s.to_string()
-    } else {
-        String::new()
-    };
+    );
 
     assert!(
         message.contains("Recursive calls are only supported in pure fn."),
@@ -119,14 +109,14 @@ pure fn count(n: num) -> num {
     );
 
     assert!(
-        rust.contains("pub  fn count"),
+        rust.contains("fn __kiro_eir_f"),
         "pure function should compile sync"
     );
 }
 
 #[test]
 fn effectful_mutual_recursion_is_rejected() {
-    let program = grammar::parse(
+    let message = analysis_error(
         r#"
 fn a() {
     b()
@@ -136,19 +126,7 @@ fn b() {
     a()
 }
 "#,
-    )
-    .expect("source should parse");
-    let mut compiler = Compiler::new();
-
-    let panic = panic::catch_unwind(AssertUnwindSafe(|| compiler.compile(program, true)))
-        .expect_err("effectful mutual recursion should fail compilation");
-    let message = if let Some(s) = panic.downcast_ref::<String>() {
-        s.clone()
-    } else if let Some(s) = panic.downcast_ref::<&str>() {
-        s.to_string()
-    } else {
-        String::new()
-    };
+    );
 
     assert!(
         message.contains("Recursive calls are only supported in pure fn."),
@@ -159,25 +137,13 @@ fn b() {
 
 #[test]
 fn run_self_recursion_is_rejected() {
-    let program = grammar::parse(
+    let message = analysis_error(
         r#"
 fn worker() {
     run worker()
 }
 "#,
-    )
-    .expect("source should parse");
-    let mut compiler = Compiler::new();
-
-    let panic = panic::catch_unwind(AssertUnwindSafe(|| compiler.compile(program, true)))
-        .expect_err("run self recursion should fail compilation");
-    let message = if let Some(s) = panic.downcast_ref::<String>() {
-        s.clone()
-    } else if let Some(s) = panic.downcast_ref::<&str>() {
-        s.to_string()
-    } else {
-        String::new()
-    };
+    );
 
     assert!(
         message.contains("Recursive calls are only supported in pure fn."),

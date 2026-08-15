@@ -19,6 +19,11 @@ use hir_lower::{HirModuleInput, lower_modules};
 
 pub type SourceOverlays = HashMap<PathBuf, String>;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct AnalysisOptions {
+    pub allow_registered_host_functions: bool,
+}
+
 pub(crate) fn validate_program_semantics(
     compiler: &mut Compiler,
     program: &ast::Program,
@@ -51,6 +56,14 @@ pub fn analyze_path_with_info(
     path: impl AsRef<Path>,
     overlays: &SourceOverlays,
 ) -> Result<AnalysisResult, KiroError> {
+    analyze_path_with_info_options(path, overlays, AnalysisOptions::default())
+}
+
+pub(crate) fn analyze_path_with_info_options(
+    path: impl AsRef<Path>,
+    overlays: &SourceOverlays,
+    options: AnalysisOptions,
+) -> Result<AnalysisResult, KiroError> {
     let root = normalize_path(path.as_ref());
     if !root.exists() && !overlays.contains_key(&root) {
         return Err(KiroError::file_not_found(&root.display().to_string()));
@@ -73,6 +86,7 @@ pub fn analyze_path_with_info(
         modules: HashMap::new(),
         module_functions: HashMap::new(),
         missing_glue: Vec::new(),
+        allow_registered_host_functions: options.allow_registered_host_functions,
     };
 
     ctx.collect_recursive(&name, &base_dir, Some(root.clone()))?;
@@ -145,6 +159,7 @@ struct AnalysisCtx {
     modules: HashMap<String, AnalyzedModule>,
     module_functions: HashMap<(String, String), FunctionInfo>,
     missing_glue: Vec<MissingGlueInfo>,
+    allow_registered_host_functions: bool,
 }
 
 struct MissingGlueInfo {
@@ -196,7 +211,10 @@ impl AnalysisCtx {
         }
 
         let rust_decls = rust_decl_infos(&program);
-        if !is_reserved_std_module_name(&module_name) && !rust_decls.is_empty() {
+        if !self.allow_registered_host_functions
+            && !is_reserved_std_module_name(&module_name)
+            && !rust_decls.is_empty()
+        {
             let glue_path = path.with_extension("rs");
             if !glue_path.exists() {
                 let mut missing = rust_decls;

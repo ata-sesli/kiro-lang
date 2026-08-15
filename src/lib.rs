@@ -9,7 +9,6 @@ pub mod grammar;
 pub mod hir;
 pub mod host_generator;
 pub mod interpreter;
-pub mod ir;
 #[cfg(feature = "lsp")]
 pub mod lsp;
 #[cfg(feature = "lsp")]

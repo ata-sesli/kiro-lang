@@ -214,3 +214,26 @@ main()
     assert_eq!(out, Value::Num(1.0));
     assert_eq!(*calls.lock().unwrap(), 1);
 }
+
+#[test]
+fn embedded_engine_executes_canonical_eir_collection_mutation() {
+    let engine = Engine::builder().build();
+    let script = engine
+        .compile_module(
+            "main",
+            r#"
+fn main() -> num {
+    var values = list num { 1 }
+    values push 2
+    return len values
+}
+"#,
+        )
+        .expect("compile should succeed");
+
+    let out = engine
+        .run_main(&script, execute_options())
+        .expect("EIR collection mutation should execute");
+
+    assert_eq!(out, Value::Num(2.0));
+}

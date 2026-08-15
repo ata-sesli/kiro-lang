@@ -1,24 +1,23 @@
 use kiro_lang::analysis::{self, SourceOverlays};
 use kiro_lang::build_manager::{BuildManager, BuildRequirements, GENERATED_BUILD_DIR};
 use kiro_lang::compiler;
-use kiro_lang::errors::{self, KiroError, emit_error, panic_payload_to_string};
+use kiro_lang::eir::{LowerError, LowerErrorKind, VerifyErrorKind};
+use kiro_lang::errors::{self, KiroError, emit_error};
 use kiro_lang::formatter;
-use kiro_lang::grammar;
 use kiro_lang::host_generator::{self, HostGenOptions};
-use kiro_lang::interpreter::SessionRuntime;
-use kiro_lang::ir::IrModule;
+use kiro_lang::interpreter::HostMode;
+use kiro_lang::interpreter::eir_runtime::{EirRuntime, EirRuntimeError, EirRuntimeErrorKind};
 use kiro_lang::project;
 use kiro_lang::test_runner;
 use kiro_lang::{
-    StdAssets, canonical_std_module_name, is_reserved_std_module_name, removed_print_statement,
-    std_asset_path, unsupported_let_statement,
+    StdAssets, canonical_std_module_name, is_reserved_std_module_name, std_asset_path,
 };
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 
 use clap::{Parser, Subcommand};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use toml_edit::{DocumentMut, Item, Table, value};
 
@@ -630,10 +629,10 @@ fn analyze_with_info_or_emit(filename: &str) -> Option<analysis::AnalysisResult>
 }
 
 fn run_interpret_pipeline(file: &str) -> bool {
-    if analyze_with_info_or_emit(file).is_none() {
+    let Some(analysis) = analyze_with_info_or_emit(file) else {
         return false;
-    }
-    run_interpreter(file)
+    };
+    run_interpreter(&analysis)
 }
 
 // Returns true if success
@@ -669,94 +668,132 @@ fn execute_compiled_pipeline(file: &str, do_run: bool, emit_rust: bool, verbose:
     true
 }
 
-fn run_interpreter(filename: &str) -> bool {
-    if !std::path::Path::new(filename).exists() {
-        emit_error(&KiroError::file_not_found(filename));
-        return false;
-    }
-
-    let source = match fs::read_to_string(filename) {
-        Ok(s) => s,
-        Err(e) => {
-            emit_error(&KiroError::new(
-                errors::ErrorCode::FileNotFound,
-                errors::ErrorPhase::Cli,
-                format!("Read error: {}", e),
-            ));
+fn run_interpreter(analysis: &analysis::AnalysisResult) -> bool {
+    let program = match kiro_lang::eir::lower_program(&analysis.hir) {
+        Ok(program) => program,
+        Err(error) => {
+            emit_error(&eir_lowering_diagnostic(error, analysis));
             return false;
         }
     };
-    if let Some(found) = unsupported_let_statement(&source) {
-        emit_error(&KiroError::unsupported_keyword_with_source(
-            filename,
-            &source,
-            found.line,
-            found.column,
-            "let",
-        ));
-        return false;
-    }
-    if let Some(removed) = removed_print_statement(&source) {
-        emit_error(&KiroError::removed_print_statement(
-            filename,
-            &source,
-            removed.line,
-            removed.column,
-        ));
-        return false;
-    }
-
-    let prog = match grammar::parse(&source) {
-        Ok(p) => p,
-        Err(e) => {
-            emit_error(&KiroError::parse_failed_with_source(filename, &source, &e));
+    let mut runtime = match EirRuntime::new(&program) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            emit_error(&eir_runtime_diagnostic(error, analysis));
             return false;
         }
     };
-
-    let base_dir = std::path::Path::new(filename)
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let module_name = std::path::Path::new(filename)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("main")
-        .to_string();
-    let module = IrModule::lower(module_name.clone(), prog);
-    let mut runtime = SessionRuntime::new(module, base_dir);
-    runtime.set_current_module(module_name);
-    if let Err(e) = runtime.run() {
-        let err = if let Some(site) = runtime.take_last_error_site() {
-            let message = if let Some(message) = e.strip_prefix("Check failed: ") {
-                format!("Check failed: {}", message)
-            } else {
-                e.clone()
-            };
-            let mut err = KiroError::new(site.code, errors::ErrorPhase::Runtime, message)
-                .with_byte_span(
-                    filename,
-                    &source,
-                    errors::SourceSpan::new(site.span.0, site.span.1),
-                    site.label,
-                );
-            if let Some(help) = site.help {
-                err = err.with_help(help);
-            }
-            err
-        } else if let Some(message) = e.strip_prefix("Check failed: ") {
-            KiroError::runtime_check_failed(message)
-        } else {
-            KiroError::new(
-                errors::ErrorCode::ParseFailed,
-                errors::ErrorPhase::Runtime,
-                format!("Interpreter error: {}", e),
-            )
-        };
-        emit_error(&err);
+    runtime.set_host_mode(HostMode::Execute);
+    if let Err(error) = runtime.run_initializers() {
+        emit_error(&eir_runtime_diagnostic(error, analysis));
         return false;
     }
     true
+}
+
+fn eir_lowering_diagnostic(error: LowerError, analysis: &analysis::AnalysisResult) -> KiroError {
+    let use_after_move = match &error.kind {
+        LowerErrorKind::Verification(errors) => errors
+            .iter()
+            .find(|error| matches!(error.kind, VerifyErrorKind::UninitializedRead(_))),
+        _ => None,
+    };
+    let (code, message, label, anchor) = if let Some(verification) = use_after_move {
+        (
+            errors::ErrorCode::MutabilityError,
+            "Value was moved and cannot be used.".to_string(),
+            "use after move",
+            verification.anchor,
+        )
+    } else {
+        (
+            errors::ErrorCode::CompilerPanic,
+            format!("EIR lowering failed: {error}"),
+            "EIR lowering failed",
+            error.anchor,
+        )
+    };
+    let mut diagnostic = KiroError::new(code, errors::ErrorPhase::Compile, message);
+    let module = usize::try_from(anchor.source())
+        .ok()
+        .and_then(|index| analysis.hir.modules.get(index))
+        .and_then(|module| analysis.modules.get(&module.name));
+    if let Some(module) = module {
+        diagnostic = diagnostic.with_byte_span(
+            module.file_name(),
+            &module.source,
+            errors::SourceSpan::new(anchor.start() as usize, anchor.end() as usize),
+            label,
+        );
+    }
+    diagnostic
+}
+
+fn eir_runtime_diagnostic(
+    error: EirRuntimeError,
+    analysis: &analysis::AnalysisResult,
+) -> KiroError {
+    let (code, message, label, help) = match &error.kind {
+        EirRuntimeErrorKind::CheckFailed(message) => (
+            errors::ErrorCode::CheckFailed,
+            format!("Check failed: {message}"),
+            "failed check",
+            None,
+        ),
+        EirRuntimeErrorKind::ListIndexOutOfBounds { index, length } => (
+            errors::ErrorCode::ListIndexOutOfBounds,
+            format!("List index out of bounds: index {index}, length {length}."),
+            "invalid list index",
+            None,
+        ),
+        EirRuntimeErrorKind::MapKeyNotFound(key) => (
+            errors::ErrorCode::MapKeyNotFound,
+            format!("Map key not found: {key:?}."),
+            "missing map key",
+            None,
+        ),
+        EirRuntimeErrorKind::EmptyAddress => (
+            errors::ErrorCode::EmptyAddressDeref,
+            "Cannot deref an empty address.".to_string(),
+            "empty address",
+            Some("Assign it with `ref value` before using `deref`."),
+        ),
+        EirRuntimeErrorKind::PipeClosed => (
+            errors::ErrorCode::PipeTakeClosed,
+            "Pipe is closed.".to_string(),
+            "closed pipe",
+            None,
+        ),
+        EirRuntimeErrorKind::HostCallFailed(message) => (
+            errors::ErrorCode::HostFunctionFailed,
+            message.clone(),
+            "host call failed",
+            None,
+        ),
+        _ => (
+            errors::ErrorCode::ParseFailed,
+            error.to_string(),
+            "runtime error",
+            None,
+        ),
+    };
+    let source_index = usize::try_from(error.anchor.source()).ok();
+    let module = source_index
+        .and_then(|index| analysis.hir.modules.get(index))
+        .and_then(|module| analysis.modules.get(&module.name));
+    let mut diagnostic = KiroError::new(code, errors::ErrorPhase::Runtime, message);
+    if let Some(module) = module {
+        diagnostic = diagnostic.with_byte_span(
+            module.file_name(),
+            &module.source,
+            errors::SourceSpan::new(error.anchor.start() as usize, error.anchor.end() as usize),
+            label,
+        );
+    }
+    if let Some(help) = help {
+        diagnostic = diagnostic.with_help(help);
+    }
+    diagnostic
 }
 
 fn run_compiler(
@@ -783,85 +820,24 @@ fn run_compiler(
             || header.contains("kiro_handle")
             || header.contains("kiro_struct"),
     );
-    let root_name = module_name_from_path(&analysis.root)?;
-    let eir_rust = match kiro_lang::eir::lower_program(&analysis.hir) {
-        Ok(program) => match compiler::eir::compile_program(&program) {
-            Ok(code) => {
-                requirements.uses_pipes = compiler::eir::program_uses_pipes(&program);
-                requirements.uses_anyhow = false;
-                Some(code)
-            }
-            Err(error) => {
-                if verbose {
-                    eprintln!("EIR Rust backend fallback: {error}");
-                }
-                None
-            }
-        },
-        Err(error) => {
-            if verbose {
-                eprintln!("EIR lowering fallback: {error:?}");
-            }
-            None
-        }
-    };
-    let module_functions = analysis.module_functions.clone();
-    let mut modules = analysis.modules;
-    let known_modules: HashSet<String> = modules.keys().cloned().collect();
-    let active_modules = active_generated_modules(&modules, &requirements, &root_name);
-
-    if let Some(code) = eir_rust {
-        pm.save_file("main", code).map_err(|error| {
-            KiroError::new(
-                errors::ErrorCode::BuildGraphFailed,
-                errors::ErrorPhase::Compile,
-                format!("Failed to save main: {error}"),
-            )
-        })?;
-    } else {
-        let mut module_names: Vec<String> = modules
-            .keys()
-            .filter(|name| *name != &root_name)
-            .cloned()
-            .collect();
-        module_names.sort();
-
-        for name in module_names {
-            if requirements.skips_module_import(&name) {
-                continue;
-            }
-            if let Some(module) = modules.remove(&name) {
-                let module_declarations = build_module_declarations(Some(&name), &active_modules);
-                compile_analyzed_module(
-                    module,
-                    false,
-                    &module_functions,
-                    &requirements,
-                    &pm,
-                    &known_modules,
-                    module_declarations,
-                )?;
-            }
-        }
-
-        let root_module = modules.remove(&root_name).ok_or_else(|| {
-            KiroError::new(
-                errors::ErrorCode::BuildGraphFailed,
-                errors::ErrorPhase::Compile,
-                format!("Analyzed root module '{}' was not found.", root_name),
-            )
-        })?;
-        let root_module_declarations = build_module_declarations(None, &active_modules);
-        compile_analyzed_module(
-            root_module,
-            true,
-            &module_functions,
-            &requirements,
-            &pm,
-            &known_modules,
-            root_module_declarations,
-        )?;
-    }
+    let program = kiro_lang::eir::lower_program(&analysis.hir)
+        .map_err(|error| eir_lowering_diagnostic(error, &analysis))?;
+    let code = compiler::eir::compile_program(&program).map_err(|error| {
+        KiroError::new(
+            errors::ErrorCode::CompilerPanic,
+            errors::ErrorPhase::Compile,
+            format!("EIR Rust generation failed: {error}"),
+        )
+    })?;
+    requirements.uses_pipes = compiler::eir::program_uses_pipes(&program);
+    requirements.uses_anyhow = false;
+    pm.save_file("main", code).map_err(|error| {
+        KiroError::new(
+            errors::ErrorCode::BuildGraphFailed,
+            errors::ErrorPhase::Compile,
+            format!("Failed to save main: {error}"),
+        )
+    })?;
 
     if let Err(e) = pm.save_header(&header) {
         return Err(KiroError::new(
@@ -881,68 +857,6 @@ fn run_compiler(
             format!("Build error: {}", e),
         )),
     }
-}
-
-fn active_generated_modules(
-    modules: &HashMap<String, analysis::AnalyzedModule>,
-    requirements: &BuildRequirements,
-    root_name: &str,
-) -> HashSet<String> {
-    modules
-        .keys()
-        .filter(|name| *name != root_name)
-        .filter(|name| !requirements.skips_module_import(name))
-        .cloned()
-        .collect()
-}
-
-fn build_module_declarations(owner: Option<&str>, module_names: &HashSet<String>) -> String {
-    render_module_children(owner, module_names, 0)
-}
-
-fn render_module_children(
-    owner: Option<&str>,
-    module_names: &HashSet<String>,
-    indent: usize,
-) -> String {
-    let mut children = BTreeSet::new();
-    for name in module_names {
-        let rest = match owner {
-            Some(owner) => name
-                .strip_prefix(owner)
-                .and_then(|rest| rest.strip_prefix('.')),
-            None => Some(name.as_str()),
-        };
-        let Some(rest) = rest else {
-            continue;
-        };
-        let Some(child) = rest.split('.').next() else {
-            continue;
-        };
-        if !child.is_empty() {
-            children.insert(child.to_string());
-        }
-    }
-
-    let mut output = String::new();
-    let padding = " ".repeat(indent);
-    for child in children {
-        let child_path = match owner {
-            Some(owner) => format!("{}.{}", owner, child),
-            None => child.clone(),
-        };
-        if module_names.contains(&child_path) {
-            output.push_str(&format!("{}pub mod {};\n", padding, child));
-        } else {
-            let nested = render_module_children(Some(&child_path), module_names, indent + 4);
-            if !nested.is_empty() {
-                output.push_str(&format!("{}pub mod {} {{\n", padding, child));
-                output.push_str(&nested);
-                output.push_str(&format!("{}}}\n", padding));
-            }
-        }
-    }
-    output
 }
 
 fn execute_binary(path: PathBuf) -> Result<(), String> {
@@ -1065,62 +979,4 @@ fn sanitize_header_glue_line(line: &str) -> Option<String> {
     } else {
         Some(format!("use kiro_runtime::{{{}}};", keep.join(", ")))
     }
-}
-
-fn module_name_from_path(path: &Path) -> Result<String, KiroError> {
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .map(str::to_string)
-        .ok_or_else(|| KiroError::file_not_found(&path.display().to_string()))
-}
-
-fn compile_analyzed_module(
-    module: analysis::AnalyzedModule,
-    is_root: bool,
-    module_functions: &HashMap<(String, String), compiler::FunctionInfo>,
-    requirements: &BuildRequirements,
-    pm: &BuildManager,
-    known_modules: &HashSet<String>,
-    module_declarations: String,
-) -> Result<(), KiroError> {
-    let module_name = module.name;
-    let mut c = compiler::Compiler::with_options(
-        module_functions.clone(),
-        compiler::CompilerOptions {
-            uses_pipes: requirements.uses_pipes,
-            skipped_module_imports: requirements.skipped_module_imports.clone(),
-            module_declarations,
-            current_module: module_name.clone(),
-            known_modules: known_modules.clone(),
-        },
-    );
-    let code = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        c.compile(module.program, is_root)
-    })) {
-        Ok(code) => code,
-        Err(payload) => {
-            return Err(KiroError::compiler_panic(
-                &module_name,
-                &panic_payload_to_string(payload),
-            ));
-        }
-    };
-
-    let save_name = if is_root {
-        "main".to_string()
-    } else {
-        grammar::module_path_file_stem(&module_name)
-            .to_string_lossy()
-            .replace('\\', "/")
-    };
-    if let Err(e) = pm.save_file(&save_name, code) {
-        return Err(KiroError::new(
-            errors::ErrorCode::BuildGraphFailed,
-            errors::ErrorPhase::Compile,
-            format!("Failed to save {}: {}", save_name, e),
-        ));
-    } else {
-        println!("  - Compiled {}", module_name);
-    }
-    Ok(())
 }

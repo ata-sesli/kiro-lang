@@ -7,20 +7,17 @@ use std::time::Duration;
 
 use kiro_runtime::{KiroError as HostError, RuntimeVal as HostRuntimeVal};
 
+use crate::analysis::{self, AnalysisOptions, SourceOverlays};
+use crate::eir::{EirProgram, lower_program};
 use crate::grammar::{self, Statement};
-#[cfg(test)]
-use crate::interpreter::eir_runtime::EirRuntime;
+use crate::hir::{FunctionId, HirCallKind, HirExprKind, HirStmtKind};
+use crate::interpreter::eir_runtime::{EirRuntime, EirRuntimeError, EirRuntimeErrorKind};
 use crate::interpreter::values::RuntimeVal as InterpreterRuntimeVal;
-use crate::interpreter::{
-    HostCallCtx as InterpreterHostCallCtx, HostFnHandler, InterpreterLimits, SessionRuntime,
-};
-use crate::ir::IrModule;
+use crate::interpreter::{HostCallCtx as InterpreterHostCallCtx, HostFnHandler, InterpreterLimits};
 use crate::{
     StdAssets, canonical_std_module_name, removed_print_statement, std_asset_path,
     unsupported_let_line,
 };
-#[cfg(test)]
-use crate::{eir::EirProgram, hir::FunctionId};
 
 pub use crate::interpreter::HostMode;
 
@@ -182,8 +179,9 @@ pub struct CompiledScript {
     pub module_name: String,
     pub source: String,
     pub base_dir: PathBuf,
-    ir_module: IrModule,
-    has_main: bool,
+    eir_program: EirProgram,
+    functions: HashMap<String, FunctionId>,
+    main: Option<FunctionId>,
     host_decls: HashMap<(String, String), HostDecl>,
 }
 
@@ -241,30 +239,6 @@ impl ModuleLoader for DefaultModuleLoader {
             cache_key: resolved.to_string_lossy().to_string(),
             source,
             base_dir: parent,
-        })
-    }
-}
-
-#[derive(Clone)]
-struct LoaderAdapter {
-    inner: Arc<dyn ModuleLoader>,
-}
-
-impl crate::interpreter::ModuleLoader for LoaderAdapter {
-    fn load(
-        &self,
-        module_name: &str,
-        current_dir: &Path,
-    ) -> Result<crate::interpreter::LoadedModule, String> {
-        let loaded = self
-            .inner
-            .load(module_name, current_dir)
-            .map_err(|e| e.to_string())?;
-
-        Ok(crate::interpreter::LoadedModule {
-            cache_key: loaded.cache_key,
-            source: loaded.source,
-            base_dir: loaded.base_dir,
         })
     }
 }
@@ -383,59 +357,77 @@ impl Engine {
             )));
         }
 
-        let program = grammar::parse(source).map_err(|e| EngineError::Parse(format!("{:?}", e)))?;
-
-        let mut has_main = false;
-        let mut host_decls = HashMap::new();
-
-        for stmt in &program.statements {
-            match stmt {
-                Statement::FunctionDef(def)
-                    if crate::grammar::function_name(&def.name) == "main" =>
-                {
-                    has_main = true;
-                }
-                Statement::RustFnDecl(def) => {
-                    let name = crate::grammar::function_name(&def.name).to_string();
-                    host_decls.insert(
-                        (module_name.to_string(), name),
-                        HostDecl {
-                            params: def.params.iter().map(|p| p.command_type.clone()).collect(),
-                            ret: def.return_type.clone(),
-                            can_error: def.can_error.is_some(),
-                        },
-                    );
-                }
-                Statement::Documented { item, .. } => match item {
-                    grammar::AnnotatableItem::FunctionDef(def)
-                        if crate::grammar::function_name(&def.name) == "main" =>
-                    {
-                        has_main = true;
-                    }
-                    grammar::AnnotatableItem::RustFnDecl(def) => {
-                        let name = crate::grammar::function_name(&def.name).to_string();
-                        host_decls.insert(
-                            (module_name.to_string(), name),
-                            HostDecl {
-                                params: def.params.iter().map(|p| p.command_type.clone()).collect(),
-                                ret: def.return_type.clone(),
-                                can_error: def.can_error.is_some(),
-                            },
-                        );
-                    }
-                    _ => {}
-                },
-                _ => {}
-            }
+        let root_path = self
+            .base_dir
+            .join(crate::grammar::module_path_file_path(module_name));
+        let mut overlays = SourceOverlays::new();
+        overlays.insert(root_path.clone(), source.to_string());
+        self.collect_module_overlays(
+            source,
+            root_path.parent().unwrap_or(&self.base_dir),
+            &self.base_dir,
+            &mut overlays,
+            &mut std::collections::HashSet::new(),
+        )?;
+        let analysis = analysis::analyze_path_with_info_options(
+            &root_path,
+            &overlays,
+            AnalysisOptions {
+                allow_registered_host_functions: true,
+            },
+        )
+        .map_err(|error| EngineError::Parse(error.message))?;
+        let root_module_name = analysis
+            .modules
+            .values()
+            .find(|module| module.path == analysis.root)
+            .map(|module| module.name.clone())
+            .ok_or_else(|| EngineError::Parse("analyzed root module was not found".to_string()))?;
+        let root_module = analysis
+            .hir
+            .module(&root_module_name)
+            .ok_or_else(|| EngineError::Parse("root HIR module was not found".to_string()))?;
+        let functions = root_module
+            .functions
+            .iter()
+            .map(|function| (function.name.clone(), function.id))
+            .collect::<HashMap<_, _>>();
+        let main = functions.get("main").copied();
+        let mut hir = analysis.hir.clone();
+        if let Some(main) = main {
+            let root_module = hir
+                .modules
+                .iter_mut()
+                .find(|module| module.name == root_module_name)
+                .expect("root module was resolved above");
+            root_module.statements.retain(|statement| {
+                !matches!(
+                    &statement.kind,
+                    HirStmtKind::Expr(expression)
+                        if matches!(
+                            &expression.kind,
+                            HirExprKind::Call {
+                                kind: HirCallKind::Direct(function),
+                                ..
+                            } if *function == main
+                        )
+                )
+            });
         }
-        let ir_module = IrModule::lower(module_name, program);
+        let eir_program = lower_program(&hir)
+            .map_err(|error| EngineError::Parse(format!("EIR lowering failed: {error}")))?;
+        let mut host_decls = HashMap::new();
+        for module in analysis.modules.values() {
+            collect_host_decls(&module.name, &module.program, &mut host_decls);
+        }
 
         Ok(CompiledScript {
             module_name: module_name.to_string(),
             source: source.to_string(),
             base_dir: self.base_dir.clone(),
-            ir_module,
-            has_main,
+            eir_program,
+            functions,
+            main,
             host_decls,
         })
     }
@@ -445,13 +437,17 @@ impl Engine {
         script: &CompiledScript,
         options: ExecOptions,
     ) -> Result<Value, EngineError> {
-        if script.has_main {
-            self.call_fn(script, "main", vec![], options)
-        } else {
-            let mut runtime = self.prepare_runtime(script, options)?;
-            runtime.run().map_err(EngineError::Runtime)?;
-            Ok(Value::Void)
-        }
+        let mut runtime = self.prepare_runtime(script, options)?;
+        runtime
+            .run_initializers()
+            .map_err(|error| EngineError::Runtime(engine_runtime_message(error)))?;
+        let Some(main) = script.main else {
+            return Ok(Value::Void);
+        };
+        let value = runtime
+            .call_function(main, Vec::new())
+            .map_err(|error| EngineError::Runtime(engine_runtime_message(error)))?;
+        interpreter_to_value(value)
     }
 
     pub fn call_fn(
@@ -467,48 +463,27 @@ impl Engine {
             arg_values.push(value_to_interpreter_runtime(arg)?);
         }
 
+        runtime
+            .run_initializers()
+            .map_err(|error| EngineError::Runtime(engine_runtime_message(error)))?;
+        let function = script.functions.get(fn_name).copied().ok_or_else(|| {
+            EngineError::Runtime(format!(
+                "Function '{}.{}' not found",
+                script.module_name, fn_name
+            ))
+        })?;
         let result = runtime
-            .call_function(&script.module_name, fn_name, arg_values)
-            .map_err(EngineError::Runtime)?;
+            .call_function(function, arg_values)
+            .map_err(|error| EngineError::Runtime(engine_runtime_message(error)))?;
 
         interpreter_to_value(result)
     }
 
-    #[cfg(test)]
-    fn call_eir_function(
+    fn prepare_runtime<'program>(
         &self,
-        program: &EirProgram,
-        function: FunctionId,
-        args: Vec<Value>,
+        script: &'program CompiledScript,
         options: ExecOptions,
-    ) -> Result<Value, EngineError> {
-        let options = if options == ExecOptions::default() {
-            self.default_options.clone()
-        } else {
-            options
-        };
-        let mut runtime =
-            EirRuntime::new(program).map_err(|error| EngineError::Runtime(error.to_string()))?;
-        runtime.set_limits(InterpreterLimits {
-            max_steps: options.limits.max_steps,
-            max_call_depth: options.limits.max_call_depth,
-            timeout: options.limits.timeout_ms.map(Duration::from_millis),
-        });
-        let args = args
-            .into_iter()
-            .map(value_to_interpreter_runtime)
-            .collect::<Result<Vec<_>, _>>()?;
-        let value = runtime
-            .call_function(function, args)
-            .map_err(|error| EngineError::Runtime(error.to_string()))?;
-        interpreter_to_value(value)
-    }
-
-    fn prepare_runtime(
-        &self,
-        script: &CompiledScript,
-        options: ExecOptions,
-    ) -> Result<SessionRuntime, EngineError> {
+    ) -> Result<EirRuntime<'program>, EngineError> {
         let options = if options == ExecOptions::default() {
             self.default_options.clone()
         } else {
@@ -517,23 +492,54 @@ impl Engine {
 
         self.validate_host_contracts(script, &options)?;
 
-        let mut runtime = SessionRuntime::new(script.ir_module.clone(), script.base_dir.clone());
-        runtime.set_current_module(script.module_name.clone());
+        let mut runtime = EirRuntime::new(&script.eir_program)
+            .map_err(|error| EngineError::Runtime(error.to_string()))?;
         runtime.set_host_mode(options.host_mode);
         runtime.set_limits(InterpreterLimits {
             max_steps: options.limits.max_steps,
             max_call_depth: options.limits.max_call_depth,
             timeout: options.limits.timeout_ms.map(Duration::from_millis),
         });
-        runtime.set_module_loader(Arc::new(LoaderAdapter {
-            inner: self.module_loader.clone(),
-        }));
-
         for ((module, name), handler) in &self.host_handlers {
-            runtime.register_host_fn(module.clone(), name.clone(), handler.clone());
+            runtime.register_host_fn(module, name, handler.clone());
         }
 
         Ok(runtime)
+    }
+
+    fn collect_module_overlays(
+        &self,
+        source: &str,
+        analysis_dir: &Path,
+        loader_dir: &Path,
+        overlays: &mut SourceOverlays,
+        seen: &mut std::collections::HashSet<String>,
+    ) -> Result<(), EngineError> {
+        let program =
+            grammar::parse(source).map_err(|error| EngineError::Parse(format!("{error:?}")))?;
+        for statement in &program.statements {
+            let Statement::Import { module_name, .. } = statement else {
+                continue;
+            };
+            let name = crate::grammar::module_path_name(module_name);
+            if crate::is_reserved_std_module_name(name) {
+                continue;
+            }
+            let loaded = self.module_loader.load(name, loader_dir)?;
+            if !seen.insert(loaded.cache_key.clone()) {
+                continue;
+            }
+            let overlay_path = analysis_dir.join(crate::grammar::module_path_file_path(name));
+            overlays.insert(overlay_path.clone(), loaded.source.clone());
+            self.collect_module_overlays(
+                &loaded.source,
+                overlay_path.parent().unwrap_or(analysis_dir),
+                &loaded.base_dir,
+                overlays,
+                seen,
+            )?;
+        }
+        Ok(())
     }
 
     fn validate_host_contracts(
@@ -592,6 +598,48 @@ impl Engine {
     }
 }
 
+fn collect_host_decls(
+    module_name: &str,
+    program: &grammar::Program,
+    declarations: &mut HashMap<(String, String), HostDecl>,
+) {
+    for statement in &program.statements {
+        let declaration = match statement {
+            Statement::RustFnDecl(declaration) => Some(declaration),
+            Statement::Documented {
+                item: grammar::AnnotatableItem::RustFnDecl(declaration),
+                ..
+            } => Some(declaration),
+            _ => None,
+        };
+        let Some(declaration) = declaration else {
+            continue;
+        };
+        let name = crate::grammar::function_name(&declaration.name).to_string();
+        declarations.insert(
+            (module_name.to_string(), name),
+            HostDecl {
+                params: declaration
+                    .params
+                    .iter()
+                    .map(|parameter| parameter.command_type.clone())
+                    .collect(),
+                ret: declaration.return_type.clone(),
+                can_error: declaration.can_error.is_some(),
+            },
+        );
+    }
+}
+
+fn engine_runtime_message(error: EirRuntimeError) -> String {
+    match &error.kind {
+        EirRuntimeErrorKind::HostCallDenied { module, function } => {
+            format!("Host call denied for '{module}.{function}'")
+        }
+        _ => error.to_string(),
+    }
+}
+
 fn value_to_interpreter_runtime(value: Value) -> Result<InterpreterRuntimeVal, EngineError> {
     match value {
         Value::Num(n) => Ok(InterpreterRuntimeVal::Float(n)),
@@ -647,61 +695,5 @@ fn interpreter_to_value(value: InterpreterRuntimeVal) -> Result<Value, EngineErr
             "Unsupported interpreter return value for embedding: {}",
             other
         ))),
-    }
-}
-
-#[cfg(test)]
-mod eir_tests {
-    use super::*;
-    use crate::eir::{
-        BasicBlock, ConstId, Constant, EirFunction, EirProgram, Instruction, InstructionKind,
-        SlotId, Terminator, TerminatorKind,
-    };
-    use crate::hir::{Effects, FunctionId, Signature, SourceAnchor, SourceId, TypeId, TypeTable};
-
-    #[test]
-    fn engine_can_select_eir_execution_without_changing_the_default_path() {
-        let anchor = SourceAnchor::try_from_offsets(SourceId::new(0), 4, 11)
-            .expect("test anchor should be valid");
-        let program = EirProgram {
-            types: TypeTable::new(),
-            errors: Vec::new(),
-            globals: Vec::new(),
-            host_functions: Vec::new(),
-            constants: vec![Constant::Num(7.0)],
-            functions: vec![EirFunction {
-                id: FunctionId::new(0),
-                name: "answer".to_string(),
-                signature: Signature::new([], TypeId::NUM, Effects::NONE),
-                slots: vec![TypeId::NUM],
-                parameter_count: 0,
-                blocks: vec![BasicBlock {
-                    instructions: vec![Instruction {
-                        kind: InstructionKind::Const {
-                            dst: SlotId::new(0),
-                            constant: ConstId::new(0),
-                        },
-                        anchor,
-                    }],
-                    terminator: Terminator {
-                        kind: TerminatorKind::Return(Some(SlotId::new(0))),
-                        anchor,
-                    },
-                }],
-            }],
-            module_initializers: Vec::new(),
-        };
-        let engine = Engine::builder().build();
-
-        let value = engine
-            .call_eir_function(
-                &program,
-                FunctionId::new(0),
-                Vec::new(),
-                ExecOptions::default(),
-            )
-            .expect("internal EIR path should execute");
-
-        assert_eq!(value, Value::Num(7.0));
     }
 }

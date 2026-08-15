@@ -2,14 +2,7 @@ use crate::grammar::grammar;
 use std::collections::{HashMap, HashSet};
 
 pub mod eir;
-pub mod expression;
-pub mod statement;
 pub mod types;
-
-#[derive(Clone, Debug)]
-pub struct VarInfo {
-    pub is_mutable: bool,
-}
 
 #[derive(Clone, Debug)]
 pub struct FunctionInfo {
@@ -31,30 +24,11 @@ impl Compiler {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct CompilerOptions {
-    pub uses_pipes: bool,
-    pub skipped_module_imports: HashSet<String>,
-    pub module_declarations: String,
-    pub current_module: String,
-    pub known_modules: HashSet<String>,
-}
-
 pub struct Compiler {
-    pub known_vars: HashMap<String, VarInfo>,
-    pub imported_modules: HashSet<String>,
     pub functions: HashMap<String, FunctionInfo>,
     pub module_functions: HashMap<(String, String), FunctionInfo>,
     pub known_modules: HashSet<String>,
-    pub in_pure_context: bool,
-    pub in_failable_fn: bool,
-    pub pure_scope_params: HashSet<String>, // Parameters allowed in pure function scope
-    pub moved_vars: HashSet<String>,        // Track moved variables to prevent use-after-move
-    pub fn_ref_vars: HashSet<String>,       // Vars holding pure function refs
-    pub fn_returning_fn: HashSet<String>,   // Function names returning fn(...) -> ...
     pub current_module: String,
-    pub import_aliases: HashMap<String, String>,
-    pub options: CompilerOptions,
 }
 
 const EFFECTFUL_RECURSION_MESSAGE: &str = "Recursive calls are only supported in pure fn. Effectful recursive functions are not supported yet; use a loop or split pure recursion from effects.";
@@ -744,20 +718,10 @@ fn type_uses_pipes(ty: &grammar::KiroType) -> bool {
 impl Compiler {
     pub fn new() -> Self {
         Self {
-            known_vars: HashMap::new(),
-            imported_modules: HashSet::new(),
             functions: HashMap::new(),
             module_functions: HashMap::new(),
             known_modules: HashSet::new(),
-            in_pure_context: false,
-            in_failable_fn: false,
-            pure_scope_params: HashSet::new(),
-            moved_vars: HashSet::new(),
-            fn_ref_vars: HashSet::new(),
-            fn_returning_fn: HashSet::new(),
             current_module: "main".to_string(),
-            import_aliases: HashMap::new(),
-            options: CompilerOptions::default(),
         }
     }
 
@@ -767,32 +731,6 @@ impl Compiler {
         let mut compiler = Self::new();
         compiler.module_functions = module_functions;
         compiler
-    }
-
-    pub fn with_options(
-        module_functions: HashMap<(String, String), FunctionInfo>,
-        options: CompilerOptions,
-    ) -> Self {
-        let mut compiler = Self::with_module_functions(module_functions);
-        compiler.current_module = options.current_module.clone();
-        compiler.known_modules = options.known_modules.clone();
-        compiler.options = options;
-        compiler
-    }
-
-    pub fn resolve_import_name(&self, import_name: &str) -> String {
-        crate::grammar::resolve_relative_module_path(
-            import_name,
-            &self.current_module,
-            &self.known_modules,
-        )
-    }
-
-    pub fn canonical_import_name(&self, import_name: &str) -> String {
-        self.import_aliases
-            .get(import_name)
-            .cloned()
-            .unwrap_or_else(|| self.resolve_import_name(import_name))
     }
 
     pub fn collect_program_functions(program: &grammar::Program) -> HashMap<String, FunctionInfo> {
@@ -870,71 +808,6 @@ impl Compiler {
         functions
     }
 
-    pub fn call_function_info(&self, func: &grammar::Expression) -> Option<FunctionInfo> {
-        match func {
-            grammar::Expression::Variable(v) => self
-                .functions
-                .get(crate::grammar::variable_name(v))
-                .cloned(),
-            grammar::Expression::FieldAccess(_, _, _) => {
-                if let Some((module, function)) =
-                    crate::grammar::module_call_target(func, &self.imported_modules)
-                {
-                    let canonical_module = self.canonical_import_name(&module);
-                    self.module_functions
-                        .get(&(canonical_module, function))
-                        .cloned()
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
-    pub fn call_name(&self, func: &grammar::Expression) -> String {
-        match func {
-            grammar::Expression::Variable(v) => crate::grammar::variable_name(v).to_string(),
-            grammar::Expression::FieldAccess(_, _, _) => {
-                crate::grammar::expression_path_segments(func)
-                    .map(|segments| segments.join("."))
-                    .unwrap_or_else(|| "<computed function>".to_string())
-            }
-            _ => "<computed function>".to_string(),
-        }
-    }
-
-    pub fn pure_fn_ref_name_from_expr(&self, expr: &grammar::Expression) -> Option<String> {
-        if let grammar::Expression::Ref(_, target) = expr
-            && let grammar::Expression::Variable(v) = &**target
-            && let Some(info) = self.functions.get(crate::grammar::variable_name(v))
-            && info.is_pure
-        {
-            return Some(crate::grammar::variable_name(v).to_string());
-        }
-        None
-    }
-
-    pub fn expr_yields_fn_ref(&self, expr: &grammar::Expression) -> bool {
-        if self.pure_fn_ref_name_from_expr(expr).is_some() {
-            return true;
-        }
-        match expr {
-            grammar::Expression::Variable(v) => {
-                self.fn_ref_vars.contains(crate::grammar::variable_name(v))
-            }
-            grammar::Expression::Call(func, _, _, _) => {
-                if let grammar::Expression::Variable(v) = &**func {
-                    self.fn_returning_fn
-                        .contains(crate::grammar::variable_name(v))
-                } else {
-                    false
-                }
-            }
-            _ => false,
-        }
-    }
-
     pub fn validate_effectful_recursion(
         &self,
         program: &grammar::Program,
@@ -1006,111 +879,7 @@ impl Compiler {
         Ok(())
     }
 
-    fn validate_effectful_recursion_or_panic(&self, program: &grammar::Program) {
-        if let Err(err) = self.validate_effectful_recursion(program, "<module>", None) {
-            panic!("{}", err.message);
-        }
-    }
-
     pub fn effectful_recursion_message() -> &'static str {
         EFFECTFUL_RECURSION_MESSAGE
-    }
-
-    pub fn compile(&mut self, program: grammar::Program, is_main: bool) -> String {
-        let emits_pipes = self.options.uses_pipes || program_uses_pipes(&program);
-        let mut output = String::new();
-        output.push_str("#![allow(unused)]\n");
-        if emits_pipes {
-            output.push_str("use async_channel;\n");
-        }
-
-        if is_main {
-            // Import header module for rust fn glue
-            output.push_str("mod header;\n");
-            output.push_str("pub use kiro_runtime::*;\n");
-            output.push_str(&self.options.module_declarations);
-            // ONLY DEFINED IN MAIN (Shared Runtime)
-            // We make everything 'pub' so submodules can use them via 'use crate::*;'
-            if emits_pipes {
-                output.push_str(
-                    r#"
-                #[derive(Clone, Debug)]
-                pub struct KiroPipe<T> {
-                    pub tx: async_channel::Sender<T>,
-                    pub rx: async_channel::Receiver<T>,
-                }
-                "#,
-                );
-            }
-            if emits_pipes {
-                output.push_str(
-                    r#"
-                // Pipes are identity-based runtime channels; compare as non-equal by default.
-                impl<T> KiroEq for KiroPipe<T> {
-                    fn kiro_eq(&self, _other: &Self) -> bool { false }
-                }
-                "#,
-                );
-            }
-        } else {
-            // Submodules use the shared runtime
-            output.push_str("use crate::*;\n");
-        }
-
-        let mut top_level = String::new();
-        let mut body = String::new();
-
-        // 0. Pre-Scan Functions for Metadata (Purity Check)
-        self.functions = Self::collect_program_functions(&program);
-        for (name, info) in &self.functions {
-            if matches!(
-                info.return_type,
-                Some(grammar::KiroType::FnType(_, _, _, _, _, _))
-            ) {
-                self.fn_returning_fn.insert(name.clone());
-            }
-        }
-        self.validate_effectful_recursion_or_panic(&program);
-
-        for statement in program.statements {
-            // Check if it should be hoisted
-            let is_hoisted = match &statement {
-                grammar::Statement::Import { .. }
-                | grammar::Statement::StructDef(_)
-                | grammar::Statement::HandleDef(_) => true,
-                grammar::Statement::Documented { item, .. } => {
-                    matches!(
-                        item,
-                        grammar::AnnotatableItem::StructDef(_)
-                            | grammar::AnnotatableItem::HandleDef(_)
-                    )
-                }
-                _ => false,
-            };
-
-            let line = self.compile_statement(statement);
-
-            if is_hoisted {
-                top_level.push_str(&format!("{}\n", line));
-            } else {
-                body.push_str(&format!("{}\n", line));
-            }
-        }
-
-        output.push_str(&top_level);
-
-        if is_main {
-            output.push_str("#[tokio::main]\nasync fn main(){\n");
-            output.push_str(&body);
-            output.push_str("}\n");
-        } else {
-            // If not main, everything (including body) is usually just statements in the file.
-            // But valid Rust modules can't have loose statements at top level.
-            // Kiro modules usually contain functions/structs.
-            // We accept this limitation for now: Modules = Structs + Fns + Imports.
-            // But we should still output the body in case it's valid items (like Fns).
-            output.push_str(&body);
-        }
-        output
     }
 }

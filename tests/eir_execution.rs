@@ -4,12 +4,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use kiro_lang::analysis::{SourceOverlays, analyze_path_with_info};
 use kiro_lang::eir::{EirProgram, lower_program};
-use kiro_lang::grammar;
 use kiro_lang::hir::FunctionId;
 use kiro_lang::interpreter::eir_runtime::{EirRuntime, EirRuntimeErrorKind};
 use kiro_lang::interpreter::values::RuntimeVal;
-use kiro_lang::interpreter::{CancellationToken, HostMode, InterpreterLimits, SessionRuntime};
-use kiro_lang::ir::IrModule;
+use kiro_lang::interpreter::{CancellationToken, HostMode, InterpreterLimits};
 use std::sync::Arc;
 
 fn temp_source(name: &str, source: &str) -> PathBuf {
@@ -34,22 +32,18 @@ fn lower_source(name: &str, source: &str) -> (EirProgram, FunctionId) {
         .expect("host glue marker should be written");
     let analysis = analyze_path_with_info(path, &SourceOverlays::new())
         .expect("source should analyze before execution");
-    let function = analysis.hir.modules[0].functions[0].id;
+    let function = analysis
+        .hir
+        .module("main")
+        .and_then(|module| module.functions.first())
+        .expect("main module should define a function")
+        .id;
     let program = lower_program(&analysis.hir).expect("supported source should lower to EIR");
     (program, function)
 }
 
-fn legacy_call(source: &str, function: &str, args: Vec<RuntimeVal>) -> RuntimeVal {
-    let syntax = grammar::parse(source).expect("source should parse for legacy oracle");
-    let module = IrModule::lower("main", syntax);
-    let mut runtime = SessionRuntime::new(module, PathBuf::from("."));
-    runtime
-        .call_function("main", function, args)
-        .expect("legacy oracle should execute")
-}
-
 #[test]
-fn eir_executes_typed_primitives_and_matches_the_tree_interpreter() {
+fn eir_executes_typed_primitives() {
     let source = r#"
 fn calculate(left: num, right: num, label: str) -> str {
     var sum = left + right
@@ -67,14 +61,12 @@ fn calculate(left: num, right: num, label: str) -> str {
         RuntimeVal::Float(3.0),
         RuntimeVal::String("ready".to_string()),
     ];
-    let expected = legacy_call(source, "calculate", args.clone());
     let mut runtime = EirRuntime::new(&program).expect("verified EIR should create a runtime");
 
     let actual = runtime
         .call_function(function, args)
         .expect("EIR function should execute");
 
-    assert_eq!(actual, expected);
     assert_eq!(actual, RuntimeVal::String("ready!".to_string()));
 }
 
@@ -512,6 +504,67 @@ fn calculate() -> num {
 }
 
 #[test]
+fn eir_treats_a_non_error_void_result_as_failable_success() {
+    let source = r#"
+rust fn finish() -> void!
+
+fn main() -> num {
+    var result = finish()
+    on (result) {
+        return 1
+    } error {
+        return 0
+    }
+    return 0
+}
+"#;
+    let (program, function) = lower_source("failable_void_success", source);
+    let mut runtime = EirRuntime::new(&program).expect("verified runtime");
+    runtime.register_host_fn(
+        "main",
+        "finish",
+        Arc::new(|_, _| Ok(kiro_runtime::RuntimeVal::Void)),
+    );
+    runtime.set_host_mode(HostMode::Execute);
+
+    assert_eq!(
+        runtime
+            .call_function(function, Vec::new())
+            .expect("void host success should enter the normal branch"),
+        RuntimeVal::Float(1.0)
+    );
+}
+
+#[test]
+fn eir_host_mode_denies_standard_io_calls() {
+    let source = r#"
+import io
+
+fn main() {
+    io.print("must not print")
+}
+"#;
+    let (program, _) = lower_source("deny_standard_io", source);
+    let function = program
+        .functions
+        .iter()
+        .find(|function| function.name == "main")
+        .expect("main function")
+        .id;
+    let mut runtime = EirRuntime::new(&program).expect("verified runtime");
+    runtime.set_host_mode(HostMode::Deny);
+
+    let error = runtime
+        .call_function(function, Vec::new())
+        .expect_err("deny mode should reject standard I/O");
+
+    assert!(matches!(
+        error.kind,
+        EirRuntimeErrorKind::HostCallDenied { .. }
+    ));
+}
+
+#[test]
 fn eir_executes_pipe_rest_and_spawn_effects() {
     let source = r#"
 fn worker(channel: pipe num) {
@@ -538,6 +591,41 @@ fn main() -> num {
         runtime
             .call_function(function, Vec::new())
             .expect("main runs"),
+        RuntimeVal::Float(42.0)
+    );
+}
+
+#[test]
+fn eir_spawned_functions_share_module_globals() {
+    let source = r#"
+var result = 0
+
+fn worker(completion: pipe num) {
+    result = 42
+    give completion 1
+}
+
+fn main() -> num {
+    var completion = pipe num
+    run worker(completion)
+    take completion
+    return result
+}
+"#;
+    let (program, _) = lower_source("spawn_shared_globals", source);
+    let function = program
+        .functions
+        .iter()
+        .find(|function| function.name == "main")
+        .expect("main function")
+        .id;
+    let mut runtime = EirRuntime::new(&program).expect("verified runtime");
+
+    runtime.run_initializers().expect("globals initialize");
+    assert_eq!(
+        runtime
+            .call_function(function, Vec::new())
+            .expect("spawned function runs"),
         RuntimeVal::Float(42.0)
     );
 }
