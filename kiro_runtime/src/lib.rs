@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::sync::Arc;
 
-pub const KIRO_RUNTIME_ABI_VERSION: u32 = 2;
+pub const KIRO_RUNTIME_ABI_VERSION: u32 = 3;
 
 pub type HostResult = Result<RuntimeVal, KiroError>;
 
@@ -24,6 +24,10 @@ pub enum RuntimeVal {
     Bool(bool),
     List(Vec<RuntimeVal>),
     Map(HashMap<String, RuntimeVal>),
+    Struct {
+        type_name: String,
+        fields: HashMap<String, RuntimeVal>,
+    },
     Handle(KiroHandle),
     Void,
 }
@@ -434,9 +438,7 @@ impl<T: KiroEq> KiroEq for Vec<T> {
         if self.len() != other.len() {
             return false;
         }
-        self.iter()
-            .zip(other.iter())
-            .all(|(a, b)| a.kiro_eq(b))
+        self.iter().zip(other.iter()).all(|(a, b)| a.kiro_eq(b))
     }
 }
 
@@ -580,6 +582,30 @@ impl<T: Into<RuntimeVal>> From<Vec<T>> for RuntimeVal {
 // --- Conversion: RuntimeVal -> Rust types ---
 
 impl RuntimeVal {
+    pub fn structure(type_name: impl Into<String>, fields: HashMap<String, RuntimeVal>) -> Self {
+        Self::Struct {
+            type_name: type_name.into(),
+            fields,
+        }
+    }
+
+    pub fn as_struct(
+        &self,
+        expected_type: &str,
+    ) -> Result<&HashMap<String, RuntimeVal>, KiroError> {
+        match self {
+            Self::Struct { type_name, fields } if type_name == expected_type => Ok(fields),
+            Self::Struct { type_name, .. } => Err(KiroError::message(
+                "TypeError",
+                format!("expected struct {}, got {}", expected_type, type_name),
+            )),
+            _ => Err(KiroError::message(
+                "TypeError",
+                format!("expected struct {}", expected_type),
+            )),
+        }
+    }
+
     pub fn handle<T>(type_name: impl Into<String>, value: T) -> Self
     where
         T: std::any::Any + Send + Sync + 'static,
@@ -587,11 +613,19 @@ impl RuntimeVal {
         RuntimeVal::Handle(KiroHandle::new(type_name, value))
     }
 
-    pub fn expect_arity(args: &[RuntimeVal], expected: usize, fn_name: &str) -> Result<(), KiroError> {
+    pub fn expect_arity(
+        args: &[RuntimeVal],
+        expected: usize,
+        fn_name: &str,
+    ) -> Result<(), KiroError> {
         if args.len() == expected {
             Ok(())
         } else {
-            let noun = if expected == 1 { "argument" } else { "arguments" };
+            let noun = if expected == 1 {
+                "argument"
+            } else {
+                "arguments"
+            };
             Err(KiroError::message(
                 "ArgumentError",
                 format!(

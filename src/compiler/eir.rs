@@ -4,6 +4,7 @@ use std::fmt::{self, Write};
 use crate::eir::{
     Constant, EirFunction, EirHostFunction, EirProgram, InstructionKind, SlotId, TerminatorKind,
 };
+use crate::hir::{SemType, TypeId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EirCodegenError {
@@ -160,6 +161,7 @@ fn __kiro_from_host(value: RuntimeVal) -> __KiroValue {
         RuntimeVal::Void => __KiroValue::Void,
         RuntimeVal::List(values) => __KiroValue::List(values.into_iter().map(__kiro_from_host).collect()),
         RuntimeVal::Map(values) => __KiroValue::Map(values.into_iter().map(|(key, value)| (key, __kiro_from_host(value))).collect()),
+        value @ RuntimeVal::Struct { .. } => __KiroValue::Host(value),
         value @ RuntimeVal::Handle(_) => __KiroValue::Host(value),
     }
 }
@@ -172,6 +174,7 @@ fn __kiro_set_field(target: &mut __KiroValue, path: &[u32], value: __KiroValue) 
 
 "#,
     );
+    emit_host_type_helpers(program, &mut output);
     output.push_str("fn __kiro_from_host_error(error: KiroError) -> __KiroValue {\n    match error.name.as_str() {\n");
     let mut emitted_error_names = HashSet::new();
     for (index, symbol) in program.errors.iter().enumerate() {
@@ -216,6 +219,101 @@ fn __kiro_set_field(target: &mut __KiroValue, path: &[u32], value: __KiroValue) 
     }
     output.push_str("}\n");
     Ok(output)
+}
+
+fn emit_host_type_helpers(program: &EirProgram, output: &mut String) {
+    for index in 0..program.types.len() {
+        let ty = TypeId::new(index as u32);
+        let to_host = host_to_expression(program, ty, "value");
+        let from_host = host_from_expression(program, ty, "value");
+        writeln!(
+            output,
+            "fn __kiro_to_host_t{index}(value: &__KiroValue) -> RuntimeVal {{ {to_host} }}"
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "fn __kiro_from_host_t{index}(value: RuntimeVal) -> __KiroValue {{ {from_host} }}"
+        )
+        .unwrap();
+    }
+    output.push('\n');
+}
+
+fn host_to_expression(program: &EirProgram, ty: TypeId, value: &str) -> String {
+    match program.types.get(ty) {
+        Some(SemType::List(inner)) => format!(
+            "match {value} {{ __KiroValue::List(values) => RuntimeVal::List(values.iter().map(__kiro_to_host_t{}).collect()), other => panic!(\"expected list, got {{other:?}}\") }}",
+            inner.raw()
+        ),
+        Some(SemType::Map(_, inner)) => format!(
+            "match {value} {{ __KiroValue::Map(values) => RuntimeVal::Map(values.iter().map(|(key, value)| (key.clone(), __kiro_to_host_t{}(value))).collect()), other => panic!(\"expected map, got {{other:?}}\") }}",
+            inner.raw()
+        ),
+        Some(SemType::Struct(id)) => {
+            let record = program
+                .struct_def(*id)
+                .expect("EIR struct type must have metadata");
+            let fields = record
+                .fields
+                .iter()
+                .map(|field| {
+                    format!(
+                        "({:?}.to_string(), __kiro_to_host_t{}(fields.get(&{}).expect(\"verified struct field\")))",
+                        field.name,
+                        field.ty.raw(),
+                        field.id.raw()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "match {value} {{ __KiroValue::Struct(structure, fields) if *structure == {} => RuntimeVal::structure({:?}, [{fields}].into_iter().collect()), other => panic!(\"expected struct {}, got {{other:?}}\") }}",
+                id.raw(),
+                record.name,
+                record.name
+            )
+        }
+        _ => format!("__kiro_to_host({value})"),
+    }
+}
+
+fn host_from_expression(program: &EirProgram, ty: TypeId, value: &str) -> String {
+    match program.types.get(ty) {
+        Some(SemType::List(inner)) => format!(
+            "match {value} {{ RuntimeVal::List(values) => __KiroValue::List(values.into_iter().map(__kiro_from_host_t{}).collect()), other => panic!(\"expected host list, got {{other:?}}\") }}",
+            inner.raw()
+        ),
+        Some(SemType::Map(_, inner)) => format!(
+            "match {value} {{ RuntimeVal::Map(values) => __KiroValue::Map(values.into_iter().map(|(key, value)| (key, __kiro_from_host_t{}(value))).collect()), other => panic!(\"expected host map, got {{other:?}}\") }}",
+            inner.raw()
+        ),
+        Some(SemType::Struct(id)) => {
+            let record = program
+                .struct_def(*id)
+                .expect("EIR struct type must have metadata");
+            let fields = record
+                .fields
+                .iter()
+                .map(|field| {
+                    format!(
+                        "({}, __kiro_from_host_t{}(fields.remove({:?}).expect(\"missing host struct field\")))",
+                        field.id.raw(),
+                        field.ty.raw(),
+                        field.name
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "match {value} {{ RuntimeVal::Struct {{ type_name, mut fields }} if type_name == {:?} => __KiroValue::Struct({}, [{fields}].into_iter().collect()), other => panic!(\"expected host struct {}, got {{other:?}}\") }}",
+                record.name,
+                id.raw(),
+                record.name
+            )
+        }
+        _ => format!("__kiro_from_host({value})"),
+    }
 }
 
 fn compile_function(
@@ -782,8 +880,17 @@ fn host_call_expression(function: &EirHostFunction, args: &str) -> String {
             function.name
         )
     };
+    let host_args = function
+        .signature
+        .params()
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| format!("__kiro_to_host_t{}(&__host_args[{index}])", ty.raw()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let return_type = function.signature.return_type().raw();
     format!(
-        "{{ let __host_args = {args}; match header::{}(__host_args.iter().map(__kiro_to_host).collect()){await_suffix} {{ Ok(value) => __kiro_from_host(value), Err(error) => {error} }} }}",
-        function.name,
+        "{{ let __host_args: Vec<__KiroValue> = {args}; match header::{}(vec![{host_args}]){await_suffix} {{ Ok(value) => __kiro_from_host_t{return_type}(value), Err(error) => {error} }} }}",
+        function.name
     )
 }

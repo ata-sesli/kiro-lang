@@ -237,3 +237,50 @@ fn main() -> num {
 
     assert_eq!(out, Value::Num(2.0));
 }
+
+#[test]
+fn embedded_engine_round_trips_structs_with_public_names() {
+    let engine = Engine::builder().build();
+    let script = engine
+        .compile_module(
+            "main",
+            r#"
+struct TableInfo {
+    name: str
+    rows: num
+}
+
+fn make_table() -> TableInfo {
+    return TableInfo { name: "users", rows: 3 }
+}
+
+fn table_rows(table: TableInfo) -> num {
+    return table.rows
+}
+"#,
+        )
+        .expect("compile should succeed");
+
+    let table = engine
+        .call_fn(&script, "make_table", vec![], execute_options())
+        .expect("struct return should decode");
+    assert_eq!(
+        table,
+        Value::Struct {
+            type_name: "TableInfo".to_string(),
+            fields: [
+                ("name".to_string(), Value::Str("users".to_string())),
+                ("rows".to_string(), Value::Num(3.0)),
+            ]
+            .into_iter()
+            .collect(),
+        }
+    );
+
+    assert_eq!(
+        engine
+            .call_fn(&script, "table_rows", vec![table], execute_options())
+            .expect("struct argument should encode"),
+        Value::Num(3.0)
+    );
+}

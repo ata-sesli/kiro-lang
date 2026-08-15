@@ -80,3 +80,4 @@ rust-project.json
 .kiro/
 kiro_*.md
 notes/
+output/

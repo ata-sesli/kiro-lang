@@ -10,7 +10,7 @@ use kiro_runtime::{KiroError as HostError, RuntimeVal as HostRuntimeVal};
 use crate::analysis::{self, AnalysisOptions, SourceOverlays};
 use crate::eir::{EirProgram, lower_program};
 use crate::grammar::{self, Statement};
-use crate::hir::{FunctionId, HirCallKind, HirExprKind, HirStmtKind};
+use crate::hir::{FunctionId, HirCallKind, HirExprKind, HirStmtKind, SemType, TypeId};
 use crate::interpreter::eir_runtime::{EirRuntime, EirRuntimeError, EirRuntimeErrorKind};
 use crate::interpreter::values::RuntimeVal as InterpreterRuntimeVal;
 use crate::interpreter::{HostCallCtx as InterpreterHostCallCtx, HostFnHandler, InterpreterLimits};
@@ -28,9 +28,16 @@ pub enum Value {
     Bool(bool),
     List(Vec<Value>),
     Map(HashMap<String, Value>),
+    Struct {
+        type_name: String,
+        fields: HashMap<String, Value>,
+    },
     Handle(kiro_runtime::KiroHandle),
     Void,
-    Error { name: String, description: String },
+    Error {
+        name: String,
+        description: String,
+    },
 }
 
 impl TryFrom<HostRuntimeVal> for Value {
@@ -54,6 +61,16 @@ impl TryFrom<HostRuntimeVal> for Value {
                     out.insert(k, Value::try_from(v)?);
                 }
                 Ok(Value::Map(out))
+            }
+            HostRuntimeVal::Struct { type_name, fields } => {
+                let mut out = HashMap::with_capacity(fields.len());
+                for (name, value) in fields {
+                    out.insert(name, Value::try_from(value)?);
+                }
+                Ok(Value::Struct {
+                    type_name,
+                    fields: out,
+                })
             }
             HostRuntimeVal::Handle(handle) => Ok(Value::Handle(handle)),
             HostRuntimeVal::Void => Ok(Value::Void),
@@ -82,6 +99,16 @@ impl TryFrom<Value> for HostRuntimeVal {
                     out.insert(k, HostRuntimeVal::try_from(v)?);
                 }
                 Ok(HostRuntimeVal::Map(out))
+            }
+            Value::Struct { type_name, fields } => {
+                let mut out = HashMap::with_capacity(fields.len());
+                for (name, value) in fields {
+                    out.insert(name, HostRuntimeVal::try_from(value)?);
+                }
+                Ok(HostRuntimeVal::Struct {
+                    type_name,
+                    fields: out,
+                })
             }
             Value::Handle(handle) => Ok(HostRuntimeVal::Handle(handle)),
             Value::Void => Ok(HostRuntimeVal::Void),
@@ -458,25 +485,41 @@ impl Engine {
         options: ExecOptions,
     ) -> Result<Value, EngineError> {
         let mut runtime = self.prepare_runtime(script, options)?;
-        let mut arg_values = Vec::with_capacity(args.len());
-        for arg in args {
-            arg_values.push(value_to_interpreter_runtime(arg)?);
-        }
-
-        runtime
-            .run_initializers()
-            .map_err(|error| EngineError::Runtime(engine_runtime_message(error)))?;
         let function = script.functions.get(fn_name).copied().ok_or_else(|| {
             EngineError::Runtime(format!(
                 "Function '{}.{}' not found",
                 script.module_name, fn_name
             ))
         })?;
+        let metadata = script
+            .eir_program
+            .function(function)
+            .expect("compiled function ID must resolve");
+        let mut arg_values = Vec::with_capacity(args.len());
+        for (index, arg) in args.into_iter().enumerate() {
+            if let Some(ty) = metadata.signature.params().get(index) {
+                arg_values.push(value_to_interpreter_runtime_typed(
+                    &script.eir_program,
+                    arg,
+                    *ty,
+                )?);
+            } else {
+                arg_values.push(value_to_interpreter_runtime(arg)?);
+            }
+        }
+
+        runtime
+            .run_initializers()
+            .map_err(|error| EngineError::Runtime(engine_runtime_message(error)))?;
         let result = runtime
             .call_function(function, arg_values)
             .map_err(|error| EngineError::Runtime(engine_runtime_message(error)))?;
 
-        interpreter_to_value(result)
+        interpreter_to_value_typed(
+            &script.eir_program,
+            result,
+            metadata.signature.return_type(),
+        )
     }
 
     fn prepare_runtime<'program>(
@@ -659,6 +702,13 @@ fn value_to_interpreter_runtime(value: Value) -> Result<InterpreterRuntimeVal, E
             }
             Ok(InterpreterRuntimeVal::Map(out))
         }
+        Value::Struct { type_name, fields } => {
+            let mut out = HashMap::with_capacity(fields.len());
+            for (name, value) in fields {
+                out.insert(name, value_to_interpreter_runtime(value)?);
+            }
+            Ok(InterpreterRuntimeVal::Struct(type_name, out))
+        }
         Value::Handle(handle) => Ok(InterpreterRuntimeVal::Handle(handle)),
         Value::Void => Err(EngineError::Type(
             "Cannot pass Value::Void as a function argument".to_string(),
@@ -666,6 +716,76 @@ fn value_to_interpreter_runtime(value: Value) -> Result<InterpreterRuntimeVal, E
         Value::Error { .. } => Err(EngineError::Type(
             "Cannot pass Value::Error as a function argument".to_string(),
         )),
+    }
+}
+
+fn value_to_interpreter_runtime_typed(
+    program: &EirProgram,
+    value: Value,
+    ty: TypeId,
+) -> Result<InterpreterRuntimeVal, EngineError> {
+    match program.types.get(ty) {
+        Some(SemType::Struct(id)) => {
+            let record = program.struct_def(*id).ok_or_else(|| {
+                EngineError::Type(format!("Missing EIR metadata for struct{}", id.raw()))
+            })?;
+            let Value::Struct {
+                type_name,
+                mut fields,
+            } = value
+            else {
+                return Err(EngineError::Type(format!(
+                    "Expected struct {}",
+                    record.name
+                )));
+            };
+            if type_name != record.name {
+                return Err(EngineError::Type(format!(
+                    "Expected struct {}, got {}",
+                    record.name, type_name
+                )));
+            }
+            let mut values = HashMap::with_capacity(record.fields.len());
+            for field in &record.fields {
+                let value = fields.remove(&field.name).ok_or_else(|| {
+                    EngineError::Type(format!("Missing field {}.{}", record.name, field.name))
+                })?;
+                values.insert(
+                    format!("field{}", field.id.raw()),
+                    value_to_interpreter_runtime_typed(program, value, field.ty)?,
+                );
+            }
+            Ok(InterpreterRuntimeVal::Struct(
+                format!("struct{}", id.raw()),
+                values,
+            ))
+        }
+        Some(SemType::List(inner)) => {
+            let Value::List(items) = value else {
+                return Err(EngineError::Type("Expected list".to_string()));
+            };
+            items
+                .into_iter()
+                .map(|item| value_to_interpreter_runtime_typed(program, item, *inner))
+                .collect::<Result<Vec<_>, _>>()
+                .map(InterpreterRuntimeVal::List)
+        }
+        Some(SemType::Map(_, inner)) => {
+            let Value::Map(items) = value else {
+                return Err(EngineError::Type("Expected map".to_string()));
+            };
+            items
+                .into_iter()
+                .map(|(key, value)| {
+                    Ok((
+                        key,
+                        value_to_interpreter_runtime_typed(program, value, *inner)?,
+                    ))
+                })
+                .collect::<Result<HashMap<_, _>, EngineError>>()
+                .map(InterpreterRuntimeVal::Map)
+        }
+        _ => value_to_interpreter_runtime(value),
     }
 }
 
@@ -688,6 +808,16 @@ fn interpreter_to_value(value: InterpreterRuntimeVal) -> Result<Value, EngineErr
             }
             Ok(Value::Map(out))
         }
+        InterpreterRuntimeVal::Struct(type_name, fields) => {
+            let mut out = HashMap::with_capacity(fields.len());
+            for (name, value) in fields {
+                out.insert(name, interpreter_to_value(value)?);
+            }
+            Ok(Value::Struct {
+                type_name,
+                fields: out,
+            })
+        }
         InterpreterRuntimeVal::Handle(handle) => Ok(Value::Handle(handle)),
         InterpreterRuntimeVal::Void => Ok(Value::Void),
         InterpreterRuntimeVal::Error(name, description) => Ok(Value::Error { name, description }),
@@ -695,5 +825,61 @@ fn interpreter_to_value(value: InterpreterRuntimeVal) -> Result<Value, EngineErr
             "Unsupported interpreter return value for embedding: {}",
             other
         ))),
+    }
+}
+
+fn interpreter_to_value_typed(
+    program: &EirProgram,
+    value: InterpreterRuntimeVal,
+    ty: TypeId,
+) -> Result<Value, EngineError> {
+    match program.types.get(ty) {
+        Some(SemType::Struct(id)) => {
+            let record = program.struct_def(*id).ok_or_else(|| {
+                EngineError::Type(format!("Missing EIR metadata for struct{}", id.raw()))
+            })?;
+            let InterpreterRuntimeVal::Struct(_, mut fields) = value else {
+                return Err(EngineError::Type(format!(
+                    "Expected struct {}",
+                    record.name
+                )));
+            };
+            let mut values = HashMap::with_capacity(record.fields.len());
+            for field in &record.fields {
+                let key = format!("field{}", field.id.raw());
+                let value = fields.remove(&key).ok_or_else(|| {
+                    EngineError::Type(format!("Missing field {}.{}", record.name, field.name))
+                })?;
+                values.insert(
+                    field.name.clone(),
+                    interpreter_to_value_typed(program, value, field.ty)?,
+                );
+            }
+            Ok(Value::Struct {
+                type_name: record.name.clone(),
+                fields: values,
+            })
+        }
+        Some(SemType::List(inner)) => {
+            let InterpreterRuntimeVal::List(items) = value else {
+                return Err(EngineError::Type("Expected list".to_string()));
+            };
+            items
+                .into_iter()
+                .map(|item| interpreter_to_value_typed(program, item, *inner))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::List)
+        }
+        Some(SemType::Map(_, inner)) => {
+            let InterpreterRuntimeVal::Map(items) = value else {
+                return Err(EngineError::Type("Expected map".to_string()));
+            };
+            items
+                .into_iter()
+                .map(|(key, value)| Ok((key, interpreter_to_value_typed(program, value, *inner)?)))
+                .collect::<Result<HashMap<_, _>, EngineError>>()
+                .map(Value::Map)
+        }
+        _ => interpreter_to_value(value),
     }
 }

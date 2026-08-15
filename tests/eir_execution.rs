@@ -534,6 +534,49 @@ fn calculate() -> num {
 }
 
 #[test]
+fn eir_converts_host_structs_and_lists_by_declared_type() {
+    let source = r#"
+struct TableInfo {
+    name: str
+    rows: num
+}
+
+rust fn table_infos() -> list TableInfo
+
+fn first_rows() -> num {
+    var tables = table_infos()
+    var first = tables at 0
+    return first.rows
+}
+"#;
+    let (program, function) = lower_source("host_struct_list", source);
+    let mut runtime = EirRuntime::new(&program).expect("verified runtime");
+    runtime.register_host_fn(
+        "main",
+        "table_infos",
+        Arc::new(|_, _| {
+            let fields = [
+                ("name".to_string(), kiro_runtime::RuntimeVal::from("users")),
+                ("rows".to_string(), kiro_runtime::RuntimeVal::from(3.0)),
+            ]
+            .into_iter()
+            .collect();
+            Ok(kiro_runtime::RuntimeVal::List(vec![
+                kiro_runtime::RuntimeVal::structure("TableInfo", fields),
+            ]))
+        }),
+    );
+    runtime.set_host_mode(HostMode::Execute);
+
+    assert_eq!(
+        runtime
+            .call_function(function, Vec::new())
+            .expect("record list host call runs"),
+        RuntimeVal::Float(3.0)
+    );
+}
+
+#[test]
 fn eir_treats_a_non_error_void_result_as_failable_success() {
     let source = r#"
 rust fn finish() -> void!

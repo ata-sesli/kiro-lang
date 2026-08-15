@@ -1,7 +1,9 @@
 use std::collections::VecDeque;
 use std::fmt;
 
-use crate::hir::{Effects, FunctionId, HostFunctionId, SemType, SourceAnchor, TypeId};
+use crate::hir::{
+    Effects, FieldId, FunctionId, HostFunctionId, SemType, SourceAnchor, StructId, TypeId,
+};
 
 use super::{
     BlockId, EirFunction, EirProgram, Instruction, InstructionKind, SlotId, Terminator,
@@ -21,6 +23,19 @@ pub struct VerifyError {
 pub enum VerifyErrorKind {
     InvalidFunction(FunctionId),
     InvalidHostFunction(HostFunctionId),
+    InvalidStruct(StructId),
+    StructOrder {
+        expected: StructId,
+        actual: StructId,
+    },
+    FieldOrder {
+        expected: FieldId,
+        actual: FieldId,
+    },
+    InvalidFieldType {
+        field: FieldId,
+        ty: TypeId,
+    },
     InvalidBlock(BlockId),
     InvalidSlot(SlotId),
     InvalidType(TypeId),
@@ -97,6 +112,42 @@ impl std::error::Error for VerifyError {}
 
 pub fn verify_program(program: &EirProgram) -> Result<(), Vec<VerifyError>> {
     let mut errors = Vec::new();
+    for index in 0..program.types.len() {
+        let ty = TypeId::try_from(index).expect("type index must fit u32");
+        if let Some(SemType::Struct(id)) = program.types.get(ty)
+            && program.struct_def(*id).is_none()
+        {
+            errors.push(program_error(VerifyErrorKind::InvalidStruct(*id)));
+        }
+    }
+
+    let mut field_index = 0usize;
+    for (index, record) in program.structs.iter().enumerate() {
+        let expected = StructId::try_from(index).expect("struct index must fit u32");
+        if record.id != expected {
+            errors.push(program_error(VerifyErrorKind::StructOrder {
+                expected,
+                actual: record.id,
+            }));
+        }
+        for field in &record.fields {
+            let expected = FieldId::try_from(field_index).expect("field index must fit u32");
+            if field.id != expected {
+                errors.push(program_error(VerifyErrorKind::FieldOrder {
+                    expected,
+                    actual: field.id,
+                }));
+            }
+            if program.types.get(field.ty).is_none() {
+                errors.push(program_error(VerifyErrorKind::InvalidFieldType {
+                    field: field.id,
+                    ty: field.ty,
+                }));
+            }
+            field_index += 1;
+        }
+    }
+
     for (index, function) in program.host_functions.iter().enumerate() {
         let expected = HostFunctionId::try_from(index).expect("host function index must fit u32");
         if function.id != expected {
@@ -142,6 +193,16 @@ pub fn verify_program(program: &EirProgram) -> Result<(), Vec<VerifyError>> {
         Ok(())
     } else {
         Err(errors)
+    }
+}
+
+fn program_error(kind: VerifyErrorKind) -> VerifyError {
+    VerifyError {
+        function: FunctionId::new(0),
+        block: BlockId::new(0),
+        instruction: None,
+        anchor: fallback_anchor(),
+        kind,
     }
 }
 

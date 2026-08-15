@@ -17,11 +17,26 @@ pub use verify::{VerifyError, VerifyErrorKind, verify_program};
 pub struct EirProgram {
     pub types: TypeTable,
     pub errors: Vec<String>,
+    pub structs: Vec<EirStruct>,
     pub globals: Vec<TypeId>,
     pub host_functions: Vec<EirHostFunction>,
     pub constants: Vec<Constant>,
     pub functions: Vec<EirFunction>,
     pub module_initializers: Vec<FunctionId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EirStruct {
+    pub id: StructId,
+    pub name: String,
+    pub fields: Vec<EirStructField>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EirStructField {
+    pub id: FieldId,
+    pub name: String,
+    pub ty: TypeId,
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +54,11 @@ impl EirProgram {
         self.functions
             .get(index)
             .filter(|function| function.id == id)
+    }
+
+    pub fn struct_def(&self, id: StructId) -> Option<&EirStruct> {
+        let index = usize::try_from(id).ok()?;
+        self.structs.get(index).filter(|record| record.id == id)
     }
 
     pub fn error_id_by_name(&self, name: &str) -> Option<ErrorId> {

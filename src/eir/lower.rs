@@ -8,8 +8,9 @@ use crate::hir::{
 };
 
 use super::{
-    BasicBlock, BlockId, ConstId, Constant, EirFunction, EirHostFunction, EirProgram, GlobalId,
-    Instruction, InstructionKind, SlotId, Terminator, TerminatorKind, VerifyError, verify_program,
+    BasicBlock, BlockId, ConstId, Constant, EirFunction, EirHostFunction, EirProgram, EirStruct,
+    EirStructField, GlobalId, Instruction, InstructionKind, SlotId, Terminator, TerminatorKind,
+    VerifyError, verify_program,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,9 +145,46 @@ pub fn lower_program(hir: &HirProgram) -> Result<EirProgram, LowerError> {
         .collect::<Vec<_>>();
     host_functions.sort_by_key(|function| function.id);
 
+    let mut structs = hir
+        .modules
+        .iter()
+        .flat_map(|module| module.structs.iter())
+        .map(|record| {
+            let struct_index = record.id.raw() as usize;
+            let name = hir.symbols.structs[struct_index]
+                .rsplit_once('.')
+                .map_or_else(
+                    || hir.symbols.structs[struct_index].clone(),
+                    |(_, name)| name.to_string(),
+                );
+            let fields = record
+                .fields
+                .iter()
+                .map(|field| {
+                    let symbol = &hir.symbols.fields[field.id.raw() as usize];
+                    EirStructField {
+                        id: field.id,
+                        name: symbol
+                            .rsplit_once('.')
+                            .map_or(symbol.as_str(), |(_, name)| name)
+                            .to_string(),
+                        ty: field.ty,
+                    }
+                })
+                .collect();
+            EirStruct {
+                id: record.id,
+                name,
+                fields,
+            }
+        })
+        .collect::<Vec<_>>();
+    structs.sort_by_key(|record| record.id);
+
     let program = EirProgram {
         types: hir.types.clone(),
         errors: hir.symbols.errors.clone(),
+        structs,
         globals,
         host_functions,
         constants,

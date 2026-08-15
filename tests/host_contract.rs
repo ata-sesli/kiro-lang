@@ -57,6 +57,22 @@ fn runtime_helpers_expose_list_map_and_void_shapes() {
 }
 
 #[test]
+fn runtime_helpers_expose_named_struct_values() {
+    let mut fields = HashMap::new();
+    fields.insert("name".to_string(), RuntimeVal::from("users"));
+    let value = RuntimeVal::structure("TableInfo", fields);
+
+    assert_eq!(
+        value
+            .as_struct("TableInfo")
+            .expect("TableInfo should decode")
+            .get("name"),
+        Some(&RuntimeVal::from("users"))
+    );
+    assert!(value.as_struct("Other").is_err());
+}
+
+#[test]
 fn runtime_helpers_expose_typed_handles() {
     let handle = RuntimeVal::handle("Model", "model-state".to_string());
     let model = handle
@@ -88,6 +104,6 @@ fn host_result_alias_and_abi_version_are_public() {
         Ok(RuntimeVal::Void)
     }
 
-    assert_eq!(KIRO_RUNTIME_ABI_VERSION, 2);
+    assert_eq!(KIRO_RUNTIME_ABI_VERSION, 3);
     assert!(ok_host(vec![]).is_ok());
 }

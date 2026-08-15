@@ -75,7 +75,7 @@ impl std::fmt::Display for FixtureError {
 }
 
 pub struct Counter {
-    value: f64,
+    pub value: f64,
 }
 
 impl Counter {
@@ -179,7 +179,7 @@ edition = "2021"
         r#"mod database;
 mod error;
 
-pub use database::Database;
+pub use database::{table_info, table_infos, table_name, Database, TableInfo};
 pub use error::{Error, Result};
 "#,
     )
@@ -206,6 +206,26 @@ pub type Result<T> = std::result::Result<T, Error>;
 use crate::Result;
 
 pub struct CustomPath;
+
+pub struct TableInfo {
+    pub name: String,
+    pub rows: u64,
+}
+
+pub fn table_info() -> TableInfo {
+    TableInfo { name: "users".to_string(), rows: 3 }
+}
+
+pub fn table_infos() -> Vec<TableInfo> {
+    vec![
+        table_info(),
+        TableInfo { name: "posts".to_string(), rows: 7 },
+    ]
+}
+
+pub fn table_name(info: TableInfo) -> String {
+    info.name
+}
 
 pub struct Database {
     label: String,
@@ -391,8 +411,8 @@ kiro_fixture_crate = { path = "fixture_crate" }
         kiro
     );
     assert!(
-        !kiro.contains("counter_bump"),
-        "mutable receiver methods should be skipped:\n{}",
+        kiro.contains("rust fn counter_bump(counter: Counter) -> void"),
+        "mutable receiver methods should use an ordinary handle parameter:\n{}",
         kiro
     );
     assert!(
@@ -742,6 +762,28 @@ kiro_fixture_crate = { path = "fixture_crate" }
         kiro
     );
     assert!(
+        kiro.contains("struct TableInfo")
+            && kiro.contains("name: str")
+            && kiro.contains("rows: num"),
+        "expected public field-only struct value declaration:\n{}",
+        kiro
+    );
+    assert!(
+        kiro.contains("rust fn table_info() -> TableInfo"),
+        "expected struct-valued function:\n{}",
+        kiro
+    );
+    assert!(
+        kiro.contains("rust fn table_infos() -> list TableInfo"),
+        "expected list-of-struct function:\n{}",
+        kiro
+    );
+    assert!(
+        kiro.contains("rust fn table_name(info: TableInfo) -> str"),
+        "expected struct-valued parameter:\n{}",
+        kiro
+    );
+    assert!(
         kiro.contains("rust fn database_open(path: str) -> Database!"),
         "expected AsRef<Path> Result<Self> constructor:\n{}",
         kiro
@@ -757,8 +799,8 @@ kiro_fixture_crate = { path = "fixture_crate" }
         kiro
     );
     assert!(
-        !kiro.contains("database_bump"),
-        "mutable receiver method should remain skipped:\n{}",
+        kiro.contains("rust fn database_bump(database: Database) -> void!"),
+        "mutable receiver method should use the ordinary handle parameter:\n{}",
         kiro
     );
     assert!(
@@ -817,6 +859,72 @@ include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../fixture.rs"));
     )
     .expect("glue check lib should be written");
 
+    fs::write(
+        glue_check_dir.join("src/main.rs"),
+        r#"use std::future::Future;
+use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
+
+use kiro_runtime::{HostResult, KiroError, RuntimeVal};
+
+include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../fixture.rs"));
+
+struct NoopWake;
+
+impl Wake for NoopWake {
+    fn wake(self: Arc<Self>) {}
+}
+
+fn block_on<F: Future>(future: F) -> F::Output {
+    let waker = Waker::from(Arc::new(NoopWake));
+    let mut context = Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(value) => return value,
+            Poll::Pending => std::thread::yield_now(),
+        }
+    }
+}
+
+fn main() {
+    let database = block_on(database_open(vec![RuntimeVal::from("base")]))
+        .expect("database should open");
+    block_on(database_bump(vec![database.clone()])).expect("database should mutate");
+    let label = block_on(database_label(vec![database])).expect("label should read");
+    assert_eq!(label, RuntimeVal::from("base!"));
+
+    let table = block_on(table_info(vec![])).expect("table info should be returned");
+    let RuntimeVal::Struct { type_name, fields } = table else {
+        panic!("table info should be a struct value");
+    };
+    assert_eq!(type_name, "TableInfo");
+    assert_eq!(fields.get("name"), Some(&RuntimeVal::from("users")));
+    assert_eq!(fields.get("rows"), Some(&RuntimeVal::from(3.0)));
+
+    let tables = block_on(table_infos(vec![])).expect("table infos should be returned");
+    let RuntimeVal::List(tables) = tables else {
+        panic!("table infos should be a list");
+    };
+    assert_eq!(tables.len(), 2);
+    assert!(matches!(tables.first(), Some(RuntimeVal::Struct { type_name, .. }) if type_name == "TableInfo"));
+
+    let input = RuntimeVal::structure(
+        "TableInfo",
+        [
+            ("name".to_string(), RuntimeVal::from("comments")),
+            ("rows".to_string(), RuntimeVal::from(11.0)),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let name = block_on(table_name(vec![input])).expect("table info should decode");
+    assert_eq!(name, RuntimeVal::from("comments"));
+}
+"#,
+    )
+    .expect("glue check main should be written");
+
     let glue_check = Command::new("cargo")
         .args(["check", "--manifest-path"])
         .arg(glue_check_dir.join("Cargo.toml"))
@@ -827,6 +935,18 @@ include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../fixture.rs"));
         "generated Zova-shaped Rust glue should compile\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&glue_check.stdout),
         String::from_utf8_lossy(&glue_check.stderr)
+    );
+
+    let glue_run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(glue_check_dir.join("Cargo.toml"))
+        .output()
+        .expect("generated mutable handle glue should run");
+    assert!(
+        glue_run.status.success(),
+        "generated mutable handle glue should preserve mutation\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&glue_run.stdout),
+        String::from_utf8_lossy(&glue_run.stderr)
     );
 }
 

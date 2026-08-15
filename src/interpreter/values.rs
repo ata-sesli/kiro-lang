@@ -152,6 +152,9 @@ impl RuntimeVal {
                 }
                 Ok(RuntimeVal::Map(out))
             }
+            HostRuntimeVal::Struct { .. } => {
+                Err("Type Error: host struct conversion requires an EIR type".to_string())
+            }
             HostRuntimeVal::Handle(handle) => Ok(RuntimeVal::Handle(handle)),
             HostRuntimeVal::Void => Ok(RuntimeVal::Void),
         }

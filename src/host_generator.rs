@@ -51,6 +51,7 @@ enum BindingSource {
     Method {
         crate_ident: String,
         method_name: String,
+        receiver_mutable: bool,
     },
     ManualFunction {
         module: String,
@@ -67,6 +68,7 @@ struct Param {
 #[derive(Debug, Clone)]
 struct TypeContext {
     public_structs: BTreeSet<String>,
+    records: BTreeSet<String>,
     result_aliases: BTreeMap<String, String>,
     std_path_names: BTreeSet<String>,
     self_type: Option<String>,
@@ -75,11 +77,13 @@ struct TypeContext {
 impl TypeContext {
     fn new(
         public_structs: &BTreeSet<String>,
+        records: &BTreeSet<String>,
         result_aliases: &BTreeMap<String, String>,
         items: &[Item],
     ) -> Self {
         Self {
             public_structs: public_structs.clone(),
+            records: records.clone(),
             result_aliases: result_aliases.clone(),
             std_path_names: std_path_names(items),
             self_type: None,
@@ -89,6 +93,7 @@ impl TypeContext {
     fn manual(handles: &BTreeSet<String>) -> Self {
         Self {
             public_structs: handles.clone(),
+            records: BTreeSet::new(),
             result_aliases: BTreeMap::new(),
             std_path_names: BTreeSet::new(),
             self_type: None,
@@ -110,13 +115,27 @@ enum RustType {
     Void,
     List(Box<RustType>),
     Map(Box<RustType>),
+    Record(String),
     Handle(String),
+}
+
+#[derive(Debug, Clone)]
+struct RecordField {
+    name: String,
+    rust_type: RustType,
+}
+
+#[derive(Debug, Clone)]
+struct RecordDef {
+    fields: Vec<RecordField>,
 }
 
 #[derive(Debug, Default)]
 struct Collector {
     bindings: Vec<Binding>,
     handles: BTreeSet<String>,
+    mutable_handles: BTreeSet<String>,
+    records: BTreeMap<String, RecordDef>,
     skipped: Vec<String>,
     crate_ident: String,
     manual_module: String,
@@ -236,7 +255,7 @@ pub fn generate(
 
     Ok(HostGenResult {
         module_name,
-        declarations: collector.bindings.len() + collector.handles.len(),
+        declarations: collector.bindings.len() + collector.handles.len() + collector.records.len(),
         skipped: collector.skipped,
         kiro_path,
         rust_path,
@@ -373,10 +392,39 @@ fn collect_crate(root: &Path, collector: &mut Collector) -> Result<(), KiroError
         result_alias_map.extend(result_aliases(&reexport.file.items, Some(&reexport.names)));
     }
 
-    let root_context = TypeContext::new(&public_structs, &result_alias_map, &file.items);
+    let no_records = BTreeSet::new();
+    let root_probe = TypeContext::new(&public_structs, &no_records, &result_alias_map, &file.items);
+    let mut records = public_record_defs(&file.items, None, &root_probe);
+    for reexport in &reexports {
+        let probe = TypeContext::new(
+            &public_structs,
+            &no_records,
+            &result_alias_map,
+            &reexport.file.items,
+        );
+        records.extend(public_record_defs(
+            &reexport.file.items,
+            Some(&reexport.names),
+            &probe,
+        ));
+    }
+    let record_names = records.keys().cloned().collect();
+    collector.records = records;
+
+    let root_context = TypeContext::new(
+        &public_structs,
+        &record_names,
+        &result_alias_map,
+        &file.items,
+    );
     collect_items(&file.items, None, &root_context, collector);
     for reexport in &reexports {
-        let context = TypeContext::new(&public_structs, &result_alias_map, &reexport.file.items);
+        let context = TypeContext::new(
+            &public_structs,
+            &record_names,
+            &result_alias_map,
+            &reexport.file.items,
+        );
         collect_items(
             &reexport.file.items,
             Some(&reexport.names),
@@ -428,6 +476,95 @@ fn public_struct_names(
         }
     }
     names
+}
+
+fn public_record_defs(
+    items: &[Item],
+    allowed_names: Option<&BTreeSet<String>>,
+    context: &TypeContext,
+) -> BTreeMap<String, RecordDef> {
+    let mut records = BTreeMap::new();
+    for item in items {
+        let Item::Struct(item_struct) = item else {
+            continue;
+        };
+        let name = item_struct.ident.to_string();
+        if !is_public(&item_struct.vis) || !is_allowed_name(allowed_names, &name) {
+            continue;
+        }
+        if has_public_inherent_methods(items, &name) {
+            continue;
+        }
+        let syn::Fields::Named(fields) = &item_struct.fields else {
+            continue;
+        };
+        let mut record_fields = Vec::new();
+        let mut supported = !fields.named.is_empty();
+        for field in &fields.named {
+            let Some(ident) = &field.ident else {
+                supported = false;
+                break;
+            };
+            let field_name = ident.to_string();
+            if !is_public(&field.vis) || !is_kiro_identifier(&field_name) {
+                supported = false;
+                break;
+            }
+            let Ok(rust_type) = rust_type_from_syn(&field.ty, context) else {
+                supported = false;
+                break;
+            };
+            if contains_opaque_type(&rust_type) {
+                supported = false;
+                break;
+            }
+            record_fields.push(RecordField {
+                name: field_name,
+                rust_type,
+            });
+        }
+        if supported {
+            records.insert(
+                name,
+                RecordDef {
+                    fields: record_fields,
+                },
+            );
+        }
+    }
+    records
+}
+
+fn has_public_inherent_methods(items: &[Item], type_name: &str) -> bool {
+    items.iter().any(|item| {
+        let Item::Impl(item_impl) = item else {
+            return false;
+        };
+        item_impl.trait_.is_none()
+            && impl_type_name(&item_impl.self_ty).as_deref() == Some(type_name)
+            && item_impl
+                .items
+                .iter()
+                .any(|item| matches!(item, ImplItem::Fn(method) if is_public(&method.vis)))
+    })
+}
+
+fn contains_opaque_type(ty: &RustType) -> bool {
+    match ty {
+        RustType::Handle(_)
+        | RustType::Record(_)
+        | RustType::List(_)
+        | RustType::Map(_)
+        | RustType::Void => true,
+        RustType::Str | RustType::Num { .. } | RustType::Bool => false,
+    }
+}
+
+fn is_kiro_identifier(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte == b'_' || byte.is_ascii_lowercase())
 }
 
 fn result_aliases(
@@ -680,6 +817,9 @@ fn collect_impl(
     if !context.public_structs.contains(&type_name) {
         return;
     }
+    if context.records.contains(&type_name) {
+        return;
+    }
     if !is_allowed_name(allowed_names, &type_name) {
         return;
     }
@@ -699,13 +839,14 @@ fn collect_impl(
         }
 
         if let Some(FnArg::Receiver(receiver)) = method.sig.inputs.first() {
-            if receiver.reference.is_none() || receiver.mutability.is_some() {
+            if receiver.reference.is_none() {
                 collector.skipped.push(format!(
-                    "{}::{}: mutable receiver generation is not implemented yet",
+                    "{}::{}: by-value receivers are unsupported",
                     type_name, method.sig.ident
                 ));
                 continue;
             }
+            let receiver_mutable = receiver.mutability.is_some();
             let method_context = context.with_self_type(type_name.clone());
             let mut params = vec![Param {
                 name: to_snake_case(&type_name),
@@ -730,11 +871,15 @@ fn collect_impl(
                 continue;
             };
             collector.handles.insert(type_name.clone());
+            if receiver_mutable {
+                collector.mutable_handles.insert(type_name.clone());
+            }
             collector.push_binding(Binding {
                 exported_name: format!("{}_{}", to_snake_case(&type_name), method.sig.ident),
                 source: BindingSource::Method {
                     crate_ident: collector.crate_ident.clone(),
                     method_name: method.sig.ident.to_string(),
+                    receiver_mutable,
                 },
                 params,
                 return_type,
@@ -1013,6 +1158,7 @@ fn rust_type_from_syn(ty: &Type, context: &TypeContext) -> Result<RustType, Stri
                     }
                     Ok(RustType::Map(Box::new(rust_type_from_syn(value, context)?)))
                 }
+                _ if context.records.contains(&name) => Ok(RustType::Record(name)),
                 _ if context.public_structs.contains(&name) => Ok(RustType::Handle(name)),
                 _ => Err(format!("unsupported type '{}'", name)),
             }
@@ -1095,6 +1241,20 @@ fn render_kiro_module(collector: &Collector) -> String {
     let mut lines = vec![
         "// Generated by `kiro host gen`; edit the Rust manual section for fallbacks.".to_string(),
     ];
+    if !collector.records.is_empty() {
+        for (name, record) in &collector.records {
+            lines.push(String::new());
+            lines.push(format!("struct {} {{", name));
+            for field in &record.fields {
+                lines.push(format!(
+                    "    {}: {}",
+                    field.name,
+                    kiro_type(&field.rust_type)
+                ));
+            }
+            lines.push("}".to_string());
+        }
+    }
     if !collector.handles.is_empty() {
         lines.push(String::new());
         for handle in &collector.handles {
@@ -1131,7 +1291,7 @@ fn render_rust_glue(collector: &Collector) -> String {
     out.push_str(GENERATED_BEGIN);
     out.push_str("\n\n");
     for binding in &collector.bindings {
-        out.push_str(&render_binding_glue(binding));
+        out.push_str(&render_binding_glue(binding, collector));
         out.push('\n');
     }
     if !collector.skipped.is_empty() {
@@ -1146,7 +1306,7 @@ fn render_rust_glue(collector: &Collector) -> String {
     out
 }
 
-fn render_binding_glue(binding: &Binding) -> String {
+fn render_binding_glue(binding: &Binding, collector: &Collector) -> String {
     let async_kw = if binding.pure { "" } else { "async " };
     let mut body = String::new();
     body.push_str(&format!(
@@ -1159,7 +1319,13 @@ fn render_binding_glue(binding: &Binding) -> String {
         binding.exported_name
     ));
     for (idx, param) in binding.params.iter().enumerate() {
-        body.push_str(&decode_param(binding, idx, param, &binding.exported_name));
+        body.push_str(&decode_param(
+            binding,
+            idx,
+            param,
+            &binding.exported_name,
+            collector,
+        ));
     }
     let args = binding
         .params
@@ -1176,6 +1342,7 @@ fn render_binding_glue(binding: &Binding) -> String {
         BindingSource::Method {
             crate_ident: _,
             method_name,
+            receiver_mutable: _,
         } => {
             let receiver = &binding.params[0].name;
             let rest = binding
@@ -1194,7 +1361,7 @@ fn render_binding_glue(binding: &Binding) -> String {
         body.push_str(&format!("    match {} {{\n", call));
         body.push_str(&format!(
             "        Ok(value) => Ok({}),\n",
-            encode_value("value", &binding.return_type)
+            encode_value("value", &binding.return_type, collector)
         ));
         body.push_str(&format!(
             "        Err(err) => Err(KiroError::message(\"{}\", err.to_string())),\n",
@@ -1211,7 +1378,7 @@ fn render_binding_glue(binding: &Binding) -> String {
                 body.push_str(&format!("    let value = {};\n", call));
                 body.push_str(&format!(
                     "    Ok({})\n",
-                    encode_value("value", &binding.return_type)
+                    encode_value("value", &binding.return_type, collector)
                 ));
             }
         }
@@ -1220,7 +1387,13 @@ fn render_binding_glue(binding: &Binding) -> String {
     body
 }
 
-fn decode_param(binding: &Binding, idx: usize, param: &Param, fn_name: &str) -> String {
+fn decode_param(
+    binding: &Binding,
+    idx: usize,
+    param: &Param,
+    fn_name: &str,
+    collector: &Collector,
+) -> String {
     let arg = format!("RuntimeVal::expect_arg(&args, {}, \"{}\")?", idx, fn_name);
     match &param.rust_type {
         RustType::Str => format!("    let {} = {}.as_str()?.to_string();\n", param.name, arg),
@@ -1234,6 +1407,26 @@ fn decode_param(binding: &Binding, idx: usize, param: &Param, fn_name: &str) -> 
             format!("    let {} = {}.as_num()? as {};\n", param.name, arg, rust)
         }
         RustType::Bool => format!("    let {} = {}.as_bool()?;\n", param.name, arg),
+        RustType::Record(type_name) => decode_record_param(&param.name, &arg, type_name, collector),
+        RustType::Handle(type_name) if collector.mutable_handles.contains(type_name) => {
+            let mutable = matches!(
+                binding.source,
+                BindingSource::Method {
+                    receiver_mutable: true,
+                    ..
+                }
+            ) && idx == 0;
+            let mutability = if mutable { "mut " } else { "" };
+            format!(
+                "    let {mutability}{} = {}.as_handle(\"{}\")?.downcast_ref::<std::sync::Mutex<{}>>().ok_or_else(|| KiroError::message(\"TypeError\", \"expected mutable handle payload {}\"))?.lock().map_err(|_| KiroError::message(\"HandlePoisoned\", \"{} handle lock was poisoned\"))?;\n",
+                param.name,
+                arg,
+                type_name,
+                handle_payload_type(binding, type_name),
+                type_name,
+                type_name
+            )
+        }
         RustType::Handle(type_name) => format!(
             "    let {} = {}.as_handle(\"{}\")?.downcast_ref::<{}>().ok_or_else(|| KiroError::message(\"TypeError\", \"expected handle payload {}\"))?;\n",
             param.name,
@@ -1242,71 +1435,136 @@ fn decode_param(binding: &Binding, idx: usize, param: &Param, fn_name: &str) -> 
             handle_payload_type(binding, type_name),
             type_name
         ),
-        RustType::List(inner) => decode_list_param(&param.name, &arg, inner),
-        RustType::Map(inner) => decode_map_param(&param.name, &arg, inner),
+        RustType::List(inner) => decode_list_param(&param.name, &arg, inner, collector),
+        RustType::Map(inner) => decode_map_param(&param.name, &arg, inner, collector),
         RustType::Void => format!("    let {} = ();\n", param.name),
     }
 }
 
-fn decode_list_param(name: &str, arg: &str, inner: &RustType) -> String {
+fn decode_list_param(name: &str, arg: &str, inner: &RustType, collector: &Collector) -> String {
     let mut out = format!("    let mut {} = Vec::new();\n", name);
     out.push_str(&format!("    for item in {}.as_list()? {{\n", arg));
     out.push_str(&format!(
         "        {}.push({});\n",
         name,
-        decode_runtime_expr("item", inner)
+        decode_runtime_expr("item", inner, collector)
     ));
     out.push_str("    }\n");
     out
 }
 
-fn decode_map_param(name: &str, arg: &str, inner: &RustType) -> String {
+fn decode_map_param(name: &str, arg: &str, inner: &RustType, collector: &Collector) -> String {
     let mut out = format!("    let mut {} = std::collections::HashMap::new();\n", name);
     out.push_str(&format!("    for (key, value) in {}.as_map()? {{\n", arg));
     out.push_str(&format!(
         "        {}.insert(key.clone(), {});\n",
         name,
-        decode_runtime_expr("value", inner)
+        decode_runtime_expr("value", inner, collector)
     ));
     out.push_str("    }\n");
     out
 }
 
-fn decode_runtime_expr(value: &str, ty: &RustType) -> String {
+fn decode_runtime_expr(value: &str, ty: &RustType, collector: &Collector) -> String {
     match ty {
         RustType::Str => format!("{}.as_str()?.to_string()", value),
         RustType::Num { rust } if rust == "f64" => format!("{}.as_num()?", value),
         RustType::Num { rust } => format!("{}.as_num()? as {}", value, rust),
         RustType::Bool => format!("{}.as_bool()?", value),
+        RustType::Record(type_name) => decode_record_expr(value, type_name, collector),
         _ => {
             "return Err(KiroError::message(\"TypeError\", \"unsupported nested type\"))".to_string()
         }
     }
 }
 
-fn encode_value(name: &str, ty: &RustType) -> String {
+fn decode_record_param(name: &str, arg: &str, type_name: &str, collector: &Collector) -> String {
+    format!(
+        "    let {} = {};\n",
+        name,
+        decode_record_expr(arg, type_name, collector)
+    )
+}
+
+fn decode_record_expr(value: &str, type_name: &str, collector: &Collector) -> String {
+    let record = collector
+        .records
+        .get(type_name)
+        .expect("record Rust type must have a definition");
+    let fields = record
+        .fields
+        .iter()
+        .map(|field| {
+            let value = format!(
+                "__kiro_fields.get(\"{}\").ok_or_else(|| KiroError::message(\"TypeError\", \"missing {}.{}\"))?",
+                field.name, type_name, field.name
+            );
+            format!(
+                "{}: {}",
+                field.name,
+                decode_runtime_expr(&value, &field.rust_type, collector)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{{ let __kiro_fields = {}.as_struct(\"{}\")?; {}::{} {{ {} }} }}",
+        value, type_name, collector.crate_ident, type_name, fields
+    )
+}
+
+fn encode_value(name: &str, ty: &RustType, collector: &Collector) -> String {
     match ty {
         RustType::Void => "RuntimeVal::Void".to_string(),
-        RustType::Map(inner) => format!(
-            "RuntimeVal::Map({}.into_iter().map(|(k, v)| (k, {})).collect())",
-            name,
-            encode_inner_value("v", inner)
+        RustType::Handle(type_name) if collector.mutable_handles.contains(type_name) => format!(
+            "RuntimeVal::handle(\"{}\", std::sync::Mutex::new({}))",
+            type_name, name
         ),
         RustType::Handle(type_name) => format!("RuntimeVal::handle(\"{}\", {})", type_name, name),
-        _ => format!("RuntimeVal::from({})", name),
+        _ => encode_inner_value(name, ty, collector),
     }
 }
 
-fn encode_inner_value(name: &str, ty: &RustType) -> String {
+fn encode_inner_value(name: &str, ty: &RustType, collector: &Collector) -> String {
     match ty {
-        RustType::Str | RustType::Num { .. } | RustType::Bool | RustType::List(_) => {
-            format!("RuntimeVal::from({})", name)
-        }
+        RustType::Str | RustType::Bool => format!("RuntimeVal::from({})", name),
+        RustType::Num { .. } => format!("RuntimeVal::from({} as f64)", name),
+        RustType::List(inner) => format!(
+            "RuntimeVal::List({}.into_iter().map(|v| {}).collect())",
+            name,
+            encode_inner_value("v", inner, collector)
+        ),
         RustType::Map(inner) => format!(
             "RuntimeVal::Map({}.into_iter().map(|(k, v)| (k, {})).collect())",
             name,
-            encode_inner_value("v", inner)
+            encode_inner_value("v", inner, collector)
         ),
+        RustType::Record(type_name) => {
+            let record = collector
+                .records
+                .get(type_name)
+                .expect("record Rust type must have a definition");
+            let fields = record
+                .fields
+                .iter()
+                .map(|field| {
+                    format!(
+                        "(\"{}\".to_string(), {})",
+                        field.name,
+                        encode_inner_value(
+                            &format!("{}.{}", name, field.name),
+                            &field.rust_type,
+                            collector,
+                        )
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "RuntimeVal::structure(\"{}\", [{}].into_iter().collect())",
+                type_name, fields
+            )
+        }
         RustType::Handle(type_name) => format!("RuntimeVal::handle(\"{}\", {})", type_name, name),
         RustType::Void => "RuntimeVal::Void".to_string(),
     }
@@ -1320,7 +1578,7 @@ fn kiro_type(ty: &RustType) -> String {
         RustType::Void => "void".to_string(),
         RustType::List(inner) => format!("list {}", kiro_type(inner)),
         RustType::Map(inner) => format!("map str {}", kiro_type(inner)),
-        RustType::Handle(name) => name.clone(),
+        RustType::Record(name) | RustType::Handle(name) => name.clone(),
     }
 }
 

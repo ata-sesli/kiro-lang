@@ -481,7 +481,8 @@ impl<'program> EirRuntime<'program> {
                     })?;
                 let args = args
                     .iter()
-                    .map(RuntimeVal::to_host_runtime)
+                    .zip(metadata.signature.params())
+                    .map(|(value, ty)| self.to_host_runtime_typed(value, *ty))
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|message| {
                         runtime_error(anchor, EirRuntimeErrorKind::HostCallFailed(message))
@@ -508,10 +509,126 @@ impl<'program> EirRuntime<'program> {
                         ));
                     }
                 };
-                RuntimeVal::from_host_runtime(value).map_err(|message| {
-                    runtime_error(anchor, EirRuntimeErrorKind::HostCallFailed(message))
-                })
+                self.decode_host_runtime_typed(value, metadata.signature.return_type())
+                    .map_err(|message| {
+                        runtime_error(anchor, EirRuntimeErrorKind::HostCallFailed(message))
+                    })
             }
+        }
+    }
+
+    fn to_host_runtime_typed(
+        &self,
+        value: &RuntimeVal,
+        ty: TypeId,
+    ) -> Result<kiro_runtime::RuntimeVal, String> {
+        match self.program.types.get(ty) {
+            Some(SemType::Struct(id)) => {
+                let RuntimeVal::Struct(_, values) = value else {
+                    return Err("Type Error: expected struct value".to_string());
+                };
+                let record = self
+                    .program
+                    .struct_def(*id)
+                    .ok_or_else(|| format!("missing EIR struct {}", id.raw()))?;
+                let mut fields = HashMap::with_capacity(record.fields.len());
+                for field in &record.fields {
+                    let key = format!("field{}", field.id.raw());
+                    let value = values
+                        .get(&key)
+                        .ok_or_else(|| format!("missing field {}.{}", record.name, field.name))?;
+                    fields.insert(
+                        field.name.clone(),
+                        self.to_host_runtime_typed(value, field.ty)?,
+                    );
+                }
+                Ok(kiro_runtime::RuntimeVal::structure(&record.name, fields))
+            }
+            Some(SemType::List(inner)) => {
+                let RuntimeVal::List(values) = value else {
+                    return Err("Type Error: expected list value".to_string());
+                };
+                values
+                    .iter()
+                    .map(|value| self.to_host_runtime_typed(value, *inner))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(kiro_runtime::RuntimeVal::List)
+            }
+            Some(SemType::Map(_, value_ty)) => {
+                let RuntimeVal::Map(values) = value else {
+                    return Err("Type Error: expected map value".to_string());
+                };
+                values
+                    .iter()
+                    .map(|(key, value)| {
+                        Ok((key.clone(), self.to_host_runtime_typed(value, *value_ty)?))
+                    })
+                    .collect::<Result<HashMap<_, _>, String>>()
+                    .map(kiro_runtime::RuntimeVal::Map)
+            }
+            _ => value.to_host_runtime(),
+        }
+    }
+
+    fn decode_host_runtime_typed(
+        &self,
+        value: kiro_runtime::RuntimeVal,
+        ty: TypeId,
+    ) -> Result<RuntimeVal, String> {
+        match self.program.types.get(ty) {
+            Some(SemType::Struct(id)) => {
+                let record = self
+                    .program
+                    .struct_def(*id)
+                    .ok_or_else(|| format!("missing EIR struct {}", id.raw()))?;
+                let kiro_runtime::RuntimeVal::Struct {
+                    type_name,
+                    mut fields,
+                } = value
+                else {
+                    return Err(format!("Type Error: expected struct {}", record.name));
+                };
+                if type_name != record.name {
+                    return Err(format!(
+                        "Type Error: expected struct {}, got {}",
+                        record.name, type_name
+                    ));
+                }
+                let mut values = HashMap::with_capacity(record.fields.len());
+                for field in &record.fields {
+                    let value = fields.remove(&field.name).ok_or_else(|| {
+                        format!("Type Error: missing field {}.{}", record.name, field.name)
+                    })?;
+                    values.insert(
+                        format!("field{}", field.id.raw()),
+                        self.decode_host_runtime_typed(value, field.ty)?,
+                    );
+                }
+                Ok(RuntimeVal::Struct(format!("struct{}", id.raw()), values))
+            }
+            Some(SemType::List(inner)) => {
+                let kiro_runtime::RuntimeVal::List(values) = value else {
+                    return Err("Type Error: expected list".to_string());
+                };
+                values
+                    .into_iter()
+                    .map(|value| self.decode_host_runtime_typed(value, *inner))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(RuntimeVal::List)
+            }
+            Some(SemType::Map(_, value_ty)) => {
+                let kiro_runtime::RuntimeVal::Map(values) = value else {
+                    return Err("Type Error: expected map".to_string());
+                };
+                values
+                    .into_iter()
+                    .map(|(key, value)| {
+                        Ok((key, self.decode_host_runtime_typed(value, *value_ty)?))
+                    })
+                    .collect::<Result<HashMap<_, _>, String>>()
+                    .map(RuntimeVal::Map)
+            }
+            _ => RuntimeVal::from_host_runtime(value),
         }
     }
 

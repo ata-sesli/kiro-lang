@@ -4,8 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use kiro_lang::analysis::{SourceOverlays, analyze_path_with_info};
 use kiro_lang::eir::{
-    BasicBlock, BlockId, EirFunction, EirProgram, Instruction, InstructionKind, SlotId, Terminator,
-    TerminatorKind, VerifyErrorKind, lower_program, print_program, verify_program,
+    BasicBlock, BlockId, EirFunction, EirProgram, EirStruct, EirStructField, Instruction,
+    InstructionKind, SlotId, Terminator, TerminatorKind, VerifyErrorKind, lower_program,
+    print_program, verify_program,
 };
 
 fn analyze_main(source: &str) -> kiro_lang::analysis::AnalysisResult {
@@ -19,7 +20,10 @@ fn analyze_main(source: &str) -> kiro_lang::analysis::AnalysisResult {
     fs::write(&path, source).expect("test source should be written");
     analyze_path_with_info(path, &SourceOverlays::new()).expect("source should analyze")
 }
-use kiro_lang::hir::{Effects, FunctionId, Signature, SourceAnchor, SourceId, TypeId, TypeTable};
+use kiro_lang::hir::{
+    Effects, FieldId, FunctionId, SemType, Signature, SourceAnchor, SourceId, StructId, TypeId,
+    TypeTable,
+};
 
 fn anchor(start: usize, end: usize) -> SourceAnchor {
     SourceAnchor::try_from_offsets(SourceId::new(0), start, end).expect("valid test anchor")
@@ -48,6 +52,7 @@ fn verifier_accepts_typed_straight_line_function_and_printer_is_deterministic() 
     let program = EirProgram {
         types: TypeTable::new(),
         errors: Vec::new(),
+        structs: Vec::new(),
         globals: Vec::new(),
         host_functions: Vec::new(),
         constants: Vec::new(),
@@ -98,10 +103,74 @@ module_initializers:
 }
 
 #[test]
+fn verifier_rejects_struct_types_without_metadata() {
+    let mut types = TypeTable::new();
+    types.intern(SemType::Struct(StructId::new(0)));
+    let program = EirProgram {
+        types,
+        errors: Vec::new(),
+        structs: Vec::new(),
+        globals: Vec::new(),
+        host_functions: Vec::new(),
+        constants: Vec::new(),
+        functions: Vec::new(),
+        module_initializers: Vec::new(),
+    };
+
+    let errors = verify_program(&program).expect_err("missing struct metadata must be rejected");
+    assert!(matches!(
+        errors[0].kind,
+        VerifyErrorKind::InvalidStruct(id) if id == StructId::new(0)
+    ));
+}
+
+#[test]
+fn verifier_rejects_misordered_struct_and_field_metadata() {
+    let mut types = TypeTable::new();
+    types.intern(SemType::Struct(StructId::new(0)));
+    let program = EirProgram {
+        types,
+        errors: Vec::new(),
+        structs: vec![EirStruct {
+            id: StructId::new(1),
+            name: "Broken".to_string(),
+            fields: vec![EirStructField {
+                id: FieldId::new(1),
+                name: "value".to_string(),
+                ty: TypeId::new(99),
+            }],
+        }],
+        globals: Vec::new(),
+        host_functions: Vec::new(),
+        constants: Vec::new(),
+        functions: Vec::new(),
+        module_initializers: Vec::new(),
+    };
+
+    let errors = verify_program(&program).expect_err("malformed struct metadata must be rejected");
+    assert!(errors.iter().any(|error| matches!(
+        error.kind,
+        VerifyErrorKind::StructOrder { expected, actual }
+            if expected == StructId::new(0) && actual == StructId::new(1)
+    )));
+    assert!(errors.iter().any(|error| matches!(
+        error.kind,
+        VerifyErrorKind::FieldOrder { expected, actual }
+            if expected == FieldId::new(0) && actual == FieldId::new(1)
+    )));
+    assert!(errors.iter().any(|error| matches!(
+        error.kind,
+        VerifyErrorKind::InvalidFieldType { field, ty }
+            if field == FieldId::new(1) && ty == TypeId::new(99)
+    )));
+}
+
+#[test]
 fn verifier_reports_typed_instruction_location_and_anchor() {
     let program = EirProgram {
         types: TypeTable::new(),
         errors: Vec::new(),
+        structs: Vec::new(),
         globals: Vec::new(),
         host_functions: Vec::new(),
         constants: Vec::new(),
@@ -149,6 +218,7 @@ fn verifier_rejects_uninitialized_reads_and_invalid_branch_targets() {
     let program = EirProgram {
         types: TypeTable::new(),
         errors: Vec::new(),
+        structs: Vec::new(),
         globals: Vec::new(),
         host_functions: Vec::new(),
         constants: Vec::new(),
@@ -232,6 +302,7 @@ fn verifier_rejects_impure_direct_call_from_pure_function() {
     let program = EirProgram {
         types: TypeTable::new(),
         errors: Vec::new(),
+        structs: Vec::new(),
         globals: Vec::new(),
         host_functions: Vec::new(),
         constants: Vec::new(),
@@ -251,6 +322,7 @@ fn verifier_rejects_reading_a_slot_after_it_is_moved() {
     let program = EirProgram {
         types: TypeTable::new(),
         errors: Vec::new(),
+        structs: Vec::new(),
         globals: Vec::new(),
         host_functions: Vec::new(),
         constants: Vec::new(),
@@ -324,6 +396,7 @@ fn verifier_rejects_direct_calls_with_unreported_effects() {
     let program = EirProgram {
         types: TypeTable::new(),
         errors: Vec::new(),
+        structs: Vec::new(),
         globals: Vec::new(),
         host_functions: Vec::new(),
         constants: Vec::new(),
@@ -343,6 +416,7 @@ fn verifier_rejects_invalid_signature_return_type() {
     let program = EirProgram {
         types: TypeTable::new(),
         errors: Vec::new(),
+        structs: Vec::new(),
         globals: Vec::new(),
         host_functions: Vec::new(),
         constants: Vec::new(),

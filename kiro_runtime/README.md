@@ -11,10 +11,10 @@ It exists to keep host glue behavior consistent and avoid re-defining value conv
 The current host ABI version is:
 
 ```rust
-pub const KIRO_RUNTIME_ABI_VERSION: u32 = 2;
+pub const KIRO_RUNTIME_ABI_VERSION: u32 = 3;
 ```
 
-Host glue for ABI v2 uses this shape:
+Host glue for ABI v3 uses this shape:
 
 ```rust
 pub async fn name(args: Vec<RuntimeVal>) -> HostResult
@@ -35,6 +35,7 @@ pub type HostResult = Result<RuntimeVal, KiroError>;
 - `Bool(bool)`
 - `List(Vec<RuntimeVal>)`
 - `Map(HashMap<String, RuntimeVal>)`
+- `Struct { type_name, fields }`
 - `Handle(KiroHandle)`
 - `Void`
 
@@ -172,7 +173,6 @@ Use the same handle name in Kiro and Rust. `as_handle("Model")` returns a `TypeE
 
 This crate intentionally stays small. Depending on language evolution, you may later extend it with:
 
-- Struct-like runtime records with typed metadata
 - Result/error envelope helpers
 - Runtime representations for function refs, pipes, and managed address handles
 
@@ -185,7 +185,7 @@ Because this crate encodes host boundary contracts, changes should be treated ca
 - Keep conversion behavior stable.
 - Keep error matching name-based.
 - Changing `RuntimeVal`, `KiroError`, the host function signature, or error matching requires a new ABI version.
-- Existing host functions using `Vec<RuntimeVal> -> HostResult` remain valid after updating to ABI v2, unless they exhaustively match `RuntimeVal` and need to handle `RuntimeVal::Handle`.
+- Existing host functions using `Vec<RuntimeVal> -> HostResult` remain valid after updating to ABI v3, unless they exhaustively match `RuntimeVal` and need to handle `RuntimeVal::Struct`.
 - Coordinate updates with compiler/interpreter changes.
 
 ## License
