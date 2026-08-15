@@ -24,3 +24,7 @@ url = { version = "2.5.8", optional = true }
 
 [build-dependencies]
 rust-sitter-tool = "0.4.5"
+
+[[bench]]
+name = "eir_baseline"
+harness = false

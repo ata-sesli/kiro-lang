@@ -176,6 +176,14 @@ struct Frame {
     return_destination: Option<SlotId>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EirRuntimeStats {
+    pub steps_executed: u64,
+    pub frames_pushed: u64,
+    pub peak_frame_depth: usize,
+    pub peak_live_slots: usize,
+}
+
 pub struct EirRuntime<'program> {
     program: &'program EirProgram,
     frames: Vec<Frame>,
@@ -187,6 +195,8 @@ pub struct EirRuntime<'program> {
     host_mode: HostMode,
     host_registry: HostRegistry,
     spawned: Vec<JoinHandle<Result<RuntimeVal, EirRuntimeError>>>,
+    stats: EirRuntimeStats,
+    live_slots: usize,
 }
 
 impl<'program> EirRuntime<'program> {
@@ -211,6 +221,8 @@ impl<'program> EirRuntime<'program> {
             host_mode: HostMode::default(),
             host_registry: HostRegistry::default(),
             spawned: Vec::new(),
+            stats: EirRuntimeStats::default(),
+            live_slots: 0,
         })
     }
 
@@ -237,6 +249,15 @@ impl<'program> EirRuntime<'program> {
 
     pub const fn step_count(&self) -> u64 {
         self.step_count
+    }
+
+    pub const fn stats(&self) -> EirRuntimeStats {
+        EirRuntimeStats {
+            steps_executed: self.step_count,
+            frames_pushed: self.stats.frames_pushed,
+            peak_frame_depth: self.stats.peak_frame_depth,
+            peak_live_slots: self.stats.peak_live_slots,
+        }
     }
 
     pub fn run_initializers(&mut self) -> Result<(), EirRuntimeError> {
@@ -269,6 +290,7 @@ impl<'program> EirRuntime<'program> {
         let result = self.run_frames();
         if result.is_err() {
             self.frames.clear();
+            self.live_slots = 0;
         }
         result
     }
@@ -280,28 +302,24 @@ impl<'program> EirRuntime<'program> {
         return_destination: Option<SlotId>,
         anchor: SourceAnchor,
     ) -> Result<(), EirRuntimeError> {
-        let function_index = usize::try_from(function).expect("verified function ID fits usize");
-        let metadata = &self.program.functions[function_index];
-        if args.len() != metadata.signature.params().len() {
-            return Err(runtime_error(
-                anchor,
-                EirRuntimeErrorKind::ArgumentCount {
-                    expected: metadata.signature.params().len(),
-                    actual: args.len(),
-                },
-            ));
-        }
-        for (value, ty) in args.iter().zip(metadata.signature.params()) {
-            if !value_matches_type(value, *ty, self.program) {
-                return Err(runtime_error(
-                    anchor,
-                    EirRuntimeErrorKind::TypeMismatch {
-                        expected: type_name(*ty, self.program),
-                        actual: runtime_value_name(value),
-                    },
-                ));
-            }
-        }
+        let argument_count = args.len();
+        let slots = prepare_frame_slots(
+            self.program,
+            function,
+            argument_count,
+            args.into_iter().map(Ok),
+            anchor,
+        )?;
+        self.push_prepared_frame(function, slots, return_destination, anchor)
+    }
+
+    fn push_prepared_frame(
+        &mut self,
+        function: FunctionId,
+        slots: Vec<Option<RuntimeVal>>,
+        return_destination: Option<SlotId>,
+        anchor: SourceAnchor,
+    ) -> Result<(), EirRuntimeError> {
         let depth = self.frames.len() + 1;
         if let Some(limit) = self.limits.max_call_depth
             && depth > limit
@@ -312,10 +330,7 @@ impl<'program> EirRuntime<'program> {
             ));
         }
 
-        let mut slots = vec![None; metadata.slots.len()];
-        for (slot, value) in slots.iter_mut().zip(args) {
-            *slot = Some(value);
-        }
+        let slot_count = slots.len();
         self.frames.push(Frame {
             function,
             block: BlockId::new(0),
@@ -323,6 +338,10 @@ impl<'program> EirRuntime<'program> {
             slots,
             return_destination,
         });
+        self.live_slots += slot_count;
+        self.stats.frames_pushed += 1;
+        self.stats.peak_frame_depth = self.stats.peak_frame_depth.max(depth);
+        self.stats.peak_live_slots = self.stats.peak_live_slots.max(self.live_slots);
         Ok(())
     }
 
@@ -344,6 +363,11 @@ impl<'program> EirRuntime<'program> {
                     args,
                     destination,
                 } => self.push_frame(function, args, destination, anchor)?,
+                StepAction::PreparedCall {
+                    function,
+                    slots,
+                    destination,
+                } => self.push_prepared_frame(function, slots, destination, anchor)?,
                 StepAction::HostCall {
                     function,
                     args,
@@ -358,6 +382,7 @@ impl<'program> EirRuntime<'program> {
                 StepAction::Spawn { function, args } => self.spawn(function, args, anchor)?,
                 StepAction::Return(value) => {
                     let completed = self.frames.pop().expect("return has an active frame");
+                    self.live_slots -= completed.slots.len();
                     let Some(caller) = self.frames.last_mut() else {
                         for task in self.spawned.drain(..) {
                             task.join().map_err(|_| {
@@ -377,6 +402,7 @@ impl<'program> EirRuntime<'program> {
                 }
                 StepAction::Throw(value) => {
                     self.frames.clear();
+                    self.live_slots = 0;
                     return Err(runtime_error(
                         anchor,
                         EirRuntimeErrorKind::Thrown(Box::new(value)),
@@ -559,6 +585,11 @@ enum StepAction {
     Call {
         function: FunctionId,
         args: Vec<RuntimeVal>,
+        destination: Option<SlotId>,
+    },
+    PreparedCall {
+        function: FunctionId,
+        slots: Vec<Option<RuntimeVal>>,
         destination: Option<SlotId>,
     },
     HostCall {
@@ -950,13 +981,17 @@ fn execute_instruction(
             function,
             args,
         } => {
-            let values = args
-                .iter()
-                .map(|slot| read_slot(frame, *slot, anchor).cloned())
-                .collect::<Result<Vec<_>, _>>()?;
-            return Ok(StepAction::Call {
+            let slots = prepare_frame_slots(
+                program,
+                *function,
+                args.len(),
+                args.iter()
+                    .map(|slot| read_slot(frame, *slot, anchor).cloned()),
+                anchor,
+            )?;
+            return Ok(StepAction::PreparedCall {
                 function: *function,
-                args: values,
+                slots,
                 destination: *dst,
             });
         }
@@ -1257,6 +1292,46 @@ fn write_slot(
     let index = usize::try_from(slot).expect("verified slot ID fits usize");
     frame.slots[index] = Some(value);
     Ok(())
+}
+
+fn prepare_frame_slots(
+    program: &EirProgram,
+    function: FunctionId,
+    argument_count: usize,
+    arguments: impl IntoIterator<Item = Result<RuntimeVal, EirRuntimeError>>,
+    anchor: SourceAnchor,
+) -> Result<Vec<Option<RuntimeVal>>, EirRuntimeError> {
+    let function_index = usize::try_from(function).expect("verified function ID fits usize");
+    let metadata = &program.functions[function_index];
+    if argument_count != metadata.signature.params().len() {
+        return Err(runtime_error(
+            anchor,
+            EirRuntimeErrorKind::ArgumentCount {
+                expected: metadata.signature.params().len(),
+                actual: argument_count,
+            },
+        ));
+    }
+
+    let mut slots = vec![None; metadata.slots.len()];
+    for ((slot, value), ty) in slots
+        .iter_mut()
+        .zip(arguments)
+        .zip(metadata.signature.params())
+    {
+        let value = value?;
+        if !value_matches_type(&value, *ty, program) {
+            return Err(runtime_error(
+                anchor,
+                EirRuntimeErrorKind::TypeMismatch {
+                    expected: type_name(*ty, program),
+                    actual: runtime_value_name(&value),
+                },
+            ));
+        }
+        *slot = Some(value);
+    }
+    Ok(slots)
 }
 
 fn value_matches_type(value: &RuntimeVal, ty: TypeId, program: &EirProgram) -> bool {

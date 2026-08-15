@@ -155,6 +155,36 @@ pure fn factorial(value: num) -> num {
 }
 
 #[test]
+fn eir_reports_peak_frame_and_slot_usage() {
+    let source = r#"
+pure fn recurse(value: num) -> num {
+    on (value <= 1) {
+        return value
+    }
+    return recurse(value - 1)
+}
+"#;
+    let (program, function) = lower_source("runtime_stats", source);
+    let slots_per_frame = program.functions[usize::try_from(function).unwrap()]
+        .slots
+        .len();
+    let mut runtime = EirRuntime::new(&program).expect("verified runtime");
+
+    assert_eq!(
+        runtime
+            .call_function(function, vec![RuntimeVal::Float(4.0)])
+            .expect("recursive function should run"),
+        RuntimeVal::Float(1.0)
+    );
+
+    let stats = runtime.stats();
+    assert!(stats.steps_executed > 0);
+    assert_eq!(stats.frames_pushed, 4);
+    assert_eq!(stats.peak_frame_depth, 4);
+    assert_eq!(stats.peak_live_slots, slots_per_frame * 4);
+}
+
+#[test]
 fn eir_runs_module_initializers_and_enforces_step_limits_at_anchors() {
     let source = r#"
 fn noop() {
