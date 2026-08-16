@@ -19,7 +19,9 @@ use crate::analysis::{self, SourceOverlays};
 use crate::errors::{ErrorCode, ErrorPhase, KiroError};
 use crate::formatter;
 use crate::grammar;
-use crate::lsp_symbols::{self, IndexedKind, SymbolDecl, SymbolIndex};
+pub mod symbols;
+
+use self::symbols::{IndexedKind, SymbolDecl, SymbolIndex};
 
 pub fn run() -> Result<(), KiroError> {
     let (connection, io_threads) = Connection::stdio();
@@ -245,7 +247,7 @@ impl LspState {
         };
         let index = self.symbol_index_for(&path, &source);
         let text = index.hover_at(&path, &source, doc.position).or_else(|| {
-            lsp_symbols::word_at(&source, doc.position)
+            symbols::word_at(&source, doc.position)
                 .and_then(|word| hover_doc(&word).map(str::to_string))
         });
         let Some(text) = text else {
@@ -266,11 +268,11 @@ impl LspState {
             return serde_json::to_value(Vec::<CompletionItem>::new()).map_err(lsp_error);
         };
 
-        let mut items = if lsp_symbols::is_import_completion(&source, doc.position) {
+        let mut items = if symbols::is_import_completion(&source, doc.position) {
             import_completion_items(&path)
         } else {
             let index = self.symbol_index_for(&path, &source);
-            if let Some(module) = lsp_symbols::module_prefix_at(&source, doc.position) {
+            if let Some(module) = symbols::module_prefix_at(&source, doc.position) {
                 let mut items = module_completion_items(&index, &module);
                 if items.is_empty() {
                     items = self
@@ -405,7 +407,7 @@ fn diagnostic_from_error(err: KiroError) -> Diagnostic {
 }
 
 fn import_completion_items(path: &Path) -> Vec<CompletionItem> {
-    lsp_symbols::sibling_and_std_modules(path)
+    symbols::sibling_and_std_modules(path)
         .into_iter()
         .map(|module| completion_item(&module, CompletionItemKind::MODULE, "module"))
         .collect()
@@ -445,14 +447,14 @@ fn module_completion_items(index: &SymbolIndex, module: &str) -> Vec<CompletionI
     if crate::is_std_io_module_name(module) {
         for name in ["print", "write", "eprint", "eprintline"] {
             if !items.iter().any(|item| item.label == name) {
-                let detail = lsp_symbols::std_io_display_signature_label(module, name)
+                let detail = symbols::std_io_display_signature_label(module, name)
                     .unwrap_or_else(|| "std io display function".to_string());
                 items.push(completion_item(name, CompletionItemKind::FUNCTION, &detail));
             }
         }
     }
     for name in ["join", "slice", "reverse", "has", "set", "delete"] {
-        if let Some((detail, _, _)) = lsp_symbols::collection_intrinsic(module, name)
+        if let Some((detail, _, _)) = symbols::collection_intrinsic(module, name)
             && !items.iter().any(|item| item.label == name)
         {
             items.push(completion_item(name, CompletionItemKind::FUNCTION, &detail));

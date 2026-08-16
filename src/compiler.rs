@@ -1,7 +1,8 @@
 use crate::grammar::grammar;
 use std::collections::{HashMap, HashSet};
 
-pub mod eir;
+pub mod rust_backend;
+pub use rust_backend as eir;
 pub mod types;
 
 #[derive(Clone, Debug)]

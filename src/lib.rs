@@ -1,5 +1,5 @@
 pub mod analysis;
-pub mod build_manager;
+pub mod cli;
 pub mod compiler;
 pub mod eir;
 pub mod engine;
@@ -11,10 +11,9 @@ pub mod host_generator;
 pub mod interpreter;
 #[cfg(feature = "lsp")]
 pub mod lsp;
+pub use cli::{build as build_manager, project, test_runner};
 #[cfg(feature = "lsp")]
-pub mod lsp_symbols;
-pub mod project;
-pub mod test_runner;
+pub use lsp::symbols as lsp_symbols;
 
 pub struct StdAssets;
 
