@@ -709,6 +709,7 @@ fn type_uses_pipes(ty: &grammar::KiroType) -> bool {
         }
         grammar::KiroType::Num
         | grammar::KiroType::Str
+        | grammar::KiroType::Bytes
         | grammar::KiroType::Bool
         | grammar::KiroType::Void
         | grammar::KiroType::Custom(_) => false,

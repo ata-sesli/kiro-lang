@@ -25,6 +25,7 @@ pub use crate::interpreter::HostMode;
 pub enum Value {
     Num(f64),
     Str(String),
+    Bytes(Arc<[u8]>),
     Bool(bool),
     List(Vec<Value>),
     Map(HashMap<String, Value>),
@@ -47,6 +48,7 @@ impl TryFrom<HostRuntimeVal> for Value {
         match value {
             HostRuntimeVal::Num(n) => Ok(Value::Num(n)),
             HostRuntimeVal::Str(s) => Ok(Value::Str(s)),
+            HostRuntimeVal::Bytes(bytes) => Ok(Value::Bytes(bytes)),
             HostRuntimeVal::Bool(b) => Ok(Value::Bool(b)),
             HostRuntimeVal::List(items) => {
                 let mut out = Vec::with_capacity(items.len());
@@ -85,6 +87,7 @@ impl TryFrom<Value> for HostRuntimeVal {
         match value {
             Value::Num(n) => Ok(HostRuntimeVal::Num(n)),
             Value::Str(s) => Ok(HostRuntimeVal::Str(s)),
+            Value::Bytes(bytes) => Ok(HostRuntimeVal::Bytes(bytes)),
             Value::Bool(b) => Ok(HostRuntimeVal::Bool(b)),
             Value::List(items) => {
                 let mut out = Vec::with_capacity(items.len());
@@ -687,6 +690,7 @@ fn value_to_interpreter_runtime(value: Value) -> Result<InterpreterRuntimeVal, E
     match value {
         Value::Num(n) => Ok(InterpreterRuntimeVal::Float(n)),
         Value::Str(s) => Ok(InterpreterRuntimeVal::String(s)),
+        Value::Bytes(bytes) => Ok(InterpreterRuntimeVal::Bytes(bytes)),
         Value::Bool(b) => Ok(InterpreterRuntimeVal::Bool(b)),
         Value::List(items) => {
             let mut out = Vec::with_capacity(items.len());
@@ -793,6 +797,7 @@ fn interpreter_to_value(value: InterpreterRuntimeVal) -> Result<Value, EngineErr
     match value {
         InterpreterRuntimeVal::Float(n) => Ok(Value::Num(n)),
         InterpreterRuntimeVal::String(s) => Ok(Value::Str(s)),
+        InterpreterRuntimeVal::Bytes(bytes) => Ok(Value::Bytes(bytes)),
         InterpreterRuntimeVal::Bool(b) => Ok(Value::Bool(b)),
         InterpreterRuntimeVal::List(items) => {
             let mut out = Vec::with_capacity(items.len());

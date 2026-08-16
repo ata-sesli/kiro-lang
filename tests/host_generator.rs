@@ -179,7 +179,7 @@ edition = "2021"
         r#"mod database;
 mod error;
 
-pub use database::{table_info, table_infos, table_name, Database, TableInfo};
+pub use database::{consume_bytes, echo_bytes, table_info, table_infos, table_name, Database, TableInfo};
 pub use error::{Error, Result};
 "#,
     )
@@ -225,6 +225,14 @@ pub fn table_infos() -> Vec<TableInfo> {
 
 pub fn table_name(info: TableInfo) -> String {
     info.name
+}
+
+pub fn echo_bytes(data: &[u8]) -> Vec<u8> {
+    data.to_vec()
+}
+
+pub fn consume_bytes(data: Vec<u8>) -> usize {
+    data.len()
 }
 
 pub struct Database {
@@ -784,6 +792,16 @@ kiro_fixture_crate = { path = "fixture_crate" }
         kiro
     );
     assert!(
+        kiro.contains("rust fn echo_bytes(data: bytes) -> bytes"),
+        "expected borrowed byte slice mapping:\n{}",
+        kiro
+    );
+    assert!(
+        kiro.contains("rust fn consume_bytes(data: bytes) -> num"),
+        "expected owned byte vector mapping:\n{}",
+        kiro
+    );
+    assert!(
         kiro.contains("rust fn database_open(path: str) -> Database!"),
         "expected AsRef<Path> Result<Self> constructor:\n{}",
         kiro
@@ -823,6 +841,11 @@ kiro_fixture_crate = { path = "fixture_crate" }
     assert!(
         rust.contains("KiroError::message(\"Error\", err.to_string())"),
         "crate-local Result alias should use alias error name:\n{}",
+        rust
+    );
+    assert!(
+        rust.contains(".as_bytes()?") && rust.contains(".as_bytes()?.to_vec()"),
+        "generated glue should borrow slices and copy only for owned byte vectors:\n{}",
         rust
     );
 
@@ -920,6 +943,13 @@ fn main() {
     );
     let name = block_on(table_name(vec![input])).expect("table info should decode");
     assert_eq!(name, RuntimeVal::from("comments"));
+
+    let echoed = block_on(echo_bytes(vec![RuntimeVal::bytes([0, 127, 255])]))
+        .expect("borrowed bytes should round-trip");
+    assert_eq!(echoed.as_bytes().expect("bytes result"), &[0, 127, 255]);
+    let length = block_on(consume_bytes(vec![RuntimeVal::bytes([1, 2, 3, 4])]))
+        .expect("owned bytes should decode");
+    assert_eq!(length, RuntimeVal::from(4.0));
 }
 "#,
     )

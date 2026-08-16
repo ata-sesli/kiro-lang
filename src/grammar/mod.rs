@@ -182,6 +182,9 @@ pub mod grammar {
         /// String/text type.
         #[rust_sitter::leaf(text = "str")]
         Str, // New
+        /// Immutable binary data.
+        #[rust_sitter::leaf(text = "bytes")]
+        Bytes,
         /// Boolean type (`true` / `false`).
         #[rust_sitter::leaf(text = "bool")]
         Bool, // New

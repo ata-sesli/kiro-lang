@@ -170,6 +170,25 @@ tokio = {{ version = "1", features = ["full"] }}
 }
 
 #[test]
+fn rust_backend_emits_bytes_values_and_host_conversions() {
+    let program = lower_source(
+        "bytes",
+        r#"
+rust fn load() -> bytes
+
+fn inspect(data: bytes) -> num {
+    return len data + data at 0
+}
+"#,
+    );
+
+    let rust = compile_program(&program).expect("bytes should generate Rust");
+
+    assert!(rust.contains("__KiroValue::Bytes"));
+    assert!(rust.contains("RuntimeVal::Bytes"));
+}
+
+#[test]
 fn rust_backend_emits_indirect_calls_iterators_and_concurrency_operations() {
     let program = lower_source(
         "phase7_effects",

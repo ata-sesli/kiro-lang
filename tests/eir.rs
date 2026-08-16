@@ -89,6 +89,7 @@ fn verifier_accepts_typed_straight_line_function_and_printer_is_deterministic() 
   t2 = bool
   t3 = num
   t4 = str
+  t5 = bytes
 constants:
 functions:
 fn f0 add(t3, t3) -> t3 effects=PURE {

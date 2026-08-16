@@ -367,6 +367,7 @@ pub fn type_label(ty: &ast::KiroType) -> String {
     match ty {
         ast::KiroType::Num => "num".to_string(),
         ast::KiroType::Str => "str".to_string(),
+        ast::KiroType::Bytes => "bytes".to_string(),
         ast::KiroType::Bool => "bool".to_string(),
         ast::KiroType::Void => "void".to_string(),
         ast::KiroType::Adr(_, inner) => format!("adr {}", type_label(inner)),

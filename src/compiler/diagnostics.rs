@@ -770,12 +770,26 @@ impl<'a> SemanticCtx<'a> {
                         }
                         Ok(Some(*val))
                     }
+                    Some(grammar::KiroType::Bytes) => {
+                        if let Some(actual) = key_ty
+                            && !same_type(&grammar::KiroType::Num, &actual)
+                        {
+                            return Err(self.error_at_span_with_help(
+                                ErrorCode::TypeError,
+                                format!("Bytes index must be num, got {}.", type_name(&actual)),
+                                crate::grammar::token_span(at_kw),
+                                "wrong index type",
+                                "Bytes are indexed with numeric positions.",
+                            ));
+                        }
+                        Ok(Some(grammar::KiroType::Num))
+                    }
                     Some(_) => Err(self.error_at_span_with_help(
                         ErrorCode::BadUse,
-                        "'at' expects a list or map.",
+                        "'at' expects bytes, a list, or a map.",
                         crate::grammar::token_span(at_kw),
                         "bad access",
-                        "Use `list at index` or `map at key`.",
+                        "Use `bytes at index`, `list at index`, or `map at key`.",
                     )),
                     None => Ok(None),
                 }
@@ -1334,6 +1348,7 @@ fn same_type(a: &grammar::KiroType, b: &grammar::KiroType) -> bool {
     match (a, b) {
         (grammar::KiroType::Num, grammar::KiroType::Num)
         | (grammar::KiroType::Str, grammar::KiroType::Str)
+        | (grammar::KiroType::Bytes, grammar::KiroType::Bytes)
         | (grammar::KiroType::Bool, grammar::KiroType::Bool)
         | (grammar::KiroType::Void, grammar::KiroType::Void) => true,
         (grammar::KiroType::Adr(_, a), grammar::KiroType::Adr(_, b))
@@ -1351,6 +1366,7 @@ fn type_name(ty: &grammar::KiroType) -> String {
     match ty {
         grammar::KiroType::Num => "num".to_string(),
         grammar::KiroType::Str => "str".to_string(),
+        grammar::KiroType::Bytes => "bytes".to_string(),
         grammar::KiroType::Bool => "bool".to_string(),
         grammar::KiroType::Void => "void".to_string(),
         grammar::KiroType::Adr(_, inner) => format!("adr {}", type_name(inner)),

@@ -45,7 +45,8 @@ fn primitive_type_ids_are_fixed() {
     assert_eq!(types.get(TypeId::BOOL), Some(&SemType::Bool));
     assert_eq!(types.get(TypeId::NUM), Some(&SemType::Num));
     assert_eq!(types.get(TypeId::STR), Some(&SemType::Str));
-    assert_eq!(types.len(), 5);
+    assert_eq!(types.get(TypeId::BYTES), Some(&SemType::Bytes));
+    assert_eq!(types.len(), 6);
 }
 
 #[test]
@@ -59,10 +60,10 @@ fn composite_types_are_interned_once() {
     assert_eq!(first, second);
     assert_eq!(types.get(first), Some(&SemType::List(TypeId::NUM)));
     assert_eq!(types.get(map), Some(&SemType::Map(TypeId::STR, first)));
-    assert_eq!(types.len(), 7);
+    assert_eq!(types.len(), 8);
     assert_eq!(
         format!("{types:?}"),
-        "TypeTable([Unknown, Void, Bool, Num, Str, List(TypeId(3)), Map(TypeId(4), TypeId(5))])"
+        "TypeTable([Unknown, Void, Bool, Num, Str, Bytes, List(TypeId(3)), Map(TypeId(4), TypeId(6))])"
     );
 }
 

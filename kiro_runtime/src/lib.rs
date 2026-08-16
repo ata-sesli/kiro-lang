@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::sync::Arc;
 
-pub const KIRO_RUNTIME_ABI_VERSION: u32 = 3;
+pub const KIRO_RUNTIME_ABI_VERSION: u32 = 4;
 
 pub type HostResult = Result<RuntimeVal, KiroError>;
 
@@ -21,6 +21,7 @@ pub type KiroResult<T> = Result<T, std::sync::Arc<anyhow::Error>>;
 pub enum RuntimeVal {
     Num(f64),
     Str(String),
+    Bytes(Arc<[u8]>),
     Bool(bool),
     List(Vec<RuntimeVal>),
     Map(HashMap<String, RuntimeVal>),
@@ -582,6 +583,10 @@ impl<T: Into<RuntimeVal>> From<Vec<T>> for RuntimeVal {
 // --- Conversion: RuntimeVal -> Rust types ---
 
 impl RuntimeVal {
+    pub fn bytes(value: impl Into<Arc<[u8]>>) -> Self {
+        Self::Bytes(value.into())
+    }
+
     pub fn structure(type_name: impl Into<String>, fields: HashMap<String, RuntimeVal>) -> Self {
         Self::Struct {
             type_name: type_name.into(),
@@ -656,6 +661,13 @@ impl RuntimeVal {
         match self {
             RuntimeVal::Str(s) => Ok(s.as_str()),
             _ => Err(KiroError::message("TypeError", "expected str")),
+        }
+    }
+
+    pub fn as_bytes(&self) -> Result<&[u8], KiroError> {
+        match self {
+            RuntimeVal::Bytes(bytes) => Ok(bytes),
+            _ => Err(KiroError::message("TypeError", "expected bytes")),
         }
     }
 

@@ -54,6 +54,7 @@ fn calculate(left: num, right: num, label: str) -> str {
         return "small"
     }
 }
+
 "#;
     let (program, function) = lower_source("primitives", source);
     let args = vec![
@@ -68,6 +69,31 @@ fn calculate(left: num, right: num, label: str) -> str {
         .expect("EIR function should execute");
 
     assert_eq!(actual, RuntimeVal::String("ready!".to_string()));
+}
+
+#[test]
+fn eir_executes_immutable_bytes_length_and_indexing() {
+    let source = r#"
+fn inspect(data: bytes) -> num {
+    return len data + data at 1
+}
+"#;
+    let (program, function) = lower_source("bytes", source);
+    let mut runtime = EirRuntime::new(&program).expect("verified EIR should create a runtime");
+
+    let actual = runtime
+        .call_function(function, vec![RuntimeVal::Bytes(Arc::from([3, 7, 11]))])
+        .expect("bytes should support length and indexing");
+
+    assert_eq!(actual, RuntimeVal::Float(10.0));
+
+    let error = runtime
+        .call_function(function, vec![RuntimeVal::Bytes(Arc::from([3]))])
+        .expect_err("out-of-range byte access should fail");
+    assert!(
+        error.to_string().contains("byte index 1 out of bounds"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

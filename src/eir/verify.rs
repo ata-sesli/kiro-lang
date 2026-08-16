@@ -527,6 +527,10 @@ fn verify_instruction(
                     check_slot_type(function, *key, *key_type, &location, errors, false);
                     check_slot_type(function, *dst, *value_type, &location, errors, false);
                 }
+                Some(SemType::Bytes) => {
+                    check_slot_type(function, *key, TypeId::NUM, &location, errors, false);
+                    check_slot_type(function, *dst, TypeId::NUM, &location, errors, false);
+                }
                 _ => errors.push(location(VerifyErrorKind::InvalidAggregateOperand(
                     *collection,
                 ))),
@@ -550,7 +554,10 @@ fn verify_instruction(
             if !collection_type
                 .and_then(|ty| program.types.get(ty))
                 .is_some_and(|ty| {
-                    matches!(ty, SemType::Str | SemType::List(_) | SemType::Map(_, _))
+                    matches!(
+                        ty,
+                        SemType::Str | SemType::Bytes | SemType::List(_) | SemType::Map(_, _)
+                    )
                 })
             {
                 errors.push(location(VerifyErrorKind::InvalidAggregateOperand(

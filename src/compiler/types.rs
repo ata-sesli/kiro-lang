@@ -4,6 +4,7 @@ pub fn compile_type(t: &KiroType) -> String {
     match t {
         KiroType::Num => compile_num(),
         KiroType::Str => compile_str(),
+        KiroType::Bytes => compile_bytes(),
         KiroType::Bool => compile_bool(),
         KiroType::Void => compile_void(),
         KiroType::Adr(_, inner) => compile_adr(inner),
@@ -21,6 +22,10 @@ pub fn compile_num() -> String {
 
 pub fn compile_str() -> String {
     "String".to_string()
+}
+
+pub fn compile_bytes() -> String {
+    "std::sync::Arc<[u8]>".to_string()
 }
 
 pub fn compile_bool() -> String {

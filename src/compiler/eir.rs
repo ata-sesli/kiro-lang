@@ -57,6 +57,7 @@ use std::sync::{Arc, Mutex};
 enum __KiroValue {
     Num(f64),
     Str(String),
+    Bytes(Arc<[u8]>),
     Bool(bool),
     Range(i64, i64),
     Void,
@@ -108,6 +109,7 @@ fn __kiro_truthy(value: &__KiroValue) -> bool {
     match value {
         __KiroValue::Num(value) => *value != 0.0,
         __KiroValue::Str(value) => !value.is_empty(),
+        __KiroValue::Bytes(value) => !value.is_empty(),
         __KiroValue::Bool(value) => *value,
         __KiroValue::Void => false,
         _ => true,
@@ -117,6 +119,7 @@ fn __kiro_display(value: &__KiroValue) -> String {
     match value {
         __KiroValue::Num(value) => value.to_string(),
         __KiroValue::Str(value) => value.clone(),
+        __KiroValue::Bytes(value) => format!("<Bytes len={}>", value.len()),
         __KiroValue::Bool(value) => value.to_string(),
         __KiroValue::Range(start, end) => format!("{start}..{end}"),
         __KiroValue::Void => "void".to_string(),
@@ -145,6 +148,7 @@ fn __kiro_to_host(value: &__KiroValue) -> RuntimeVal {
     match value {
         __KiroValue::Num(value) => RuntimeVal::Num(*value),
         __KiroValue::Str(value) => RuntimeVal::Str(value.clone()),
+        __KiroValue::Bytes(value) => RuntimeVal::Bytes(value.clone()),
         __KiroValue::Bool(value) => RuntimeVal::Bool(*value),
         __KiroValue::Void => RuntimeVal::Void,
         __KiroValue::List(values) => RuntimeVal::List(values.iter().map(__kiro_to_host).collect()),
@@ -157,6 +161,7 @@ fn __kiro_from_host(value: RuntimeVal) -> __KiroValue {
     match value {
         RuntimeVal::Num(value) => __KiroValue::Num(value),
         RuntimeVal::Str(value) => __KiroValue::Str(value),
+        RuntimeVal::Bytes(value) => __KiroValue::Bytes(value),
         RuntimeVal::Bool(value) => __KiroValue::Bool(value),
         RuntimeVal::Void => __KiroValue::Void,
         RuntimeVal::List(values) => __KiroValue::List(values.into_iter().map(__kiro_from_host).collect()),
@@ -546,8 +551,9 @@ fn compile_instruction(
         } => assign(
             *dst,
             format!(
-                "match {} {{ __KiroValue::List(values) => {{ let index = __kiro_num(&{}) as usize; values.get(index).cloned().unwrap_or_else(|| kiro_runtime_error(\"KIRO3004\", &format!(\"List index out of bounds: index {{index}}, length {{}}.\", values.len()))) }}, __KiroValue::Map(values) => {{ let key = __kiro_map_key(&{}); values.get(&key).cloned().unwrap_or_else(|| kiro_runtime_error(\"KIRO3005\", &format!(\"Map key not found: {{key:?}}.\"))) }}, other => panic!(\"expected list or map, got {{other:?}}\") }}",
+                "match {} {{ __KiroValue::Bytes(values) => {{ let index = __kiro_num(&{}) as usize; __KiroValue::Num(*values.get(index).unwrap_or_else(|| kiro_runtime_error(\"KIRO3004\", &format!(\"Bytes index out of bounds: index {{index}}, length {{}}.\", values.len()))) as f64) }}, __KiroValue::List(values) => {{ let index = __kiro_num(&{}) as usize; values.get(index).cloned().unwrap_or_else(|| kiro_runtime_error(\"KIRO3004\", &format!(\"List index out of bounds: index {{index}}, length {{}}.\", values.len()))) }}, __KiroValue::Map(values) => {{ let key = __kiro_map_key(&{}); values.get(&key).cloned().unwrap_or_else(|| kiro_runtime_error(\"KIRO3005\", &format!(\"Map key not found: {{key:?}}.\"))) }}, other => panic!(\"expected bytes, list, or map, got {{other:?}}\") }}",
                 slot(*collection),
+                slot(*key),
                 slot(*key),
                 slot(*key)
             ),
@@ -560,7 +566,7 @@ fn compile_instruction(
         InstructionKind::Len { dst, collection } => assign(
             *dst,
             format!(
-                "__KiroValue::Num(match {} {{ __KiroValue::Str(value) => value.len(), __KiroValue::List(value) => value.len(), __KiroValue::Map(value) => value.len(), other => panic!(\"expected collection, got {{other:?}}\") }} as f64)",
+                "__KiroValue::Num(match {} {{ __KiroValue::Str(value) => value.len(), __KiroValue::Bytes(value) => value.len(), __KiroValue::List(value) => value.len(), __KiroValue::Map(value) => value.len(), other => panic!(\"expected collection, got {{other:?}}\") }} as f64)",
                 slot(*collection)
             ),
         ),

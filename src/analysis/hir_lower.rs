@@ -292,6 +292,7 @@ fn lower_type(
     match ty {
         ast::KiroType::Num => TypeId::NUM,
         ast::KiroType::Str => TypeId::STR,
+        ast::KiroType::Bytes => TypeId::BYTES,
         ast::KiroType::Bool => TypeId::BOOL,
         ast::KiroType::Void => TypeId::VOID,
         ast::KiroType::Adr(_, inner) => {
@@ -980,6 +981,7 @@ impl<'a> ModuleLowerer<'a> {
                 let ty = match self.types.get(collection.ty) {
                     Some(SemType::List(inner)) => *inner,
                     Some(SemType::Map(_, value)) => *value,
+                    Some(SemType::Bytes) => TypeId::NUM,
                     _ => TypeId::UNKNOWN,
                 };
                 (

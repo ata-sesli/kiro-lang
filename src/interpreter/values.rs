@@ -16,6 +16,7 @@ pub enum PipeSender {
 pub enum RuntimeVal {
     Float(f64),
     String(String),
+    Bytes(Arc<[u8]>),
     Bool(bool),
     Range(i64, i64),
     Void,
@@ -99,6 +100,7 @@ impl RuntimeVal {
             RuntimeVal::Float(f) => *f != 0.0,
             RuntimeVal::Bool(b) => *b,
             RuntimeVal::String(s) => !s.is_empty(),
+            RuntimeVal::Bytes(bytes) => !bytes.is_empty(),
             RuntimeVal::Void => false,
             RuntimeVal::Moved => false,
             _ => true,
@@ -109,6 +111,7 @@ impl RuntimeVal {
         match self {
             RuntimeVal::Float(n) => Ok(HostRuntimeVal::Num(*n)),
             RuntimeVal::String(s) => Ok(HostRuntimeVal::Str(s.clone())),
+            RuntimeVal::Bytes(bytes) => Ok(HostRuntimeVal::Bytes(bytes.clone())),
             RuntimeVal::Bool(b) => Ok(HostRuntimeVal::Bool(*b)),
             RuntimeVal::List(items) => {
                 let mut out = Vec::with_capacity(items.len());
@@ -137,6 +140,7 @@ impl RuntimeVal {
         match value {
             HostRuntimeVal::Num(n) => Ok(RuntimeVal::Float(n)),
             HostRuntimeVal::Str(s) => Ok(RuntimeVal::String(s)),
+            HostRuntimeVal::Bytes(bytes) => Ok(RuntimeVal::Bytes(bytes)),
             HostRuntimeVal::Bool(b) => Ok(RuntimeVal::Bool(b)),
             HostRuntimeVal::List(items) => {
                 let mut out = Vec::with_capacity(items.len());
@@ -166,6 +170,7 @@ impl fmt::Display for RuntimeVal {
         match self {
             RuntimeVal::Float(n) => write!(f, "{}", n),
             RuntimeVal::String(s) => write!(f, "{}", s),
+            RuntimeVal::Bytes(bytes) => write!(f, "<Bytes len={}>", bytes.len()),
             RuntimeVal::Bool(b) => write!(f, "{}", b),
             RuntimeVal::Range(s, e) => write!(f, "{}..{}", s, e),
             RuntimeVal::Void => write!(f, "void"),

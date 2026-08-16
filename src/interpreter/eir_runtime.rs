@@ -46,6 +46,10 @@ pub enum EirRuntimeErrorKind {
         index: usize,
         length: usize,
     },
+    BytesIndexOutOfBounds {
+        index: usize,
+        length: usize,
+    },
     MapKeyNotFound(String),
     CheckFailed(String),
     InvalidCallable(String),
@@ -123,6 +127,12 @@ impl fmt::Display for EirRuntimeError {
                 write!(
                     formatter,
                     "list index {index} out of bounds for length {length}"
+                )
+            }
+            EirRuntimeErrorKind::BytesIndexOutOfBounds { index, length } => {
+                write!(
+                    formatter,
+                    "byte index {index} out of bounds for length {length}"
                 )
             }
             EirRuntimeErrorKind::MapKeyNotFound(key) => {
@@ -973,7 +983,22 @@ fn execute_instruction(
                         runtime_error(anchor, EirRuntimeErrorKind::MapKeyNotFound(key))
                     })?
                 }
-                actual => return Err(type_mismatch(anchor, "list or map", actual)),
+                RuntimeVal::Bytes(bytes) => {
+                    let RuntimeVal::Float(index) = key else {
+                        return Err(type_mismatch(anchor, "num", &key));
+                    };
+                    let index = index as usize;
+                    RuntimeVal::Float(*bytes.get(index).ok_or_else(|| {
+                        runtime_error(
+                            anchor,
+                            EirRuntimeErrorKind::BytesIndexOutOfBounds {
+                                index,
+                                length: bytes.len(),
+                            },
+                        )
+                    })? as f64)
+                }
+                actual => return Err(type_mismatch(anchor, "bytes, list, or map", actual)),
             };
             write_slot(frame, *dst, value, anchor)?;
         }
@@ -987,9 +1012,10 @@ fn execute_instruction(
         InstructionKind::Len { dst, collection } => {
             let length = match read_slot(frame, *collection, anchor)? {
                 RuntimeVal::String(value) => value.len(),
+                RuntimeVal::Bytes(value) => value.len(),
                 RuntimeVal::List(value) => value.len(),
                 RuntimeVal::Map(value) => value.len(),
-                actual => return Err(type_mismatch(anchor, "str, list, or map", actual)),
+                actual => return Err(type_mismatch(anchor, "str, bytes, list, or map", actual)),
             };
             write_slot(frame, *dst, RuntimeVal::Float(length as f64), anchor)?;
         }
@@ -1456,6 +1482,7 @@ fn value_matches_type(value: &RuntimeVal, ty: TypeId, program: &EirProgram) -> b
         (value, program.types.get(ty)),
         (RuntimeVal::Float(_), Some(SemType::Num))
             | (RuntimeVal::String(_), Some(SemType::Str))
+            | (RuntimeVal::Bytes(_), Some(SemType::Bytes))
             | (RuntimeVal::Bool(_), Some(SemType::Bool))
             | (RuntimeVal::Range(_, _), Some(SemType::Range))
             | (RuntimeVal::Void, Some(SemType::Void))
@@ -1473,6 +1500,7 @@ fn mock_value(ty: TypeId, program: &EirProgram) -> RuntimeVal {
     match program.types.get(ty) {
         Some(SemType::Num) => RuntimeVal::Float(0.0),
         Some(SemType::Str) => RuntimeVal::String(String::new()),
+        Some(SemType::Bytes) => RuntimeVal::Bytes(Arc::from([])),
         Some(SemType::Bool) => RuntimeVal::Bool(false),
         Some(SemType::List(_)) => RuntimeVal::List(Vec::new()),
         Some(SemType::Map(_, _)) => RuntimeVal::Map(HashMap::new()),
@@ -1505,6 +1533,7 @@ const fn runtime_value_name(value: &RuntimeVal) -> &'static str {
     match value {
         RuntimeVal::Float(_) => "num",
         RuntimeVal::String(_) => "str",
+        RuntimeVal::Bytes(_) => "bytes",
         RuntimeVal::Bool(_) => "bool",
         RuntimeVal::Range(_, _) => "range",
         RuntimeVal::Void => "void",

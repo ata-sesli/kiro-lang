@@ -132,7 +132,7 @@ var attempts = 0
 attempts = attempts + 1
 ```
 
-Core types are `num`, `str`, `bool`, and `void`. Composite types include `list T`, `map K V`, `adr T`, `pipe T`, named structs, named host handles, and function types such as `fn(num) -> num`.
+Core types are `num`, `str`, immutable `bytes`, `bool`, and `void`. Composite types include `list T`, `map K V`, `adr T`, `pipe T`, named structs, named host handles, and function types such as `fn(num) -> num`. `len data` returns a byte count and `data at index` returns that byte as a `num`.
 
 ### Functions and purity
 
@@ -297,7 +297,7 @@ import app.math
 result = app.math.add(2, 3)
 ```
 
-Kiro embeds standard modules for I/O, files, environment access, time, and networking. Their short names are `io`, `fs`, `env`, `time`, and `net`; canonical `std_*` names remain available internally.
+Kiro embeds standard modules for bytes, I/O, files, environment access, time, and networking. Their short names are `bytes`, `io`, `fs`, `env`, `time`, and `net`; canonical `std_*` names remain available internally. The `bytes` module provides UTF-8 and hexadecimal conversion, slicing, concatenation, and empty byte values.
 
 Cargo-backed dependencies are declared as simple string versions under `[dependencies]`. Generated Rust state lives in `.kiro/build/`, including its Cargo manifest and lockfile. Kiro intentionally does not maintain a second package registry or lockfile.
 
@@ -338,6 +338,8 @@ rust fn predict(model: Model, input: list num) -> list num!
 ```
 
 Use `kiro add crate_name` to record a Cargo dependency and attempt host-module generation. Use `kiro host gen crate_name --module module_name` to regenerate or choose the Kiro module name. The generator supports a deliberately conservative subset and reports Rust API shapes it skips.
+
+The generator maps Rust `&[u8]` and `Vec<u8>` to Kiro `bytes`. Borrowed byte parameters are passed to Rust without copying; owned `Vec<u8>` parameters make the required boundary copy, and returned vectors become shared immutable bytes.
 
 The compiled path links adjacent Rust glue into the generated Cargo project. The direct executor can call host functions registered through the embedding API; the CLI interpreter directly implements display-oriented `io` calls but does not load arbitrary adjacent Rust glue.
 

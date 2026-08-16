@@ -113,6 +113,13 @@ expect = "pass"
 stdout_contains = ["OK"]
 
 [[case]]
+name = "std_bytes"
+path = "pass/std/verify_std_bytes.kiro"
+command = "run"
+expect = "pass"
+stdout_contains = ["hell", "68656c6c", "4", "104"]
+
+[[case]]
 name = "std_fs"
 path = "pass/std/verify_std_fs.kiro"
 command = "run"

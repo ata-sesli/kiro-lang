@@ -57,6 +57,24 @@ fn runtime_helpers_expose_list_map_and_void_shapes() {
 }
 
 #[test]
+fn runtime_helpers_expose_immutable_bytes() {
+    let value = RuntimeVal::bytes(vec![0, 127, 255]);
+
+    assert_eq!(value.as_bytes().expect("bytes expected"), &[0, 127, 255]);
+    assert_eq!(
+        RuntimeVal::bytes(vec![1_u8, 2, 3]),
+        RuntimeVal::bytes([1, 2, 3])
+    );
+
+    let cloned = value.clone();
+    assert_eq!(
+        cloned.as_bytes().expect("cloned bytes expected"),
+        &[0, 127, 255]
+    );
+    assert!(RuntimeVal::from("not bytes").as_bytes().is_err());
+}
+
+#[test]
 fn runtime_helpers_expose_named_struct_values() {
     let mut fields = HashMap::new();
     fields.insert("name".to_string(), RuntimeVal::from("users"));
@@ -104,6 +122,6 @@ fn host_result_alias_and_abi_version_are_public() {
         Ok(RuntimeVal::Void)
     }
 
-    assert_eq!(KIRO_RUNTIME_ABI_VERSION, 3);
+    assert_eq!(KIRO_RUNTIME_ABI_VERSION, 4);
     assert!(ok_host(vec![]).is_ok());
 }

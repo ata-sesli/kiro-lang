@@ -1,0 +1,19 @@
+import io
+import bytes
+
+fn main() {
+    var hello = bytes.from_str("hello")
+    var middle = bytes.slice(hello, 1, 4)
+    var joined = bytes.concat(bytes.from_hex("68"), middle)
+    var text = bytes.to_str(joined)
+    on (text) {
+        io.print(text)
+        io.print(bytes.to_hex(joined))
+        io.print(len joined)
+        io.print(joined at 0)
+    } error {
+        io.print("conversion failed")
+    }
+}
+
+main()

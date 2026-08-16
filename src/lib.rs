@@ -23,6 +23,7 @@ pub struct StdAsset {
 }
 
 pub const STD_MODULE_ALIASES: &[(&str, &str)] = &[
+    ("bytes", "std_bytes"),
     ("env", "std_env"),
     ("fs", "std_fs"),
     ("io", "std_io"),
@@ -32,6 +33,7 @@ pub const STD_MODULE_ALIASES: &[(&str, &str)] = &[
 
 pub fn canonical_std_module_name(name: &str) -> Option<&'static str> {
     match name {
+        "std_bytes" | "bytes" => Some("std_bytes"),
         "std_env" | "env" => Some("std_env"),
         "std_fs" | "fs" => Some("std_fs"),
         "std_io" | "io" => Some("std_io"),
@@ -66,6 +68,8 @@ pub fn is_std_io_display_function(name: &str) -> bool {
 impl StdAssets {
     pub fn get(path: &str) -> Option<StdAsset> {
         let data = match path {
+            "bytes/header.rs" => include_bytes!("kiro_std/bytes/header.rs").as_slice(),
+            "bytes/std_bytes.kiro" => include_bytes!("kiro_std/bytes/std_bytes.kiro").as_slice(),
             "env/header.rs" => include_bytes!("kiro_std/env/header.rs").as_slice(),
             "env/std_env.kiro" => include_bytes!("kiro_std/env/std_env.kiro").as_slice(),
             "fs/header.rs" => include_bytes!("kiro_std/fs/header.rs").as_slice(),

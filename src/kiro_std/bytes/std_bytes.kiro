@@ -1,0 +1,18 @@
+error InvalidUtf8 = "Bytes are not valid UTF-8"
+error InvalidHex = "Text is not valid hexadecimal"
+error InvalidRange = "Byte range is invalid"
+
+/// Returns an empty immutable byte sequence.
+rust fn empty() -> bytes
+/// Encodes UTF-8 text as bytes.
+rust fn from_str(value: str) -> bytes
+/// Decodes UTF-8 bytes as text.
+rust fn to_str(value: bytes) -> str!
+/// Decodes an even-length hexadecimal string.
+rust fn from_hex(value: str) -> bytes!
+/// Encodes bytes as lowercase hexadecimal text.
+rust fn to_hex(value: bytes) -> str
+/// Copies the half-open byte range `start..end`.
+rust fn slice(value: bytes, start: num, end: num) -> bytes!
+/// Concatenates two byte sequences.
+rust fn concat(left: bytes, right: bytes) -> bytes

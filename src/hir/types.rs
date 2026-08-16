@@ -10,6 +10,7 @@ pub enum SemType {
     Bool,
     Num,
     Str,
+    Bytes,
     Range,
     Address(TypeId),
     Pipe(TypeId),
@@ -30,6 +31,7 @@ impl TypeId {
     pub const BOOL: Self = Self::new(2);
     pub const NUM: Self = Self::new(3);
     pub const STR: Self = Self::new(4);
+    pub const BYTES: Self = Self::new(5);
 }
 
 #[derive(Clone)]
@@ -46,6 +48,7 @@ impl TypeTable {
             SemType::Bool,
             SemType::Num,
             SemType::Str,
+            SemType::Bytes,
         ];
         let ids = types
             .iter()

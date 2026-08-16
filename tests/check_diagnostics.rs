@@ -1293,7 +1293,7 @@ io.print(1 at 0)
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "bad collection use should fail");
     assert!(
-        stderr.contains("'at' expects a list or map."),
+        stderr.contains("'at' expects bytes, a list, or a map."),
         "unexpected stderr:\n{}",
         stderr
     );

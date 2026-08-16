@@ -110,6 +110,7 @@ impl TypeContext {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RustType {
     Str,
+    Bytes { borrowed: bool },
     Num { rust: String },
     Bool,
     Void,
@@ -556,7 +557,7 @@ fn contains_opaque_type(ty: &RustType) -> bool {
         | RustType::List(_)
         | RustType::Map(_)
         | RustType::Void => true,
-        RustType::Str | RustType::Num { .. } | RustType::Bool => false,
+        RustType::Str | RustType::Bytes { .. } | RustType::Num { .. } | RustType::Bool => false,
     }
 }
 
@@ -1124,6 +1125,14 @@ fn rust_type_from_syn(ty: &Type, context: &TypeContext) -> Result<RustType, Stri
             }
             match reference.elem.as_ref() {
                 Type::Path(path) if path.path.is_ident("str") => Ok(RustType::Str),
+                Type::Slice(slice)
+                    if matches!(
+                        slice.elem.as_ref(),
+                        Type::Path(path) if path.path.is_ident("u8")
+                    ) =>
+                {
+                    Ok(RustType::Bytes { borrowed: true })
+                }
                 _ => Err("borrowed types are unsupported".to_string()),
             }
         }
@@ -1146,6 +1155,9 @@ fn rust_type_from_syn(ty: &Type, context: &TypeContext) -> Result<RustType, Stri
                 "bool" => Ok(RustType::Bool),
                 "Vec" => {
                     let inner = one_generic_type(segment, "Vec")?;
+                    if matches!(inner, Type::Path(path) if path.path.is_ident("u8")) {
+                        return Ok(RustType::Bytes { borrowed: false });
+                    }
                     Ok(RustType::List(Box::new(rust_type_from_syn(
                         inner, context,
                     )?)))
@@ -1397,6 +1409,12 @@ fn decode_param(
     let arg = format!("RuntimeVal::expect_arg(&args, {}, \"{}\")?", idx, fn_name);
     match &param.rust_type {
         RustType::Str => format!("    let {} = {}.as_str()?.to_string();\n", param.name, arg),
+        RustType::Bytes { borrowed: true } => {
+            format!("    let {} = {}.as_bytes()?;\n", param.name, arg)
+        }
+        RustType::Bytes { borrowed: false } => {
+            format!("    let {} = {}.as_bytes()?.to_vec();\n", param.name, arg)
+        }
         RustType::Num { rust } if rust == "f64" => {
             format!("    let {} = {}.as_num()?;\n", param.name, arg)
         }
@@ -1468,6 +1486,7 @@ fn decode_map_param(name: &str, arg: &str, inner: &RustType, collector: &Collect
 fn decode_runtime_expr(value: &str, ty: &RustType, collector: &Collector) -> String {
     match ty {
         RustType::Str => format!("{}.as_str()?.to_string()", value),
+        RustType::Bytes { .. } => format!("{}.as_bytes()?.to_vec()", value),
         RustType::Num { rust } if rust == "f64" => format!("{}.as_num()?", value),
         RustType::Num { rust } => format!("{}.as_num()? as {}", value, rust),
         RustType::Bool => format!("{}.as_bool()?", value),
@@ -1528,6 +1547,7 @@ fn encode_value(name: &str, ty: &RustType, collector: &Collector) -> String {
 fn encode_inner_value(name: &str, ty: &RustType, collector: &Collector) -> String {
     match ty {
         RustType::Str | RustType::Bool => format!("RuntimeVal::from({})", name),
+        RustType::Bytes { .. } => format!("RuntimeVal::bytes({})", name),
         RustType::Num { .. } => format!("RuntimeVal::from({} as f64)", name),
         RustType::List(inner) => format!(
             "RuntimeVal::List({}.into_iter().map(|v| {}).collect())",
@@ -1573,6 +1593,7 @@ fn encode_inner_value(name: &str, ty: &RustType, collector: &Collector) -> Strin
 fn kiro_type(ty: &RustType) -> String {
     match ty {
         RustType::Str => "str".to_string(),
+        RustType::Bytes { .. } => "bytes".to_string(),
         RustType::Num { .. } => "num".to_string(),
         RustType::Bool => "bool".to_string(),
         RustType::Void => "void".to_string(),

@@ -322,6 +322,7 @@ fn type_name(ty: &SemType) -> String {
         SemType::Bool => "bool".to_string(),
         SemType::Num => "num".to_string(),
         SemType::Str => "str".to_string(),
+        SemType::Bytes => "bytes".to_string(),
         SemType::Range => "range".to_string(),
         SemType::Address(inner) => format!("address t{}", inner.raw()),
         SemType::Pipe(inner) => format!("pipe t{}", inner.raw()),
