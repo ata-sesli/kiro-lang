@@ -198,6 +198,37 @@ pub enum InstructionKind {
         dst: SlotId,
         entries: Box<[(SlotId, SlotId)]>,
     },
+    ListJoin {
+        dst: SlotId,
+        left: SlotId,
+        right: SlotId,
+    },
+    ListSlice {
+        dst: SlotId,
+        list: SlotId,
+        start: SlotId,
+        end: SlotId,
+    },
+    ListReverse {
+        dst: SlotId,
+        list: SlotId,
+    },
+    MapHas {
+        dst: SlotId,
+        map: SlotId,
+        key: SlotId,
+    },
+    MapSet {
+        dst: SlotId,
+        map: SlotId,
+        key: SlotId,
+        value: SlotId,
+    },
+    MapDelete {
+        dst: SlotId,
+        map: SlotId,
+        key: SlotId,
+    },
     MakeStruct {
         dst: SlotId,
         structure: StructId,
@@ -376,6 +407,12 @@ impl InstructionKind {
             | Self::Deref { dst, .. }
             | Self::MakeList { dst, .. }
             | Self::MakeMap { dst, .. }
+            | Self::ListJoin { dst, .. }
+            | Self::ListSlice { dst, .. }
+            | Self::ListReverse { dst, .. }
+            | Self::MapHas { dst, .. }
+            | Self::MapSet { dst, .. }
+            | Self::MapDelete { dst, .. }
             | Self::MakeStruct { dst, .. }
             | Self::GetField { dst, .. }
             | Self::GetIndex { dst, .. }
@@ -437,6 +474,17 @@ impl InstructionKind {
                 .iter()
                 .flat_map(|(key, value)| [*key, *value])
                 .collect(),
+            Self::ListJoin { left, right, .. } => vec![*left, *right],
+            Self::ListSlice {
+                list, start, end, ..
+            } => vec![*list, *start, *end],
+            Self::ListReverse { list, .. } => vec![*list],
+            Self::MapHas { map, key, .. } | Self::MapDelete { map, key, .. } => {
+                vec![*map, *key]
+            }
+            Self::MapSet {
+                map, key, value, ..
+            } => vec![*map, *key, *value],
             Self::MakeStruct { fields, .. } => fields.iter().map(|(_, value)| *value).collect(),
             Self::GetField { target, .. } => vec![*target],
             Self::SetField { target, src, .. } => vec![*target, *src],

@@ -543,6 +543,156 @@ impl<'a> SemanticCtx<'a> {
         Ok(())
     }
 
+    fn infer_collection_call(
+        &mut self,
+        module: &str,
+        function: &str,
+        func: &grammar::Expression,
+        args: &[grammar::Expression],
+    ) -> Result<Option<grammar::KiroType>, KiroError> {
+        let call_name = format!("{module}.{function}");
+        let expected_count = match (module, function) {
+            ("std_lists", "join") => 2,
+            ("std_lists", "slice") => 3,
+            ("std_lists", "reverse") => 1,
+            ("std_maps", "has") | ("std_maps", "delete") => 2,
+            ("std_maps", "set") => 3,
+            _ => return Ok(None),
+        };
+        if args.len() != expected_count {
+            return Err(self.error_at_span(
+                ErrorCode::WrongArgumentCount,
+                format!(
+                    "Wrong argument count for '{}': expected {}, got {}.",
+                    call_name,
+                    expected_count,
+                    args.len()
+                ),
+                self.required_call_target_span(func),
+                "wrong argument count",
+            ));
+        }
+
+        let inferred = args
+            .iter()
+            .map(|arg| self.infer_expr(arg))
+            .collect::<Result<Vec<_>, _>>()?;
+        let require_type = |index: usize| {
+            inferred[index].clone().ok_or_else(|| {
+                self.error_at_span(
+                    ErrorCode::TypeError,
+                    format!("Cannot infer argument {} for '{}'.", index + 1, call_name),
+                    crate::grammar::expr_span(&args[index]).unwrap_or((0, 0)),
+                    "unknown argument type",
+                )
+            })
+        };
+
+        match (module, function) {
+            ("std_lists", "join") => {
+                let left = require_type(0)?;
+                let right = require_type(1)?;
+                if !matches!(left, grammar::KiroType::List(_, _)) {
+                    return Err(self.error_at_span(
+                        ErrorCode::TypeError,
+                        format!("lists.join expects lists, got {}.", type_name(&left)),
+                        crate::grammar::expr_span(&args[0]).unwrap_or((0, 0)),
+                        "wrong collection type",
+                    ));
+                }
+                if !same_type(&left, &right) {
+                    return Err(self.error_at_span(
+                        ErrorCode::TypeError,
+                        "lists.join arguments must have the same list type.",
+                        self.required_call_target_span(func),
+                        "different list types",
+                    ));
+                }
+                Ok(Some(left))
+            }
+            ("std_lists", "slice") => {
+                let list = require_type(0)?;
+                if !matches!(list, grammar::KiroType::List(_, _)) {
+                    return Err(self.error_at_span(
+                        ErrorCode::TypeError,
+                        format!("lists.slice expects a list, got {}.", type_name(&list)),
+                        crate::grammar::expr_span(&args[0]).unwrap_or((0, 0)),
+                        "wrong collection type",
+                    ));
+                }
+                for index in [1, 2] {
+                    let actual = require_type(index)?;
+                    if !same_type(&grammar::KiroType::Num, &actual) {
+                        return Err(self.error_at_span(
+                            ErrorCode::TypeError,
+                            format!("lists.slice index must be num, got {}.", type_name(&actual)),
+                            crate::grammar::expr_span(&args[index]).unwrap_or((0, 0)),
+                            "wrong index type",
+                        ));
+                    }
+                }
+                Ok(Some(list))
+            }
+            ("std_lists", "reverse") => {
+                let list = require_type(0)?;
+                if !matches!(list, grammar::KiroType::List(_, _)) {
+                    return Err(self.error_at_span(
+                        ErrorCode::TypeError,
+                        format!("lists.reverse expects a list, got {}.", type_name(&list)),
+                        crate::grammar::expr_span(&args[0]).unwrap_or((0, 0)),
+                        "wrong collection type",
+                    ));
+                }
+                Ok(Some(list))
+            }
+            ("std_maps", operation) => {
+                let map = require_type(0)?;
+                let grammar::KiroType::Map(_, key, value) = &map else {
+                    return Err(self.error_at_span(
+                        ErrorCode::TypeError,
+                        format!("maps.{operation} expects a map, got {}.", type_name(&map)),
+                        crate::grammar::expr_span(&args[0]).unwrap_or((0, 0)),
+                        "wrong collection type",
+                    ));
+                };
+                let actual_key = require_type(1)?;
+                if !same_type(key, &actual_key) {
+                    return Err(self.error_at_span(
+                        ErrorCode::TypeError,
+                        format!(
+                            "maps.{operation} key must be {}, got {}.",
+                            type_name(key),
+                            type_name(&actual_key)
+                        ),
+                        crate::grammar::expr_span(&args[1]).unwrap_or((0, 0)),
+                        "wrong key type",
+                    ));
+                }
+                if operation == "set" {
+                    let actual_value = require_type(2)?;
+                    if !same_type(value, &actual_value) {
+                        return Err(self.error_at_span(
+                            ErrorCode::TypeError,
+                            format!(
+                                "maps.set value must be {}, got {}.",
+                                type_name(value),
+                                type_name(&actual_value)
+                            ),
+                            crate::grammar::expr_span(&args[2]).unwrap_or((0, 0)),
+                            "wrong value type",
+                        ));
+                    }
+                }
+                if operation == "has" {
+                    Ok(Some(grammar::KiroType::Bool))
+                } else {
+                    Ok(Some(map))
+                }
+            }
+            _ => unreachable!("known collection operation"),
+        }
+    }
+
     fn infer_expr(
         &mut self,
         expr: &grammar::Expression,
@@ -718,20 +868,175 @@ impl<'a> SemanticCtx<'a> {
                 Ok(None)
             }
             grammar::Expression::ListInit(_, inner, _, items, _) => {
-                for item in items {
-                    self.infer_expr(item)?;
+                if let Some(inner) = inner {
+                    for item in items {
+                        if let Some(actual) = self.infer_expr(item)?
+                            && !same_type(inner, &actual)
+                        {
+                            return Err(self.error_at_span(
+                                ErrorCode::TypeError,
+                                format!(
+                                    "List element must be {}, got {}.",
+                                    type_name(inner),
+                                    type_name(&actual)
+                                ),
+                                crate::grammar::expr_span(item).unwrap_or((0, 0)),
+                                "wrong list element type",
+                            ));
+                        }
+                    }
+                    return Ok(Some(grammar::KiroType::List((), Box::new(inner.clone()))));
                 }
-                Ok(Some(grammar::KiroType::List((), Box::new(inner.clone()))))
+
+                let Some(first) = items.first() else {
+                    return Err(self.error_at_span(
+                        ErrorCode::TypeError,
+                        "Cannot infer the element type of an empty list.",
+                        crate::grammar::expr_span(expr).unwrap_or((0, 0)),
+                        "missing list element type",
+                    ));
+                };
+                let inferred = self.infer_expr(first)?.ok_or_else(|| {
+                    self.error_at_span(
+                        ErrorCode::TypeError,
+                        "Cannot infer this list's element type.",
+                        crate::grammar::expr_span(first).unwrap_or((0, 0)),
+                        "unknown list element type",
+                    )
+                })?;
+                for item in &items[1..] {
+                    let actual = self.infer_expr(item)?.ok_or_else(|| {
+                        self.error_at_span(
+                            ErrorCode::TypeError,
+                            "Cannot infer this list's element type.",
+                            crate::grammar::expr_span(item).unwrap_or((0, 0)),
+                            "unknown list element type",
+                        )
+                    })?;
+                    if !same_type(&inferred, &actual) {
+                        return Err(self.error_at_span(
+                            ErrorCode::TypeError,
+                            format!(
+                                "Inferred list elements must all be {}, got {}.",
+                                type_name(&inferred),
+                                type_name(&actual)
+                            ),
+                            crate::grammar::expr_span(item).unwrap_or((0, 0)),
+                            "different inferred element type",
+                        ));
+                    }
+                }
+                Ok(Some(grammar::KiroType::List((), Box::new(inferred))))
             }
-            grammar::Expression::MapInit(_, key, val, _, pairs, _) => {
-                for pair in pairs {
-                    self.infer_expr(&pair.key)?;
-                    self.infer_expr(&pair.value)?;
+            grammar::Expression::MapInit(_, annotation, _, pairs, _) => {
+                if let Some(annotation) = annotation {
+                    for pair in pairs {
+                        if let Some(actual) = self.infer_expr(&pair.key)?
+                            && !same_type(&annotation.key, &actual)
+                        {
+                            return Err(self.error_at_span(
+                                ErrorCode::TypeError,
+                                format!(
+                                    "Map key must be {}, got {}.",
+                                    type_name(&annotation.key),
+                                    type_name(&actual)
+                                ),
+                                crate::grammar::expr_span(&pair.key).unwrap_or((0, 0)),
+                                "wrong map key type",
+                            ));
+                        }
+                        if let Some(actual) = self.infer_expr(&pair.value)?
+                            && !same_type(&annotation.value, &actual)
+                        {
+                            return Err(self.error_at_span(
+                                ErrorCode::TypeError,
+                                format!(
+                                    "Map value must be {}, got {}.",
+                                    type_name(&annotation.value),
+                                    type_name(&actual)
+                                ),
+                                crate::grammar::expr_span(&pair.value).unwrap_or((0, 0)),
+                                "wrong map value type",
+                            ));
+                        }
+                    }
+                    return Ok(Some(grammar::KiroType::Map(
+                        (),
+                        Box::new(annotation.key.clone()),
+                        Box::new(annotation.value.clone()),
+                    )));
+                }
+
+                let Some(first) = pairs.first() else {
+                    return Err(self.error_at_span(
+                        ErrorCode::TypeError,
+                        "Cannot infer the key and value types of an empty map.",
+                        crate::grammar::expr_span(expr).unwrap_or((0, 0)),
+                        "missing map types",
+                    ));
+                };
+                let inferred_key = self.infer_expr(&first.key)?.ok_or_else(|| {
+                    self.error_at_span(
+                        ErrorCode::TypeError,
+                        "Cannot infer this map's key type.",
+                        crate::grammar::expr_span(&first.key).unwrap_or((0, 0)),
+                        "unknown map key type",
+                    )
+                })?;
+                let inferred_value = self.infer_expr(&first.value)?.ok_or_else(|| {
+                    self.error_at_span(
+                        ErrorCode::TypeError,
+                        "Cannot infer this map's value type.",
+                        crate::grammar::expr_span(&first.value).unwrap_or((0, 0)),
+                        "unknown map value type",
+                    )
+                })?;
+                for pair in &pairs[1..] {
+                    let actual_key = self.infer_expr(&pair.key)?.ok_or_else(|| {
+                        self.error_at_span(
+                            ErrorCode::TypeError,
+                            "Cannot infer this map's key type.",
+                            crate::grammar::expr_span(&pair.key).unwrap_or((0, 0)),
+                            "unknown map key type",
+                        )
+                    })?;
+                    let actual_value = self.infer_expr(&pair.value)?.ok_or_else(|| {
+                        self.error_at_span(
+                            ErrorCode::TypeError,
+                            "Cannot infer this map's value type.",
+                            crate::grammar::expr_span(&pair.value).unwrap_or((0, 0)),
+                            "unknown map value type",
+                        )
+                    })?;
+                    if !same_type(&inferred_key, &actual_key) {
+                        return Err(self.error_at_span(
+                            ErrorCode::TypeError,
+                            format!(
+                                "Inferred map keys must all be {}, got {}.",
+                                type_name(&inferred_key),
+                                type_name(&actual_key)
+                            ),
+                            crate::grammar::expr_span(&pair.key).unwrap_or((0, 0)),
+                            "different inferred key type",
+                        ));
+                    }
+                    if !same_type(&inferred_value, &actual_value) {
+                        return Err(self.error_at_span(
+                            ErrorCode::TypeError,
+                            format!(
+                                "Inferred map values must all be {}, got {}.",
+                                type_name(&inferred_value),
+                                type_name(&actual_value)
+                            ),
+                            crate::grammar::expr_span(&pair.value).unwrap_or((0, 0)),
+                            "different inferred value type",
+                        ));
+                    }
                 }
                 Ok(Some(grammar::KiroType::Map(
                     (),
-                    Box::new(key.clone()),
-                    Box::new(val.clone()),
+                    Box::new(inferred_key),
+                    Box::new(inferred_value),
                 )))
             }
             grammar::Expression::At(collection, at_kw, key) => {
@@ -903,6 +1208,23 @@ impl<'a> SemanticCtx<'a> {
                 Ok(None)
             }
             grammar::Expression::Call(func, _, args, _) => {
+                if let Some((module, function)) =
+                    crate::grammar::module_call_target(func, &self.imports)
+                {
+                    let resolved = self.canonical_import_name(&module);
+                    let canonical = crate::canonical_std_module_name(&resolved)
+                        .unwrap_or(&resolved)
+                        .to_string();
+                    if matches!(canonical.as_str(), "std_lists" | "std_maps")
+                        && matches!(
+                            (canonical.as_str(), function.as_str()),
+                            ("std_lists", "join" | "slice" | "reverse")
+                                | ("std_maps", "has" | "set" | "delete")
+                        )
+                    {
+                        return self.infer_collection_call(&canonical, &function, func, args);
+                    }
+                }
                 if let Some((module, function)) = std_io_display_call(func)
                     && self.imports.contains(module)
                 {

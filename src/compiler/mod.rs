@@ -193,7 +193,7 @@ fn collect_calls_from_expr(
                 collect_calls_from_expr(item, local_functions, calls);
             }
         }
-        grammar::Expression::MapInit(_, _, _, _, pairs, _) => {
+        grammar::Expression::MapInit(_, _, _, pairs, _) => {
             for pair in pairs {
                 collect_calls_from_expr(&pair.key, local_functions, calls);
                 collect_calls_from_expr(&pair.value, local_functions, calls);
@@ -557,14 +557,14 @@ fn expr_uses_pipes(expr: &grammar::Expression) -> bool {
         grammar::Expression::PipeInit(_, _, _) | grammar::Expression::Take(_, _) => true,
         grammar::Expression::AdrInit(_, inner) => type_uses_pipes(inner),
         grammar::Expression::ListInit(_, inner, _, items, _) => {
-            type_uses_pipes(inner) || items.iter().any(expr_uses_pipes)
+            inner.as_ref().is_some_and(type_uses_pipes) || items.iter().any(expr_uses_pipes)
         }
-        grammar::Expression::MapInit(_, key, value, _, pairs, _) => {
-            type_uses_pipes(key)
-                || type_uses_pipes(value)
-                || pairs
-                    .iter()
-                    .any(|pair| expr_uses_pipes(&pair.key) || expr_uses_pipes(&pair.value))
+        grammar::Expression::MapInit(_, annotation, _, pairs, _) => {
+            annotation.as_ref().is_some_and(|annotation| {
+                type_uses_pipes(&annotation.key) || type_uses_pipes(&annotation.value)
+            }) || pairs
+                .iter()
+                .any(|pair| expr_uses_pipes(&pair.key) || expr_uses_pipes(&pair.value))
         }
         grammar::Expression::StructInit(_, _, fields, _) => {
             fields.iter().any(|field| expr_uses_pipes(&field.value))
@@ -604,7 +604,7 @@ fn expr_uses_anyhow(expr: &grammar::Expression) -> bool {
     match expr {
         grammar::Expression::ErrorRef(_) => true,
         grammar::Expression::ListInit(_, _, _, items, _) => items.iter().any(expr_uses_anyhow),
-        grammar::Expression::MapInit(_, _, _, _, pairs, _) => pairs
+        grammar::Expression::MapInit(_, _, _, pairs, _) => pairs
             .iter()
             .any(|pair| expr_uses_anyhow(&pair.key) || expr_uses_anyhow(&pair.value)),
         grammar::Expression::StructInit(_, _, fields, _) => {
@@ -656,7 +656,7 @@ fn expr_uses_std_io_module(expr: &grammar::Expression) -> bool {
         grammar::Expression::ListInit(_, _, _, items, _) => {
             items.iter().any(expr_uses_std_io_module)
         }
-        grammar::Expression::MapInit(_, _, _, _, pairs, _) => pairs
+        grammar::Expression::MapInit(_, _, _, pairs, _) => pairs
             .iter()
             .any(|pair| expr_uses_std_io_module(&pair.key) || expr_uses_std_io_module(&pair.value)),
         grammar::Expression::StructInit(_, _, fields, _) => fields

@@ -216,6 +216,16 @@ pub struct HirExpr {
     pub anchor: SourceAnchor,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HirCollectionOp {
+    ListJoin,
+    ListSlice,
+    ListReverse,
+    MapHas,
+    MapSet,
+    MapDelete,
+}
+
 #[derive(Debug, Clone)]
 pub enum HirExprKind {
     StructInit {
@@ -224,6 +234,10 @@ pub enum HirExprKind {
     },
     ListInit(Vec<HirExpr>),
     MapInit(Vec<HirMapPair>),
+    CollectionCall {
+        op: HirCollectionOp,
+        args: Vec<HirExpr>,
+    },
     FieldAccess {
         target: Box<HirExpr>,
         field: FieldId,

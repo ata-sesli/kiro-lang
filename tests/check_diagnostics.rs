@@ -83,6 +83,109 @@ main()
 }
 
 #[test]
+fn inferred_collection_literals_reject_empty_and_mixed_values() {
+    let empty = build_stderr_for_source(
+        "inferred_empty_list",
+        r#"
+fn main() {
+    var values = list {}
+}
+"#,
+    );
+    assert!(
+        empty.contains("Cannot infer the element type of an empty list"),
+        "unexpected stderr:\n{empty}"
+    );
+
+    let mixed = build_stderr_for_source(
+        "inferred_mixed_list",
+        r#"
+fn main() {
+    var values = list { 1, "two" }
+}
+"#,
+    );
+    assert!(
+        mixed.contains("Inferred list elements must all be num, got str"),
+        "unexpected stderr:\n{mixed}"
+    );
+
+    let empty_map = build_stderr_for_source(
+        "inferred_empty_map",
+        r#"
+fn main() {
+    var values = map {}
+}
+"#,
+    );
+    assert!(
+        empty_map.contains("Cannot infer the key and value types of an empty map"),
+        "unexpected stderr:\n{empty_map}"
+    );
+}
+
+#[test]
+fn polymorphic_collection_modules_reject_mismatched_concrete_types() {
+    let error = build_stderr_for_source(
+        "lists_polymorphic_mismatch",
+        r#"
+import lists
+
+fn bad() -> list num {
+    return lists.join(list { 1 }, list { "two" })
+}
+"#,
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("lists.join arguments must have the same list type"),
+        "unexpected diagnostic: {error}"
+    );
+
+    let error = build_stderr_for_source(
+        "maps_polymorphic_mismatch",
+        r#"
+import maps
+
+fn bad() -> map str num {
+    return maps.set(map { "one" 1 }, "two", "wrong")
+}
+"#,
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("maps.set value must be num, got str"),
+        "unexpected diagnostic: {error}"
+    );
+}
+
+#[test]
+fn explicit_collection_literals_remain_checked_and_allow_empty_values() {
+    let valid = compile_source(
+        r#"
+fn empty() -> num {
+    var values = list num {}
+    var lookup = map str num {}
+    return len values + len lookup
+}
+"#,
+    );
+    assert!(valid.contains("fn main"));
+
+    let error = build_stderr_for_source(
+        "explicit_collection_mismatch",
+        r#"
+fn bad() {
+    var values = list num { "wrong" }
+}
+"#,
+    );
+    assert!(error.contains("List element must be num, got str"));
+}
+
+#[test]
 fn handle_declaration_parses_and_compiles() {
     let rust = compile_source(
         r#"

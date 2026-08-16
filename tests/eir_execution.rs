@@ -97,6 +97,57 @@ fn inspect(data: bytes) -> num {
 }
 
 #[test]
+fn eir_executes_polymorphic_collection_modules_with_inferred_literals() {
+    let source = r#"
+import lists
+import maps
+
+fn inspect() -> num {
+    var joined = lists.join(list { 1, 2 }, list { 3, 4 })
+    var reversed = lists.reverse(lists.slice(joined, 1, 4))
+    var base = map { "a" 1 }
+    var added = maps.set(base, "b", 2)
+    var trimmed = maps.delete(added, "a")
+    on (maps.has(added, "b")) {
+        return reversed at 0 + trimmed at "b" + len joined
+    } off {
+        return 0
+    }
+}
+"#;
+    let (program, function) = lower_source("collection_modules", source);
+    let mut runtime = EirRuntime::new(&program).expect("verified runtime");
+
+    assert_eq!(
+        runtime
+            .call_function(function, Vec::new())
+            .expect("collection operations should execute"),
+        RuntimeVal::Float(10.0)
+    );
+}
+
+#[test]
+fn list_slice_rejects_invalid_runtime_ranges() {
+    let source = r#"
+import lists
+
+fn bad(start: num) -> list num {
+    return lists.slice(list { 1, 2 }, start, 2)
+}
+"#;
+    let (program, function) = lower_source("invalid_list_slice", source);
+    let mut runtime = EirRuntime::new(&program).expect("verified runtime");
+
+    let error = runtime
+        .call_function(function, vec![RuntimeVal::Float(0.5)])
+        .expect_err("fractional list range should fail");
+    assert!(matches!(
+        error.kind,
+        EirRuntimeErrorKind::InvalidListRange { .. }
+    ));
+}
+
+#[test]
 fn eir_executes_loops_branches_and_direct_calls() {
     let source = r#"
 fn count(limit: num) -> num {

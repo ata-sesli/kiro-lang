@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::hir::{
-    Effects, FieldId, FunctionId, HirBinaryOp, HirCallKind, HirExpr, HirExprKind, HirFunction,
-    HirModule, HirProgram, HirStmt, HirStmtKind, LocalId, ModuleId, SemType, Signature,
-    SourceAnchor, TypeId, TypeTable,
+    Effects, FieldId, FunctionId, HirBinaryOp, HirCallKind, HirCollectionOp, HirExpr, HirExprKind,
+    HirFunction, HirModule, HirProgram, HirStmt, HirStmtKind, LocalId, ModuleId, SemType,
+    Signature, SourceAnchor, TypeId, TypeTable,
 };
 
 use super::{
@@ -951,6 +951,47 @@ impl<'a> FunctionBuilder<'a> {
                     },
                     expression.anchor,
                 );
+                dst
+            }
+            HirExprKind::CollectionCall { op, args } => {
+                let args = args
+                    .iter()
+                    .map(|arg| self.require_value(arg))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let dst = self.allocate_slot(expression.ty, expression.anchor)?;
+                let instruction = match op {
+                    HirCollectionOp::ListJoin => InstructionKind::ListJoin {
+                        dst,
+                        left: args[0],
+                        right: args[1],
+                    },
+                    HirCollectionOp::ListSlice => InstructionKind::ListSlice {
+                        dst,
+                        list: args[0],
+                        start: args[1],
+                        end: args[2],
+                    },
+                    HirCollectionOp::ListReverse => {
+                        InstructionKind::ListReverse { dst, list: args[0] }
+                    }
+                    HirCollectionOp::MapHas => InstructionKind::MapHas {
+                        dst,
+                        map: args[0],
+                        key: args[1],
+                    },
+                    HirCollectionOp::MapSet => InstructionKind::MapSet {
+                        dst,
+                        map: args[0],
+                        key: args[1],
+                        value: args[2],
+                    },
+                    HirCollectionOp::MapDelete => InstructionKind::MapDelete {
+                        dst,
+                        map: args[0],
+                        key: args[1],
+                    },
+                };
+                self.emit(instruction, expression.anchor);
                 dst
             }
             HirExprKind::StructInit { structure, fields } => {

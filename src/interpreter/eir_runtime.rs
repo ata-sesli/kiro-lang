@@ -46,6 +46,11 @@ pub enum EirRuntimeErrorKind {
         index: usize,
         length: usize,
     },
+    InvalidListRange {
+        start: f64,
+        end: f64,
+        length: usize,
+    },
     BytesIndexOutOfBounds {
         index: usize,
         length: usize,
@@ -129,6 +134,10 @@ impl fmt::Display for EirRuntimeError {
                     "list index {index} out of bounds for length {length}"
                 )
             }
+            EirRuntimeErrorKind::InvalidListRange { start, end, length } => write!(
+                formatter,
+                "invalid list range {start}..{end} for length {length}"
+            ),
             EirRuntimeErrorKind::BytesIndexOutOfBounds { index, length } => {
                 write!(
                     formatter,
@@ -914,6 +923,125 @@ fn execute_instruction(
                 let value = read_slot(frame, *value, anchor)?.clone();
                 values.insert(key, value);
             }
+            write_slot(frame, *dst, RuntimeVal::Map(values), anchor)?;
+        }
+        InstructionKind::ListJoin { dst, left, right } => {
+            let RuntimeVal::List(left) = read_slot(frame, *left, anchor)? else {
+                return Err(type_mismatch(
+                    anchor,
+                    "list",
+                    read_slot(frame, *left, anchor)?,
+                ));
+            };
+            let RuntimeVal::List(right) = read_slot(frame, *right, anchor)? else {
+                return Err(type_mismatch(
+                    anchor,
+                    "list",
+                    read_slot(frame, *right, anchor)?,
+                ));
+            };
+            let mut values = Vec::with_capacity(left.len() + right.len());
+            values.extend_from_slice(left);
+            values.extend_from_slice(right);
+            write_slot(frame, *dst, RuntimeVal::List(values), anchor)?;
+        }
+        InstructionKind::ListSlice {
+            dst,
+            list,
+            start,
+            end,
+        } => {
+            let start = read_number(frame, *start, anchor)?;
+            let end = read_number(frame, *end, anchor)?;
+            let RuntimeVal::List(values) = read_slot(frame, *list, anchor)? else {
+                return Err(type_mismatch(
+                    anchor,
+                    "list",
+                    read_slot(frame, *list, anchor)?,
+                ));
+            };
+            let valid = start.is_finite()
+                && end.is_finite()
+                && start.fract() == 0.0
+                && end.fract() == 0.0
+                && start >= 0.0
+                && start <= end
+                && end <= values.len() as f64;
+            if !valid {
+                return Err(runtime_error(
+                    anchor,
+                    EirRuntimeErrorKind::InvalidListRange {
+                        start,
+                        end,
+                        length: values.len(),
+                    },
+                ));
+            }
+            write_slot(
+                frame,
+                *dst,
+                RuntimeVal::List(values[start as usize..end as usize].to_vec()),
+                anchor,
+            )?;
+        }
+        InstructionKind::ListReverse { dst, list } => {
+            let RuntimeVal::List(values) = read_slot(frame, *list, anchor)? else {
+                return Err(type_mismatch(
+                    anchor,
+                    "list",
+                    read_slot(frame, *list, anchor)?,
+                ));
+            };
+            let mut values = values.clone();
+            values.reverse();
+            write_slot(frame, *dst, RuntimeVal::List(values), anchor)?;
+        }
+        InstructionKind::MapHas { dst, map, key } => {
+            let key = map_key(read_slot(frame, *key, anchor)?);
+            let RuntimeVal::Map(values) = read_slot(frame, *map, anchor)? else {
+                return Err(type_mismatch(
+                    anchor,
+                    "map",
+                    read_slot(frame, *map, anchor)?,
+                ));
+            };
+            write_slot(
+                frame,
+                *dst,
+                RuntimeVal::Bool(values.contains_key(&key)),
+                anchor,
+            )?;
+        }
+        InstructionKind::MapSet {
+            dst,
+            map,
+            key,
+            value,
+        } => {
+            let key = map_key(read_slot(frame, *key, anchor)?);
+            let value = read_slot(frame, *value, anchor)?.clone();
+            let RuntimeVal::Map(values) = read_slot(frame, *map, anchor)? else {
+                return Err(type_mismatch(
+                    anchor,
+                    "map",
+                    read_slot(frame, *map, anchor)?,
+                ));
+            };
+            let mut values = values.clone();
+            values.insert(key, value);
+            write_slot(frame, *dst, RuntimeVal::Map(values), anchor)?;
+        }
+        InstructionKind::MapDelete { dst, map, key } => {
+            let key = map_key(read_slot(frame, *key, anchor)?);
+            let RuntimeVal::Map(values) = read_slot(frame, *map, anchor)? else {
+                return Err(type_mismatch(
+                    anchor,
+                    "map",
+                    read_slot(frame, *map, anchor)?,
+                ));
+            };
+            let mut values = values.clone();
+            values.remove(&key);
             write_slot(frame, *dst, RuntimeVal::Map(values), anchor)?;
         }
         InstructionKind::MakeStruct {

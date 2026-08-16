@@ -12,9 +12,9 @@ pub use ids::{
     SourceId, StructId, TypeId,
 };
 pub use tree::{
-    HirBinaryOp, HirCallKind, HirErrorClause, HirExpr, HirExprKind, HirFieldInit, HirFunction,
-    HirHostFunction, HirMapPair, HirModule, HirParam, HirProgram, HirStmt, HirStmtKind, HirStruct,
-    HirStructField, HirSymbols, LocalSymbol,
+    HirBinaryOp, HirCallKind, HirCollectionOp, HirErrorClause, HirExpr, HirExprKind, HirFieldInit,
+    HirFunction, HirHostFunction, HirMapPair, HirModule, HirParam, HirProgram, HirStmt,
+    HirStmtKind, HirStruct, HirStructField, HirSymbols, LocalSymbol,
 };
 pub use types::{SemType, TypeTable};
 

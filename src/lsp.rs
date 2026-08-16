@@ -451,6 +451,13 @@ fn module_completion_items(index: &SymbolIndex, module: &str) -> Vec<CompletionI
             }
         }
     }
+    for name in ["join", "slice", "reverse", "has", "set", "delete"] {
+        if let Some((detail, _, _)) = lsp_symbols::collection_intrinsic(module, name)
+            && !items.iter().any(|item| item.label == name)
+        {
+            items.push(completion_item(name, CompletionItemKind::FUNCTION, &detail));
+        }
+    }
     items
 }
 
@@ -543,6 +550,8 @@ fn hover_doc(word: &str) -> Option<&'static str> {
         "import" => Some("Imports a sibling Kiro module or embedded std module."),
         "fs" | "std_fs" => Some("Standard filesystem host module."),
         "io" | "std_io" => Some("Standard input/output host module."),
+        "lists" | "std_lists" => Some("Standard polymorphic list operations."),
+        "maps" | "std_maps" => Some("Standard polymorphic map operations."),
         "time" | "std_time" => Some("Standard time host module."),
         "net" | "std_net" => Some("Standard network host module."),
         "env" | "std_env" => Some("Standard environment host module."),

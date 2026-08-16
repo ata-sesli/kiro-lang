@@ -146,7 +146,6 @@ fn calculate(limit: num) -> num {
     }
     return current
 }
-
 "#;
     let dir = temp_project("eir_generated_parity");
     link_runtime(&dir);
@@ -185,6 +184,31 @@ fn calculate(limit: num) -> num {
         generated.contains("fn __kiro_eir_f"),
         "supported modules must generate from EIR:\n{generated}"
     );
+}
+
+#[test]
+fn eir_and_generated_rust_agree_on_polymorphic_collection_modules() {
+    const MARKER: &str = "EIR_COLLECTIONS:";
+    let source = r#"
+import io
+import lists
+import maps
+
+var joined = lists.join(list { 1, 2 }, list { 3, 4 })
+var reversed = lists.reverse(lists.slice(joined, 1, 4))
+var values = maps.set(map { "a" 1 }, "b", 2)
+var trimmed = maps.delete(values, "a")
+check maps.has(values, "b"), "missing inserted key"
+check reversed at 0 + trimmed at "b" + len joined == 10, "collection result mismatch"
+io.print("EIR_COLLECTIONS:ok")
+"#;
+    let pair = execute_both("collection_modules", source);
+
+    assert_success(&pair.interpreted, "collection modules should interpret");
+    assert_success(&pair.compiled, "collection modules should compile and run");
+    let (interpreted, compiled) = pair.marked_stdout(MARKER);
+    assert_eq!(interpreted, vec!["EIR_COLLECTIONS:ok"]);
+    assert_eq!(compiled, interpreted);
 }
 
 #[test]

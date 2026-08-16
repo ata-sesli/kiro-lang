@@ -72,4 +72,8 @@ fn std_bytes_assets_are_registered() {
     );
     assert!(StdAssets::get("bytes/header.rs").is_some());
     assert!(StdAssets::get("bytes/std_bytes.kiro").is_some());
+    assert_eq!(canonical_std_module_name("lists"), Some("std_lists"));
+    assert_eq!(canonical_std_module_name("maps"), Some("std_maps"));
+    assert!(StdAssets::get("lists/std_lists.kiro").is_some());
+    assert!(StdAssets::get("maps/std_maps.kiro").is_some());
 }

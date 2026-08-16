@@ -12,7 +12,22 @@ use crate::analysis::{self, AnalysisResult, SourceOverlays};
 use crate::grammar::{self, AstSpan, grammar as ast};
 
 pub const STD_MODULES: &[&str] = &[
-    "env", "fs", "io", "net", "time", "std_env", "std_fs", "std_io", "std_net", "std_time",
+    "bytes",
+    "env",
+    "fs",
+    "io",
+    "lists",
+    "maps",
+    "net",
+    "time",
+    "std_bytes",
+    "std_env",
+    "std_fs",
+    "std_io",
+    "std_lists",
+    "std_maps",
+    "std_net",
+    "std_time",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -120,6 +135,9 @@ impl SymbolIndex {
             if let Some(text) = std_io_display_hover(&module, &member) {
                 return Some(text);
             }
+            if let Some((signature, _, doc)) = collection_intrinsic(&module, &member) {
+                return Some(format!("{signature}\n\n{doc}"));
+            }
             return self.find_module_member(&module, &member).map(hover_text);
         }
 
@@ -148,6 +166,16 @@ impl SymbolIndex {
                 signature,
                 vec!["value".to_string()],
                 Some(std_io_display_doc(member).to_string()),
+                ctx.active_parameter,
+            );
+        }
+        if let Some((module, member)) = ctx.call_name.rsplit_once('.')
+            && let Some((signature, params, doc)) = collection_intrinsic(module, member)
+        {
+            return signature_help(
+                signature,
+                params.iter().map(|param| (*param).to_string()).collect(),
+                Some(doc.to_string()),
                 ctx.active_parameter,
             );
         }
@@ -256,6 +284,47 @@ fn std_io_display_doc(member: &str) -> &'static str {
         "eprintline" => "Writes a displayable Kiro value to stderr with a newline.",
         _ => "Displays a Kiro value.",
     }
+}
+
+pub fn collection_intrinsic(
+    module: &str,
+    member: &str,
+) -> Option<(String, &'static [&'static str], &'static str)> {
+    let canonical = crate::canonical_std_module_name(module)?;
+    let (params, result, doc): (&[&str], &str, &str) = match (canonical, member) {
+        ("std_lists", "join") => (
+            &["left", "right"],
+            "list T",
+            "Returns a new list containing both input lists.",
+        ),
+        ("std_lists", "slice") => (
+            &["value", "start", "end"],
+            "list T",
+            "Returns a new list for the half-open range start..end.",
+        ),
+        ("std_lists", "reverse") => (&["value"], "list T", "Returns a new list in reverse order."),
+        ("std_maps", "has") => (
+            &["value", "key"],
+            "bool",
+            "Reports whether the map contains the key.",
+        ),
+        ("std_maps", "set") => (
+            &["value", "key", "item"],
+            "map K V",
+            "Returns a new map with the key set to the item.",
+        ),
+        ("std_maps", "delete") => (
+            &["value", "key"],
+            "map K V",
+            "Returns a new map without the key.",
+        ),
+        _ => return None,
+    };
+    Some((
+        format!("{module}.{member}({}) -> {result}", params.join(", ")),
+        params,
+        doc,
+    ))
 }
 
 fn signature_help(

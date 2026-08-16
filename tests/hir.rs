@@ -129,6 +129,40 @@ pure fn add(a: num, b: num) -> num {
 }
 
 #[test]
+fn collection_literals_infer_concrete_hir_types() {
+    let analysis = analyze_main(
+        r#"
+fn inspect() -> num {
+    var numbers = list { 1, 2, 3 }
+    var scores = map { "ada" 10, "lin" 20 }
+    return numbers at 1 + scores at "ada"
+}
+"#,
+    );
+    let function = analysis.modules["main"]
+        .hir
+        .function("inspect")
+        .expect("inspect function");
+
+    let HirStmtKind::VarDecl { value: numbers, .. } = &function.body[0].kind else {
+        panic!("first statement should declare numbers")
+    };
+    let Some(SemType::List(number_type)) = analysis.hir.types.get(numbers.ty) else {
+        panic!("numbers should have a concrete list type")
+    };
+    assert_eq!(*number_type, TypeId::NUM);
+
+    let HirStmtKind::VarDecl { value: scores, .. } = &function.body[1].kind else {
+        panic!("second statement should declare scores")
+    };
+    let Some(SemType::Map(key_type, value_type)) = analysis.hir.types.get(scores.ty) else {
+        panic!("scores should have a concrete map type")
+    };
+    assert_eq!(*key_type, TypeId::STR);
+    assert_eq!(*value_type, TypeId::NUM);
+}
+
+#[test]
 fn lexical_shadowing_assigns_distinct_local_ids() {
     let analysis = analyze_main(
         r#"

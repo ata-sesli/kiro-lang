@@ -502,6 +502,65 @@ fn compile_instruction(
                 ),
             )
         }
+        InstructionKind::ListJoin { dst, left, right } => assign(
+            *dst,
+            format!(
+                "{{ let mut __joined = match {} {{ __KiroValue::List(values) => values.clone(), other => panic!(\"expected list, got {{other:?}}\") }}; match {} {{ __KiroValue::List(values) => __joined.extend_from_slice(values), other => panic!(\"expected list, got {{other:?}}\") }}; __KiroValue::List(__joined) }}",
+                slot(*left),
+                slot(*right)
+            ),
+        ),
+        InstructionKind::ListSlice {
+            dst,
+            list,
+            start,
+            end,
+        } => assign(
+            *dst,
+            format!(
+                "{{ let __start = __kiro_num(&{}); let __end = __kiro_num(&{}); match {} {{ __KiroValue::List(values) => {{ if !__start.is_finite() || !__end.is_finite() || __start.fract() != 0.0 || __end.fract() != 0.0 || __start < 0.0 || __start > __end || __end > values.len() as f64 {{ kiro_runtime_error(\"KIRO3004\", &format!(\"Invalid list range {{__start}}..{{__end}} for length {{}}.\", values.len())) }} __KiroValue::List(values[__start as usize..__end as usize].to_vec()) }}, other => panic!(\"expected list, got {{other:?}}\") }} }}",
+                slot(*start),
+                slot(*end),
+                slot(*list)
+            ),
+        ),
+        InstructionKind::ListReverse { dst, list } => assign(
+            *dst,
+            format!(
+                "match {} {{ __KiroValue::List(values) => {{ let mut values = values.clone(); values.reverse(); __KiroValue::List(values) }}, other => panic!(\"expected list, got {{other:?}}\") }}",
+                slot(*list)
+            ),
+        ),
+        InstructionKind::MapHas { dst, map, key } => assign(
+            *dst,
+            format!(
+                "{{ let __key = __kiro_map_key(&{}); __KiroValue::Bool(match {} {{ __KiroValue::Map(values) => values.contains_key(&__key), other => panic!(\"expected map, got {{other:?}}\") }}) }}",
+                slot(*key),
+                slot(*map)
+            ),
+        ),
+        InstructionKind::MapSet {
+            dst,
+            map,
+            key,
+            value,
+        } => assign(
+            *dst,
+            format!(
+                "{{ let __key = __kiro_map_key(&{}); let __value = {}; match {} {{ __KiroValue::Map(values) => {{ let mut values = values.clone(); values.insert(__key, __value); __KiroValue::Map(values) }}, other => panic!(\"expected map, got {{other:?}}\") }} }}",
+                slot(*key),
+                clone_slot(*value),
+                slot(*map)
+            ),
+        ),
+        InstructionKind::MapDelete { dst, map, key } => assign(
+            *dst,
+            format!(
+                "{{ let __key = __kiro_map_key(&{}); match {} {{ __KiroValue::Map(values) => {{ let mut values = values.clone(); values.remove(&__key); __KiroValue::Map(values) }}, other => panic!(\"expected map, got {{other:?}}\") }} }}",
+                slot(*key),
+                slot(*map)
+            ),
+        ),
         InstructionKind::MakeStruct {
             dst,
             structure,

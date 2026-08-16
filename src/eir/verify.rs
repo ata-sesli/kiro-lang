@@ -470,6 +470,83 @@ fn verify_instruction(
                 check_slot_type(function, *value, *value_type, &location, errors, false);
             }
         }
+        InstructionKind::ListJoin { dst, left, right } => {
+            let Some(dst_type) = slot_type(function, *dst, &location, errors) else {
+                return;
+            };
+            if !matches!(program.types.get(dst_type), Some(SemType::List(_))) {
+                errors.push(location(VerifyErrorKind::InvalidAggregateOperand(*dst)));
+                return;
+            }
+            check_slot_type(function, *left, dst_type, &location, errors, false);
+            check_slot_type(function, *right, dst_type, &location, errors, false);
+        }
+        InstructionKind::ListSlice {
+            dst,
+            list,
+            start,
+            end,
+        } => {
+            let Some(dst_type) = slot_type(function, *dst, &location, errors) else {
+                return;
+            };
+            if !matches!(program.types.get(dst_type), Some(SemType::List(_))) {
+                errors.push(location(VerifyErrorKind::InvalidAggregateOperand(*dst)));
+                return;
+            }
+            check_slot_type(function, *list, dst_type, &location, errors, false);
+            check_slot_type(function, *start, TypeId::NUM, &location, errors, false);
+            check_slot_type(function, *end, TypeId::NUM, &location, errors, false);
+        }
+        InstructionKind::ListReverse { dst, list } => {
+            let Some(dst_type) = slot_type(function, *dst, &location, errors) else {
+                return;
+            };
+            if !matches!(program.types.get(dst_type), Some(SemType::List(_))) {
+                errors.push(location(VerifyErrorKind::InvalidAggregateOperand(*dst)));
+                return;
+            }
+            check_slot_type(function, *list, dst_type, &location, errors, false);
+        }
+        InstructionKind::MapHas { dst, map, key } => {
+            check_slot_type(function, *dst, TypeId::BOOL, &location, errors, false);
+            let Some(map_type) = slot_type(function, *map, &location, errors) else {
+                return;
+            };
+            let Some(SemType::Map(key_type, _)) = program.types.get(map_type) else {
+                errors.push(location(VerifyErrorKind::InvalidAggregateOperand(*map)));
+                return;
+            };
+            check_slot_type(function, *key, *key_type, &location, errors, false);
+        }
+        InstructionKind::MapSet {
+            dst,
+            map,
+            key,
+            value,
+        } => {
+            let Some(map_type) = slot_type(function, *map, &location, errors) else {
+                return;
+            };
+            check_slot_type(function, *dst, map_type, &location, errors, false);
+            let Some(SemType::Map(key_type, value_type)) = program.types.get(map_type) else {
+                errors.push(location(VerifyErrorKind::InvalidAggregateOperand(*map)));
+                return;
+            };
+            check_slot_type(function, *key, *key_type, &location, errors, false);
+            check_slot_type(function, *value, *value_type, &location, errors, false);
+        }
+        InstructionKind::MapDelete { dst, map, key } => {
+            let Some(map_type) = slot_type(function, *map, &location, errors) else {
+                return;
+            };
+            check_slot_type(function, *dst, map_type, &location, errors, false);
+            let Some(SemType::Map(key_type, _)) = program.types.get(map_type) else {
+                errors.push(location(VerifyErrorKind::InvalidAggregateOperand(*map)));
+                return;
+            };
+            check_slot_type(function, *key, *key_type, &location, errors, false);
+        }
         InstructionKind::MakeStruct {
             dst,
             structure,

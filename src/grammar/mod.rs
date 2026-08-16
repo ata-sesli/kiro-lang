@@ -233,6 +233,12 @@ pub mod grammar {
     }
 
     #[derive(Debug, Clone)]
+    pub struct MapTypeAnnotation {
+        pub key: KiroType,
+        pub value: KiroType,
+    }
+
+    #[derive(Debug, Clone)]
     pub struct FuncParam {
         pub name: Spanned<VariableVal>,
         #[rust_sitter::leaf(text = ":")]
@@ -430,7 +436,7 @@ pub mod grammar {
         #[rust_sitter::prec_left(2)]
         ListInit(
             #[rust_sitter::leaf(text = "list")] Spanned<()>,
-            #[allow(dead_code)] KiroType, // The inner type (e.g. num)
+            #[allow(dead_code)] Option<KiroType>, // Omitted when inferred from values.
             #[rust_sitter::leaf(text = "{")] (),
             #[rust_sitter::delimited(#[rust_sitter::leaf(text = ",")] ())] Vec<Expression>,
             #[rust_sitter::leaf(text = "}")] (),
@@ -442,8 +448,7 @@ pub mod grammar {
         #[rust_sitter::prec_left(2)]
         MapInit(
             #[rust_sitter::leaf(text = "map")] Spanned<()>,
-            #[allow(dead_code)] KiroType, // Key Type
-            #[allow(dead_code)] KiroType, // Value Type
+            #[allow(dead_code)] Option<MapTypeAnnotation>,
             #[rust_sitter::leaf(text = "{")] (),
             #[rust_sitter::delimited(#[rust_sitter::leaf(text = ",")] ())] Vec<MapPair>,
             #[rust_sitter::leaf(text = "}")] (),
@@ -1089,7 +1094,7 @@ pub fn expr_span(expr: &Expression) -> Option<AstSpan> {
                 .unwrap_or(keyword.span.1);
             Some((keyword.span.0, end))
         }
-        Expression::MapInit(keyword, _, _, _, pairs, _) => {
+        Expression::MapInit(keyword, _, _, pairs, _) => {
             let end = pairs
                 .last()
                 .and_then(|pair| expr_span(&pair.value).or_else(|| expr_span(&pair.key)))

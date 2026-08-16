@@ -746,6 +746,12 @@ fn eir_runtime_diagnostic(
             "invalid list index",
             None,
         ),
+        EirRuntimeErrorKind::InvalidListRange { start, end, length } => (
+            errors::ErrorCode::ListIndexOutOfBounds,
+            format!("Invalid list range {start}..{end} for length {length}."),
+            "invalid list range",
+            None,
+        ),
         EirRuntimeErrorKind::MapKeyNotFound(key) => (
             errors::ErrorCode::MapKeyNotFound,
             format!("Map key not found: {key:?}."),

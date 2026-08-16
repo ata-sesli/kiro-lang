@@ -152,6 +152,45 @@ fn instruction_name(instruction: &InstructionKind) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        InstructionKind::ListJoin { dst, left, right } => format!(
+            "s{} = list_join s{}, s{}",
+            dst.raw(),
+            left.raw(),
+            right.raw()
+        ),
+        InstructionKind::ListSlice {
+            dst,
+            list,
+            start,
+            end,
+        } => format!(
+            "s{} = list_slice s{}, s{}, s{}",
+            dst.raw(),
+            list.raw(),
+            start.raw(),
+            end.raw()
+        ),
+        InstructionKind::ListReverse { dst, list } => {
+            format!("s{} = list_reverse s{}", dst.raw(), list.raw())
+        }
+        InstructionKind::MapHas { dst, map, key } => {
+            format!("s{} = map_has s{}, s{}", dst.raw(), map.raw(), key.raw())
+        }
+        InstructionKind::MapSet {
+            dst,
+            map,
+            key,
+            value,
+        } => format!(
+            "s{} = map_set s{}, s{}, s{}",
+            dst.raw(),
+            map.raw(),
+            key.raw(),
+            value.raw()
+        ),
+        InstructionKind::MapDelete { dst, map, key } => {
+            format!("s{} = map_delete s{}, s{}", dst.raw(), map.raw(), key.raw())
+        }
         InstructionKind::MakeStruct {
             dst,
             structure,

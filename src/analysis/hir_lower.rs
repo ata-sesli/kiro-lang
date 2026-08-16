@@ -3,9 +3,9 @@ use std::collections::{HashMap, HashSet};
 use crate::grammar::{self, grammar as ast};
 
 use crate::hir::{
-    Effects, ErrorId, FieldId, FunctionId, HandleId, HirBinaryOp, HirCallKind, HirErrorClause,
-    HirExpr, HirExprKind, HirFieldInit, HirFunction, HirHostFunction, HirMapPair, HirModule,
-    HirParam, HirProgram, HirStmt, HirStmtKind, HirStruct, HirStructField, HirSymbols,
+    Effects, ErrorId, FieldId, FunctionId, HandleId, HirBinaryOp, HirCallKind, HirCollectionOp,
+    HirErrorClause, HirExpr, HirExprKind, HirFieldInit, HirFunction, HirHostFunction, HirMapPair,
+    HirModule, HirParam, HirProgram, HirStmt, HirStmtKind, HirStruct, HirStructField, HirSymbols,
     HostFunctionId, LocalId, LocalSymbol, ModuleId, SemType, Signature, SourceAnchor, SourceId,
     StructId, TypeId, TypeTable,
 };
@@ -918,19 +918,23 @@ impl<'a> ModuleLowerer<'a> {
                 )
             }
             ast::Expression::ListInit(_, inner, _, items, _) => {
-                let inner = lower_type(inner, self.module, self.declarations, self.types);
                 let items = items
                     .iter()
                     .map(|item| self.lower_expr(item))
                     .collect::<Result<Vec<_>, _>>()?;
+                let inner = match inner {
+                    Some(inner) => lower_type(inner, self.module, self.declarations, self.types),
+                    None => items
+                        .first()
+                        .map(|item| item.ty)
+                        .ok_or_else(|| "cannot lower an untyped empty list".to_string())?,
+                };
                 (
                     HirExprKind::ListInit(items),
                     self.types.intern(SemType::List(inner)),
                 )
             }
-            ast::Expression::MapInit(_, key, value, _, pairs, _) => {
-                let key = lower_type(key, self.module, self.declarations, self.types);
-                let value = lower_type(value, self.module, self.declarations, self.types);
+            ast::Expression::MapInit(_, annotation, _, pairs, _) => {
                 let pairs = pairs
                     .iter()
                     .map(|pair| {
@@ -940,6 +944,21 @@ impl<'a> ModuleLowerer<'a> {
                         })
                     })
                     .collect::<Result<Vec<_>, String>>()?;
+                let (key, value) = match annotation {
+                    Some(annotation) => (
+                        lower_type(&annotation.key, self.module, self.declarations, self.types),
+                        lower_type(
+                            &annotation.value,
+                            self.module,
+                            self.declarations,
+                            self.types,
+                        ),
+                    ),
+                    None => pairs
+                        .first()
+                        .map(|pair| (pair.key.ty, pair.value.ty))
+                        .ok_or_else(|| "cannot lower an untyped empty map".to_string())?,
+                };
                 (
                     HirExprKind::MapInit(pairs),
                     self.types.intern(SemType::Map(key, value)),
@@ -1033,6 +1052,25 @@ impl<'a> ModuleLowerer<'a> {
                 (HirExprKind::Deref(Box::new(target)), ty)
             }
             ast::Expression::Call(target, _, args, _) => {
+                if let Some(op) = self.resolve_collection_operation(target) {
+                    let args = args
+                        .iter()
+                        .map(|argument| self.lower_expr(argument))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let ty = match op {
+                        HirCollectionOp::MapHas => TypeId::BOOL,
+                        HirCollectionOp::ListJoin
+                        | HirCollectionOp::ListSlice
+                        | HirCollectionOp::ListReverse
+                        | HirCollectionOp::MapSet
+                        | HirCollectionOp::MapDelete => args[0].ty,
+                    };
+                    return Ok(HirExpr {
+                        kind: HirExprKind::CollectionCall { op, args },
+                        ty,
+                        anchor,
+                    });
+                }
                 let target = self.lower_expr(target)?;
                 let args = args
                     .iter()
@@ -1191,6 +1229,27 @@ impl<'a> ModuleLowerer<'a> {
                 return_type: declaration.return_type,
             });
             Some((HirExprKind::HostFunction(declaration.id), ty))
+        }
+    }
+
+    fn resolve_collection_operation(
+        &self,
+        expression: &ast::Expression,
+    ) -> Option<HirCollectionOp> {
+        let segments = grammar::expression_path_segments(expression)?;
+        if segments.len() != 2 {
+            return None;
+        }
+        let module = self.imports.get(&segments[0])?;
+        let module = crate::canonical_std_module_name(module).unwrap_or(module);
+        match (module, segments[1].as_str()) {
+            ("std_lists", "join") => Some(HirCollectionOp::ListJoin),
+            ("std_lists", "slice") => Some(HirCollectionOp::ListSlice),
+            ("std_lists", "reverse") => Some(HirCollectionOp::ListReverse),
+            ("std_maps", "has") => Some(HirCollectionOp::MapHas),
+            ("std_maps", "set") => Some(HirCollectionOp::MapSet),
+            ("std_maps", "delete") => Some(HirCollectionOp::MapDelete),
+            _ => None,
         }
     }
 
