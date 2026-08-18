@@ -307,12 +307,590 @@ pub fn hidden_result() -> Result<String> {
     .expect("fixture lib should be written");
 }
 
+fn write_generator_correctness_fixture_crate(project_dir: &Path) {
+    let crate_dir = project_dir.join("fixture_crate");
+    fs::create_dir_all(crate_dir.join("src")).expect("fixture src should be created");
+    fs::write(
+        crate_dir.join("Cargo.toml"),
+        r#"[package]
+name = "kiro_fixture_crate"
+version = "0.1.0"
+edition = "2021"
+"#,
+    )
+    .expect("fixture manifest should be written");
+    fs::write(
+        crate_dir.join("src/lib.rs"),
+        r#"pub struct OpaqueResult {
+    pub optional: Option<String>,
+}
+
+pub fn opaque_result() -> OpaqueResult {
+    OpaqueResult { optional: None }
+}
+
+pub fn borrowed_echo(value: &str) -> String {
+    value.to_string()
+}
+
+pub struct BorrowedRecord<'a> {
+    pub value: &'a str,
+    pub data: &'a [u8],
+}
+
+pub fn borrowed_record_value(record: BorrowedRecord<'_>) -> String {
+    record.value.to_string()
+}
+
+pub fn borrowed_record_static() -> BorrowedRecord<'static> {
+    BorrowedRecord {
+        value: "static",
+        data: b"static",
+    }
+}
+
+pub struct GenericRecord<T> {
+    pub value: T,
+}
+
+pub fn generic_record_value(record: GenericRecord<String>) -> String {
+    record.value
+}
+
+pub struct BorrowedHandle<'a> {
+    value: &'a str,
+}
+
+impl<'a> BorrowedHandle<'a> {
+    pub fn value(&self) -> String {
+        self.value.to_string()
+    }
+}
+
+pub struct LocalOnly {
+    value: std::rc::Rc<()>,
+}
+
+impl LocalOnly {
+    pub fn new() -> Self {
+        Self { value: std::rc::Rc::new(()) }
+    }
+
+    pub fn strong_count(&self) -> usize {
+        std::rc::Rc::strong_count(&self.value)
+    }
+}
+
+#[derive(Clone)]
+pub struct SharedThing {
+    value: std::sync::Arc<()>,
+}
+
+impl SharedThing {
+    pub fn new() -> Self {
+        Self { value: std::sync::Arc::new(()) }
+    }
+
+    pub fn strong_count(&self) -> usize {
+        std::sync::Arc::strong_count(&self.value)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct CopyId(u64);
+
+impl CopyId {
+    pub fn into_value(self) -> u64 {
+        self.0
+    }
+}
+
+pub fn make_copy_id(value: u64) -> CopyId {
+    CopyId(value)
+}
+
+pub fn copy_id_value(id: CopyId) -> u64 {
+    id.0
+}
+
+pub struct ManualCopyId(u64);
+
+impl Copy for ManualCopyId {}
+
+impl Clone for ManualCopyId {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+pub fn make_manual_copy_id(value: u64) -> ManualCopyId {
+    ManualCopyId(value)
+}
+
+pub fn manual_copy_id_value(id: ManualCopyId) -> u64 {
+    id.0
+}
+
+pub struct OwnedToken(String);
+
+pub fn make_owned_token(value: String) -> OwnedToken {
+    OwnedToken(value)
+}
+
+pub fn consume_owned_token(token: OwnedToken) -> usize {
+    token.0.len()
+}
+
+pub struct SharedWriter {
+    bytes: Vec<u8>,
+}
+
+impl SharedWriter {
+    pub fn new() -> Self {
+        Self { bytes: Vec::new() }
+    }
+
+    pub fn write(&mut self, bytes: &[u8]) {
+        self.bytes.extend_from_slice(bytes);
+    }
+
+    pub fn finish(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    pub fn cancel(self) {}
+}
+"#,
+    )
+    .expect("fixture lib should be written");
+}
+
 fn run_kiro(args: &[&str], current_dir: &Path) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_kiro-lang"))
         .args(args)
         .current_dir(current_dir)
         .output()
         .expect("kiro-lang command should run")
+}
+
+fn generate_correctness_fixture(name: &str) -> (PathBuf, std::process::Output) {
+    let dir = temp_project(name);
+    link_runtime_and_macros(&dir);
+    write_generator_correctness_fixture_crate(&dir);
+    fs::write(
+        dir.join("kiro.toml"),
+        r#"[package]
+name = "demo"
+entry = "main.kiro"
+
+[dependencies]
+kiro_fixture_crate = "0.1.0"
+"#,
+    )
+    .expect("manifest should be written");
+    fs::write(
+        dir.join("Cargo.toml"),
+        r#"[package]
+name = "demo_host_gen_correctness"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kiro_fixture_crate = { path = "fixture_crate" }
+kiro_macros = { path = "kiro_macros" }
+kiro_runtime = { path = "kiro_runtime" }
+"#,
+    )
+    .expect("metadata manifest should be written");
+    fs::create_dir_all(dir.join("src")).expect("project src should be created");
+    fs::write(dir.join("src/lib.rs"), "").expect("project lib should be written");
+
+    let output = run_kiro(
+        &["host", "gen", "kiro_fixture_crate", "--module", "fixture"],
+        &dir,
+    );
+    (dir, output)
+}
+
+#[test]
+fn host_gen_declares_every_emitted_signature_type() {
+    let (dir, output) = generate_correctness_fixture("closed_type_graph");
+    assert!(
+        output.status.success(),
+        "host gen should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let kiro = fs::read_to_string(dir.join("fixture.kiro")).expect("fixture.kiro should exist");
+    assert!(
+        kiro.contains("handle OpaqueResult"),
+        "expected fallback handle:\n{kiro}"
+    );
+    assert!(
+        kiro.contains("rust fn opaque_result() -> OpaqueResult"),
+        "expected handle-valued function:\n{kiro}"
+    );
+
+    let check = run_kiro(&["check", "fixture.kiro"], &dir);
+    assert!(
+        check.status.success(),
+        "every emitted signature type should be declared\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+}
+
+#[test]
+fn host_gen_preserves_borrowed_string_parameters() {
+    let (dir, output) = generate_correctness_fixture("borrowed_string");
+    assert!(output.status.success(), "host gen should succeed");
+
+    let rust = fs::read_to_string(dir.join("fixture.rs")).expect("fixture.rs should exist");
+    assert!(
+        rust.contains(
+            "let value = RuntimeVal::expect_arg(&args, 0, \"borrowed_echo\")?.as_str()?;"
+        ),
+        "borrowed string should not allocate an owned String:\n{rust}"
+    );
+    assert!(
+        rust.contains("kiro_fixture_crate::borrowed_echo(value)"),
+        "borrowed string should be passed directly:\n{rust}"
+    );
+
+    fs::write(
+        dir.join("src/lib.rs"),
+        r#"use kiro_runtime::{HostResult, KiroError, RuntimeVal};
+
+include!(concat!(env!("CARGO_MANIFEST_DIR"), "/fixture.rs"));
+"#,
+    )
+    .expect("glue-check source should be written");
+    let glue_check = Command::new("cargo")
+        .args(["check", "--quiet", "--manifest-path"])
+        .arg(dir.join("Cargo.toml"))
+        .output()
+        .expect("cargo check should run for generated glue");
+    assert!(
+        glue_check.status.success(),
+        "borrowed string glue should compile\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&glue_check.stdout),
+        String::from_utf8_lossy(&glue_check.stderr)
+    );
+}
+
+#[test]
+fn host_gen_generates_borrowed_record_input_views() {
+    let (dir, output) = generate_correctness_fixture("borrowed_record_input_view");
+    assert!(output.status.success(), "host gen should succeed");
+
+    let kiro = fs::read_to_string(dir.join("fixture.kiro")).expect("fixture.kiro should exist");
+    assert!(
+        kiro.contains("struct BorrowedRecord {\n    value: str\n    data: bytes\n}"),
+        "borrowed Rust record should remain an ordinary Kiro struct:\n{kiro}"
+    );
+    assert!(
+        kiro.contains("rust fn borrowed_record_value(record: BorrowedRecord) -> str"),
+        "borrowed record input binding should be generated:\n{kiro}"
+    );
+
+    let rust = fs::read_to_string(dir.join("fixture.rs")).expect("fixture.rs should exist");
+    assert!(
+        rust.contains("kiro_fixture_crate::BorrowedRecord { value: __kiro_fields.get(\"value\")"),
+        "glue should construct the crate's borrowed input record:\n{rust}"
+    );
+    assert!(
+        rust.contains(".as_str()?, data:"),
+        "borrowed record field should view the runtime string without allocation:\n{rust}"
+    );
+    assert!(
+        rust.contains(".as_bytes()?"),
+        "borrowed record field should view the runtime bytes without allocation:\n{rust}"
+    );
+
+    fs::write(
+        dir.join("src/lib.rs"),
+        r#"use kiro_runtime::{HostResult, KiroError, RuntimeVal};
+
+include!(concat!(env!("CARGO_MANIFEST_DIR"), "/fixture.rs"));
+"#,
+    )
+    .expect("glue-check source should be written");
+    let glue_check = Command::new("cargo")
+        .args(["check", "--quiet", "--manifest-path"])
+        .arg(dir.join("Cargo.toml"))
+        .output()
+        .expect("cargo check should run for generated glue");
+    assert!(
+        glue_check.status.success(),
+        "borrowed record input-view glue should compile\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&glue_check.stdout),
+        String::from_utf8_lossy(&glue_check.stderr)
+    );
+}
+
+#[test]
+fn host_gen_rejects_generic_custom_types_and_borrowed_handles() {
+    let (dir, output) = generate_correctness_fixture("generic_custom_types");
+    assert!(
+        output.status.success(),
+        "host gen should keep supported bindings"
+    );
+
+    let kiro = fs::read_to_string(dir.join("fixture.kiro")).expect("fixture.kiro should exist");
+    assert!(
+        !kiro.contains("borrowed_record_static"),
+        "borrowed record return leaked:\n{kiro}"
+    );
+    assert!(
+        !kiro.contains("generic_record_value"),
+        "generic record leaked:\n{kiro}"
+    );
+    assert!(
+        !kiro.contains("borrowed_handle_value"),
+        "borrowed handle leaked:\n{kiro}"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("borrowed_record_static: borrowed record returns are unsupported"),
+        "borrowed record return skip reason missing:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "generic_record_value: generic or lifetime-bearing custom types are unsupported"
+        ),
+        "generic record skip reason missing:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "BorrowedHandle::value: generic or lifetime-bearing custom types are unsupported"
+        ),
+        "borrowed handle skip reason missing:\n{stdout}"
+    );
+}
+
+#[test]
+fn host_gen_keeps_only_thread_safe_handle_payloads() {
+    let (dir, output) = generate_correctness_fixture("thread_safe_handles");
+    assert!(output.status.success(), "host gen should succeed");
+
+    let kiro = fs::read_to_string(dir.join("fixture.kiro")).expect("fixture.kiro should exist");
+    assert!(
+        !kiro.contains("handle LocalOnly")
+            && !kiro.contains("local_only_new")
+            && !kiro.contains("local_only_strong_count"),
+        "non-thread-safe handle API should be skipped:\n{kiro}"
+    );
+    assert!(
+        kiro.contains("handle SharedThing")
+            && kiro.contains("shared_thing_new")
+            && kiro.contains("shared_thing_strong_count"),
+        "thread-safe handle API should remain:\n{kiro}"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("LocalOnly")
+            && stdout.contains("does not satisfy the Kiro handle thread-safety contract"),
+        "non-thread-safe handle skip reason missing:\n{stdout}"
+    );
+
+    fs::write(
+        dir.join("src/lib.rs"),
+        r#"use kiro_runtime::{HostResult, KiroError, RuntimeVal};
+
+include!(concat!(env!("CARGO_MANIFEST_DIR"), "/fixture.rs"));
+"#,
+    )
+    .expect("glue-check source should be written");
+    let glue_check = Command::new("cargo")
+        .args(["check", "--quiet", "--manifest-path"])
+        .arg(dir.join("Cargo.toml"))
+        .output()
+        .expect("cargo check should run for generated glue");
+    assert!(
+        glue_check.status.success(),
+        "thread-safe filtered glue should compile\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&glue_check.stdout),
+        String::from_utf8_lossy(&glue_check.stderr)
+    );
+}
+
+#[test]
+fn host_gen_copies_copy_handles_and_skips_other_owned_handle_inputs() {
+    let (dir, output) = generate_correctness_fixture("copy_handle_inputs");
+    assert!(output.status.success(), "host gen should succeed");
+
+    let kiro = fs::read_to_string(dir.join("fixture.kiro")).expect("fixture.kiro should exist");
+    assert!(
+        kiro.contains("rust fn copy_id_value(id: CopyId) -> num"),
+        "Copy handle input should be generated:\n{kiro}"
+    );
+    assert!(
+        kiro.contains("rust fn manual_copy_id_value(id: ManualCopyId) -> num"),
+        "manually implemented Copy should be proven by Cargo:\n{kiro}"
+    );
+    assert!(
+        kiro.contains("rust fn copy_id_into_value(copy_id: CopyId) -> num\n"),
+        "Copy consuming receiver should operate on a reusable copy:\n{kiro}"
+    );
+    assert!(
+        !kiro.contains("consume_owned_token"),
+        "non-Copy owned handle input should be skipped:\n{kiro}"
+    );
+
+    let rust = fs::read_to_string(dir.join("fixture.rs")).expect("fixture.rs should exist");
+    assert!(
+        rust.contains("let id = *RuntimeVal::expect_arg(&args, 0, \"copy_id_value\")?"),
+        "Copy handle should be copied out of its shared handle:\n{rust}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(
+            "consume_owned_token: by-value handle 'OwnedToken' is unsupported unless it is Copy"
+        ),
+        "non-Copy owned handle skip reason missing:\n{stdout}"
+    );
+
+    fs::write(
+        dir.join("src/lib.rs"),
+        r#"use kiro_runtime::{HostResult, KiroError, RuntimeVal};
+
+include!(concat!(env!("CARGO_MANIFEST_DIR"), "/fixture.rs"));
+"#,
+    )
+    .expect("glue-check source should be written");
+    let glue_check = Command::new("cargo")
+        .args(["check", "--quiet", "--manifest-path"])
+        .arg(dir.join("Cargo.toml"))
+        .output()
+        .expect("cargo check should run for generated glue");
+    assert!(
+        glue_check.status.success(),
+        "Copy-filtered handle glue should compile\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&glue_check.stdout),
+        String::from_utf8_lossy(&glue_check.stderr)
+    );
+}
+
+#[test]
+fn host_gen_generates_one_shot_consuming_receivers() {
+    let (dir, output) = generate_correctness_fixture("consuming_receivers");
+    assert!(output.status.success(), "host gen should succeed");
+
+    let kiro = fs::read_to_string(dir.join("fixture.kiro")).expect("fixture.kiro should exist");
+    assert!(
+        kiro.contains("rust fn shared_writer_finish(shared_writer: SharedWriter) -> bytes!"),
+        "consuming receiver should be generated as failable:\n{kiro}"
+    );
+    assert!(
+        kiro.contains("rust fn shared_writer_cancel(shared_writer: SharedWriter) -> void!"),
+        "void consuming receiver should be generated as failable:\n{kiro}"
+    );
+    assert!(
+        kiro.contains(
+            "rust fn shared_writer_write(shared_writer: SharedWriter, bytes: bytes) -> void!"
+        ),
+        "ordinary methods can observe consumption and must be failable:\n{kiro}"
+    );
+
+    let rust = fs::read_to_string(dir.join("fixture.rs")).expect("fixture.rs should exist");
+    assert!(
+        rust.contains("RuntimeVal::handle(\"SharedWriter\", std::sync::Mutex::new(Some(value)))"),
+        "consumable handle should use one-shot payload storage:\n{rust}"
+    );
+    assert!(
+        rust.contains(".take().ok_or_else(|| KiroError::message(\"HandleConsumed\""),
+        "consuming receiver should atomically take its payload:\n{rust}"
+    );
+    assert!(
+        rust.contains(".as_mut().ok_or_else(|| KiroError::message(\"HandleConsumed\""),
+        "mutable receiver should reject an already consumed handle:\n{rust}"
+    );
+
+    fs::write(
+        dir.join("src/lib.rs"),
+        r#"use kiro_runtime::{HostResult, KiroError, RuntimeVal};
+
+include!(concat!(env!("CARGO_MANIFEST_DIR"), "/fixture.rs"));
+"#,
+    )
+    .expect("glue-check source should be written");
+    let glue_check = Command::new("cargo")
+        .args(["check", "--quiet", "--manifest-path"])
+        .arg(dir.join("Cargo.toml"))
+        .output()
+        .expect("cargo check should run for generated glue");
+    assert!(
+        glue_check.status.success(),
+        "one-shot consuming glue should compile\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&glue_check.stdout),
+        String::from_utf8_lossy(&glue_check.stderr)
+    );
+
+    fs::write(
+        dir.join("src/main.rs"),
+        r#"use kiro_runtime::{HostResult, KiroError, RuntimeVal};
+use std::future::Future;
+use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
+
+include!(concat!(env!("CARGO_MANIFEST_DIR"), "/fixture.rs"));
+
+struct NoopWake;
+
+impl Wake for NoopWake {
+    fn wake(self: Arc<Self>) {}
+}
+
+fn block_on<F: Future>(future: F) -> F::Output {
+    let waker = Waker::from(Arc::new(NoopWake));
+    let mut context = Context::from_waker(&waker);
+    let mut future = Box::pin(future);
+    loop {
+        if let Poll::Ready(value) = future.as_mut().poll(&mut context) {
+            return value;
+        }
+    }
+}
+
+fn main() {
+    let writer = block_on(shared_writer_new(vec![])).expect("writer should be created");
+    block_on(shared_writer_write(vec![
+        writer.clone(),
+        RuntimeVal::bytes(b"kiro".to_vec()),
+    ]))
+    .expect("write should succeed");
+    let bytes = block_on(shared_writer_finish(vec![writer.clone()]))
+        .expect("first finish should succeed");
+    assert_eq!(bytes.as_bytes().expect("bytes result"), b"kiro");
+
+    let error = block_on(shared_writer_finish(vec![writer.clone()]))
+        .expect_err("second finish should fail");
+    assert_eq!(error.name, "HandleConsumed");
+
+    let write_error = block_on(shared_writer_write(vec![
+        writer,
+        RuntimeVal::bytes(b"again".to_vec()),
+    ]))
+    .expect_err("write after finish should fail");
+    assert_eq!(write_error.name, "HandleConsumed");
+}
+"#,
+    )
+    .expect("one-shot runtime probe should be written");
+    let runtime_probe = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(dir.join("Cargo.toml"))
+        .output()
+        .expect("one-shot runtime probe should run");
+    assert!(
+        runtime_probe.status.success(),
+        "one-shot runtime behavior should hold\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&runtime_probe.stdout),
+        String::from_utf8_lossy(&runtime_probe.stderr)
+    );
 }
 
 #[test]

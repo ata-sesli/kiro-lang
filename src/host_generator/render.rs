@@ -157,9 +157,14 @@ fn decode_param(
     fn_name: &str,
     collector: &Collector,
 ) -> String {
-    let arg = format!("RuntimeVal::expect_arg(&args, {}, \"{}\")?", idx, fn_name);
+z    let arg = format!("RuntimeVal::expect_arg(&args, {}, \"{}\")?", idx, fn_name);
     match &param.rust_type {
-        RustType::Str => format!("    let {} = {}.as_str()?.to_string();\n", param.name, arg),
+        RustType::Str { borrowed: true } => {
+            format!("    let {} = {}.as_str()?;\n", param.name, arg)
+        }
+        RustType::Str { borrowed: false } => {
+            format!("    let {} = {}.as_str()?.to_string();\n", param.name, arg)
+        }
         RustType::Bytes { borrowed: true } => {
             format!("    let {} = {}.as_bytes()?;\n", param.name, arg)
         }
@@ -176,8 +181,12 @@ fn decode_param(
             format!("    let {} = {}.as_num()? as {};\n", param.name, arg, rust)
         }
         RustType::Bool => format!("    let {} = {}.as_bool()?;\n", param.name, arg),
-        RustType::Record(type_name) => decode_record_param(&param.name, &arg, type_name, collector),
-        RustType::Handle(type_name) if collector.mutable_handles.contains(type_name) => {
+        RustType::Record {
+            name: type_name, ..
+        } => decode_record_param(&param.name, &arg, type_name, collector),
+        RustType::Handle(type_name)
+            if idx == 0 && matches!(binding.source, BindingSource::Method { .. }) =>
+        {
             let mutable = matches!(
                 binding.source,
                 BindingSource::Method {
@@ -185,9 +194,55 @@ fn decode_param(
                     ..
                 }
             ) && idx == 0;
-            let mutability = if mutable { "mut " } else { "" };
+            if collector.mutable_handles.contains(type_name) {
+                let mutability = if mutable { "mut " } else { "" };
+                format!(
+                    "    let {mutability}{} = {}.as_handle(\"{}\")?.downcast_ref::<std::sync::Mutex<{}>>().ok_or_else(|| KiroError::message(\"TypeError\", \"expected mutable handle payload {}\"))?.lock().map_err(|_| KiroError::message(\"HandlePoisoned\", \"{} handle lock was poisoned\"))?;\n",
+                    param.name,
+                    arg,
+                    type_name,
+                    handle_payload_type(binding, type_name),
+                    type_name,
+                    type_name
+                )
+            } else {
+                format!(
+                    "    let {} = {}.as_handle(\"{}\")?.downcast_ref::<{}>().ok_or_else(|| KiroError::message(\"TypeError\", \"expected handle payload {}\"))?;\n",
+                    param.name,
+                    arg,
+                    type_name,
+                    handle_payload_type(binding, type_name),
+                    type_name
+                )
+            }
+        }
+        RustType::Handle(type_name)
+            if collector.copy_handles.contains(type_name)
+                && collector.mutable_handles.contains(type_name) =>
+        {
             format!(
-                "    let {mutability}{} = {}.as_handle(\"{}\")?.downcast_ref::<std::sync::Mutex<{}>>().ok_or_else(|| KiroError::message(\"TypeError\", \"expected mutable handle payload {}\"))?.lock().map_err(|_| KiroError::message(\"HandlePoisoned\", \"{} handle lock was poisoned\"))?;\n",
+                "    let {} = *{}.as_handle(\"{}\")?.downcast_ref::<std::sync::Mutex<{}>>().ok_or_else(|| KiroError::message(\"TypeError\", \"expected mutable handle payload {}\"))?.lock().map_err(|_| KiroError::message(\"HandlePoisoned\", \"{} handle lock was poisoned\"))?;\n",
+                param.name,
+                arg,
+                type_name,
+                handle_payload_type(binding, type_name),
+                type_name,
+                type_name
+            )
+        }
+        RustType::Handle(type_name) if collector.copy_handles.contains(type_name) => {
+            format!(
+                "    let {} = *{}.as_handle(\"{}\")?.downcast_ref::<{}>().ok_or_else(|| KiroError::message(\"TypeError\", \"expected handle payload {}\"))?;\n",
+                param.name,
+                arg,
+                type_name,
+                handle_payload_type(binding, type_name),
+                type_name
+            )
+        }
+        RustType::Handle(type_name) if collector.mutable_handles.contains(type_name) => {
+            format!(
+                "    let {} = {}.as_handle(\"{}\")?.downcast_ref::<std::sync::Mutex<{}>>().ok_or_else(|| KiroError::message(\"TypeError\", \"expected mutable handle payload {}\"))?.lock().map_err(|_| KiroError::message(\"HandlePoisoned\", \"{} handle lock was poisoned\"))?;\n",
                 param.name,
                 arg,
                 type_name,
@@ -236,12 +291,16 @@ fn decode_map_param(name: &str, arg: &str, inner: &RustType, collector: &Collect
 
 fn decode_runtime_expr(value: &str, ty: &RustType, collector: &Collector) -> String {
     match ty {
-        RustType::Str => format!("{}.as_str()?.to_string()", value),
-        RustType::Bytes { .. } => format!("{}.as_bytes()?.to_vec()", value),
+        RustType::Str { borrowed: true } => format!("{}.as_str()?", value),
+        RustType::Str { borrowed: false } => format!("{}.as_str()?.to_string()", value),
+        RustType::Bytes { borrowed: true } => format!("{}.as_bytes()?", value),
+        RustType::Bytes { borrowed: false } => format!("{}.as_bytes()?.to_vec()", value),
         RustType::Num { rust } if rust == "f64" => format!("{}.as_num()?", value),
         RustType::Num { rust } => format!("{}.as_num()? as {}", value, rust),
         RustType::Bool => format!("{}.as_bool()?", value),
-        RustType::Record(type_name) => decode_record_expr(value, type_name, collector),
+        RustType::Record {
+            name: type_name, ..
+        } => decode_record_expr(value, type_name, collector),
         _ => {
             "return Err(KiroError::message(\"TypeError\", \"unsupported nested type\"))".to_string()
         }
@@ -297,7 +356,7 @@ fn encode_value(name: &str, ty: &RustType, collector: &Collector) -> String {
 
 fn encode_inner_value(name: &str, ty: &RustType, collector: &Collector) -> String {
     match ty {
-        RustType::Str | RustType::Bool => format!("RuntimeVal::from({})", name),
+        RustType::Str { .. } | RustType::Bool => format!("RuntimeVal::from({})", name),
         RustType::Bytes { .. } => format!("RuntimeVal::bytes({})", name),
         RustType::Num { .. } => format!("RuntimeVal::from({} as f64)", name),
         RustType::List(inner) => format!(
@@ -310,7 +369,9 @@ fn encode_inner_value(name: &str, ty: &RustType, collector: &Collector) -> Strin
             name,
             encode_inner_value("v", inner, collector)
         ),
-        RustType::Record(type_name) => {
+        RustType::Record {
+            name: type_name, ..
+        } => {
             let record = collector
                 .records
                 .get(type_name)
@@ -343,14 +404,14 @@ fn encode_inner_value(name: &str, ty: &RustType, collector: &Collector) -> Strin
 
 fn kiro_type(ty: &RustType) -> String {
     match ty {
-        RustType::Str => "str".to_string(),
+        RustType::Str { .. } => "str".to_string(),
         RustType::Bytes { .. } => "bytes".to_string(),
         RustType::Num { .. } => "num".to_string(),
         RustType::Bool => "bool".to_string(),
         RustType::Void => "void".to_string(),
         RustType::List(inner) => format!("list {}", kiro_type(inner)),
         RustType::Map(inner) => format!("map str {}", kiro_type(inner)),
-        RustType::Record(name) | RustType::Handle(name) => name.clone(),
+        RustType::Record { name, .. } | RustType::Handle(name) => name.clone(),
     }
 }
 
