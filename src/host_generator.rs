@@ -44,6 +44,7 @@ struct Binding {
     return_type: RustType,
     can_error: bool,
     error_name: Option<String>,
+    output_buffer: Option<String>,
     pure: bool,
 }
 
@@ -70,6 +71,7 @@ enum BindingSource {
 #[derive(Debug, Clone)]
 struct Param {
     name: String,
+    rust_name: String,
     rust_type: RustType,
 }
 
@@ -77,9 +79,11 @@ struct Param {
 struct TypeContext {
     public_structs: BTreeSet<String>,
     records: BTreeMap<String, RecordMode>,
+    simple_enums: BTreeMap<String, SimpleEnumDef>,
     result_aliases: BTreeMap<String, String>,
     std_path_names: BTreeSet<String>,
     self_type: Option<String>,
+    is_zova: bool,
 }
 
 impl TypeContext {
@@ -88,13 +92,17 @@ impl TypeContext {
         records: &BTreeMap<String, RecordMode>,
         result_aliases: &BTreeMap<String, String>,
         items: &[Item],
+        simple_enums: &BTreeMap<String, SimpleEnumDef>,
+        is_zova: bool,
     ) -> Self {
         Self {
             public_structs: public_structs.clone(),
             records: records.clone(),
+            simple_enums: simple_enums.clone(),
             result_aliases: result_aliases.clone(),
             std_path_names: std_path_names(items),
             self_type: None,
+            is_zova,
         }
     }
 
@@ -102,9 +110,11 @@ impl TypeContext {
         Self {
             public_structs: handles.clone(),
             records: BTreeMap::new(),
+            simple_enums: BTreeMap::new(),
             result_aliases: BTreeMap::new(),
             std_path_names: BTreeSet::new(),
             self_type: None,
+            is_zova: false,
         }
     }
 
@@ -124,6 +134,9 @@ enum RustType {
     Void,
     List(Box<RustType>),
     Map(Box<RustType>),
+    StringEnum(String),
+    VectorValues { owned: bool },
+    OutputBuffer,
     Record { name: String, mode: RecordMode },
     Handle(String),
 }
@@ -146,6 +159,11 @@ struct RecordDef {
     fields: Vec<RecordField>,
 }
 
+#[derive(Debug, Clone)]
+struct SimpleEnumDef {
+    variants: Vec<String>,
+}
+
 #[derive(Debug, Default)]
 struct Collector {
     bindings: Vec<Binding>,
@@ -154,9 +172,11 @@ struct Collector {
     mutable_handles: BTreeSet<String>,
     consuming_handles: BTreeSet<String>,
     records: BTreeMap<String, RecordDef>,
+    simple_enums: BTreeMap<String, SimpleEnumDef>,
     skipped: Vec<String>,
     crate_ident: String,
     manual_module: String,
+    is_zova: bool,
 }
 
 impl Collector {
@@ -254,6 +274,37 @@ impl Collector {
     fn is_one_shot_handle(&self, type_name: &str) -> bool {
         self.consuming_handles.contains(type_name) && !self.copy_handles.contains(type_name)
     }
+
+    fn uses_vector_values(&self) -> bool {
+        self.bindings.iter().any(|binding| {
+            binding
+                .params
+                .iter()
+                .any(|param| type_uses_vector_values(&param.rust_type))
+                || type_uses_vector_values(&binding.return_type)
+        }) || self.records.values().any(|record| {
+            record
+                .fields
+                .iter()
+                .any(|field| type_uses_vector_values(&field.rust_type))
+        })
+    }
+
+    fn uses_zova_errors(&self) -> bool {
+        self.is_zova
+            && self
+                .bindings
+                .iter()
+                .any(|binding| binding.error_name.as_deref() == Some("Error"))
+    }
+}
+
+fn type_uses_vector_values(ty: &RustType) -> bool {
+    match ty {
+        RustType::VectorValues { .. } => true,
+        RustType::List(inner) | RustType::Map(inner) => type_uses_vector_values(inner),
+        _ => false,
+    }
 }
 
 fn collect_handle_names(ty: &RustType, handles: &mut BTreeSet<String>) {
@@ -267,6 +318,9 @@ fn collect_handle_names(ty: &RustType, handles: &mut BTreeSet<String>) {
         | RustType::Num { .. }
         | RustType::Bool
         | RustType::Void
+        | RustType::StringEnum(_)
+        | RustType::VectorValues { .. }
+        | RustType::OutputBuffer
         | RustType::Record { .. } => {}
     }
 }
@@ -312,6 +366,7 @@ pub fn generate(
     let mut collector = Collector {
         crate_ident: crate_ident.clone(),
         manual_module,
+        is_zova: resolved.package_name == "zova",
         ..Collector::default()
     };
     collect_crate(&resolved.root, &mut collector)?;
@@ -375,7 +430,10 @@ pub fn generate(
 
     Ok(HostGenResult {
         module_name,
-        declarations: collector.bindings.len() + collector.handles.len() + collector.records.len(),
+        declarations: collector.bindings.len()
+            + collector.handles.len()
+            + collector.records.len()
+            + usize::from(collector.uses_vector_values()),
         skipped: collector.skipped,
         kiro_path,
         rust_path,
@@ -678,9 +736,24 @@ fn collect_crate(root: &Path, collector: &mut Collector) -> Result<(), KiroError
     for reexport in &reexports {
         result_alias_map.extend(result_aliases(&reexport.file.items, Some(&reexport.names)));
     }
+    let mut simple_enums = public_simple_enum_defs(&file.items, None);
+    for reexport in &reexports {
+        simple_enums.extend(public_simple_enum_defs(
+            &reexport.file.items,
+            Some(&reexport.names),
+        ));
+    }
+    collector.simple_enums = simple_enums.clone();
 
     let no_records = BTreeMap::new();
-    let root_probe = TypeContext::new(&public_structs, &no_records, &result_alias_map, &file.items);
+    let root_probe = TypeContext::new(
+        &public_structs,
+        &no_records,
+        &result_alias_map,
+        &file.items,
+        &simple_enums,
+        collector.is_zova,
+    );
     let mut records = public_record_defs(&file.items, None, &root_probe);
     for reexport in &reexports {
         let probe = TypeContext::new(
@@ -688,6 +761,8 @@ fn collect_crate(root: &Path, collector: &mut Collector) -> Result<(), KiroError
             &no_records,
             &result_alias_map,
             &reexport.file.items,
+            &simple_enums,
+            collector.is_zova,
         );
         records.extend(public_record_defs(
             &reexport.file.items,
@@ -706,6 +781,8 @@ fn collect_crate(root: &Path, collector: &mut Collector) -> Result<(), KiroError
         &record_modes,
         &result_alias_map,
         &file.items,
+        &simple_enums,
+        collector.is_zova,
     );
     collect_items(&file.items, None, &root_context, collector);
     for reexport in &reexports {
@@ -714,6 +791,8 @@ fn collect_crate(root: &Path, collector: &mut Collector) -> Result<(), KiroError
             &record_modes,
             &result_alias_map,
             &reexport.file.items,
+            &simple_enums,
+            collector.is_zova,
         );
         collect_items(
             &reexport.file.items,
@@ -766,6 +845,42 @@ fn public_struct_names(
         }
     }
     names
+}
+
+fn public_simple_enum_defs(
+    items: &[Item],
+    allowed_names: Option<&BTreeSet<String>>,
+) -> BTreeMap<String, SimpleEnumDef> {
+    let mut enums = BTreeMap::new();
+    for item in items {
+        let Item::Enum(item_enum) = item else {
+            continue;
+        };
+        let name = item_enum.ident.to_string();
+        if !is_public(&item_enum.vis)
+            || !is_allowed_name(allowed_names, &name)
+            || has_attr(&item_enum.attrs, "non_exhaustive")
+            || !item_enum.generics.params.is_empty()
+            || item_enum.variants.is_empty()
+            || item_enum
+                .variants
+                .iter()
+                .any(|variant| !matches!(variant.fields, syn::Fields::Unit))
+        {
+            continue;
+        }
+        enums.insert(
+            name,
+            SimpleEnumDef {
+                variants: item_enum
+                    .variants
+                    .iter()
+                    .map(|variant| variant.ident.to_string())
+                    .collect(),
+            },
+        );
+    }
+    enums
 }
 
 fn public_record_defs(
@@ -863,10 +978,15 @@ fn contains_opaque_type(ty: &RustType) -> bool {
         | RustType::Record { .. }
         | RustType::List(_)
         | RustType::Map(_)
+        | RustType::OutputBuffer
         | RustType::Void => true,
-        RustType::Str { .. } | RustType::Bytes { .. } | RustType::Num { .. } | RustType::Bool => {
-            false
-        }
+        RustType::Str { .. }
+        | RustType::Bytes { .. }
+        | RustType::Num { .. }
+        | RustType::Bool
+        | RustType::StringEnum(_)
+        | RustType::VectorValues { owned: true } => false,
+        RustType::VectorValues { owned: false } => true,
     }
 }
 
@@ -877,8 +997,12 @@ fn contains_borrowed_type(ty: &RustType) -> bool {
         RustType::Num { .. }
         | RustType::Bool
         | RustType::Void
+        | RustType::StringEnum(_)
+        | RustType::VectorValues { owned: true }
+        | RustType::OutputBuffer
         | RustType::Record { .. }
         | RustType::Handle(_) => false,
+        RustType::VectorValues { owned: false } => true,
     }
 }
 
@@ -1179,6 +1303,7 @@ fn collect_impl(
             let method_context = context.with_self_type(type_name.clone());
             let mut params = vec![Param {
                 name: to_snake_case(&type_name),
+                rust_name: to_snake_case(&type_name),
                 rust_type: RustType::Handle(type_name.clone()),
             }];
             match params_from_signature(method.sig.inputs.iter().skip(1), &method_context) {
@@ -1190,11 +1315,18 @@ fn collect_impl(
                     continue;
                 }
             }
-            let Ok((return_type, can_error, error_name)) =
+            let Ok((mut return_type, can_error, error_name)) =
                 return_type_from_signature(&method.sig.output, &method_context)
             else {
                 collector.skipped.push(format!(
                     "{}::{}: unsupported return type",
+                    type_name, method.sig.ident
+                ));
+                continue;
+            };
+            let Ok(output_buffer) = adapt_output_buffer(&mut params, &mut return_type) else {
+                collector.skipped.push(format!(
+                    "{}::{}: mutable output buffer requires a usize return",
                     type_name, method.sig.ident
                 ));
                 continue;
@@ -1218,6 +1350,7 @@ fn collect_impl(
                 return_type,
                 can_error,
                 error_name,
+                output_buffer,
                 pure: false,
             });
         } else {
@@ -1344,9 +1477,10 @@ fn binding_from_fn(
     if item_fn.sig.variadic.is_some() {
         return Err("variadic functions are unsupported".to_string());
     }
-    let params = params_from_signature(item_fn.sig.inputs.iter(), context)?;
-    let (return_type, can_error, error_name) =
+    let mut params = params_from_signature(item_fn.sig.inputs.iter(), context)?;
+    let (mut return_type, can_error, error_name) =
         return_type_from_signature(&item_fn.sig.output, context)?;
+    let output_buffer = adapt_output_buffer(&mut params, &mut return_type)?;
     Ok(Binding {
         exported_name: item_fn.sig.ident.to_string(),
         source,
@@ -1354,6 +1488,7 @@ fn binding_from_fn(
         return_type,
         can_error,
         error_name,
+        output_buffer,
         pure,
     })
 }
@@ -1371,12 +1506,47 @@ fn params_from_signature<'a>(
             return Err("only named parameters are supported".to_string());
         };
         let rust_type = rust_type_from_syn(&arg.ty, context)?;
+        let rust_name = name.ident.to_string();
         params.push(Param {
-            name: name.ident.to_string(),
+            name: rust_name.clone(),
+            rust_name,
             rust_type,
         });
     }
+    let length_is_taken = params
+        .iter()
+        .any(|param| param.rust_type != RustType::OutputBuffer && param.name == "length");
+    for param in &mut params {
+        if param.rust_type == RustType::OutputBuffer {
+            param.name = if length_is_taken {
+                format!("{}_length", param.rust_name)
+            } else {
+                "length".to_string()
+            };
+        }
+    }
     Ok(params)
+}
+
+fn adapt_output_buffer(
+    params: &mut [Param],
+    return_type: &mut RustType,
+) -> Result<Option<String>, String> {
+    let mut buffers = params
+        .iter()
+        .filter(|param| param.rust_type == RustType::OutputBuffer);
+    let Some(buffer) = buffers.next() else {
+        return Ok(None);
+    };
+    if buffers.next().is_some() {
+        return Err("multiple mutable output buffers are unsupported".to_string());
+    }
+    if !matches!(return_type, RustType::Num { rust } if rust == "usize") {
+        return Err("mutable output buffer requires a usize return".to_string());
+    }
+    let rust_name = buffer.rust_name.clone();
+    *return_type = RustType::Bytes { borrowed: false };
+    Ok(Some(rust_name))
 }
 
 fn return_type_from_signature(
@@ -1404,6 +1574,9 @@ fn reject_input_view_return(ty: &RustType) -> Result<(), String> {
             mode: RecordMode::InputView,
             ..
         } => Err("borrowed record returns are unsupported".to_string()),
+        RustType::VectorValues { owned: false } => {
+            Err("borrowed vector value returns are unsupported".to_string())
+        }
         RustType::List(inner) | RustType::Map(inner) => reject_input_view_return(inner),
         _ => Ok(()),
     }
@@ -1467,6 +1640,13 @@ fn rust_type_from_syn(ty: &Type, context: &TypeContext) -> Result<RustType, Stri
     match ty {
         Type::Reference(reference) => {
             if reference.mutability.is_some() {
+                if matches!(
+                    reference.elem.as_ref(),
+                    Type::Slice(slice)
+                        if matches!(slice.elem.as_ref(), Type::Path(path) if path.path.is_ident("u8"))
+                ) {
+                    return Ok(RustType::OutputBuffer);
+                }
                 return Err("mutable references are unsupported".to_string());
             }
             match reference.elem.as_ref() {
@@ -1518,6 +1698,18 @@ fn rust_type_from_syn(ty: &Type, context: &TypeContext) -> Result<RustType, Stri
                     }
                     Ok(RustType::Map(Box::new(rust_type_from_syn(value, context)?)))
                 }
+                "VectorValues" if context.is_zova => {
+                    validate_lifetime_only_arguments(segment)?;
+                    Ok(RustType::VectorValues { owned: false })
+                }
+                "VectorValuesOwned" if context.is_zova => {
+                    reject_custom_type_arguments(segment)?;
+                    Ok(RustType::VectorValues { owned: true })
+                }
+                _ if context.simple_enums.contains_key(&name) => {
+                    reject_custom_type_arguments(segment)?;
+                    Ok(RustType::StringEnum(name))
+                }
                 _ if context.records.contains_key(&name) => {
                     let mode = context.records[&name];
                     validate_record_type_arguments(segment, mode)?;
@@ -1531,6 +1723,21 @@ fn rust_type_from_syn(ty: &Type, context: &TypeContext) -> Result<RustType, Stri
             }
         }
         _ => Err("unsupported type".to_string()),
+    }
+}
+
+fn validate_lifetime_only_arguments(segment: &syn::PathSegment) -> Result<(), String> {
+    match &segment.arguments {
+        PathArguments::AngleBracketed(args)
+            if !args.args.is_empty()
+                && args
+                    .args
+                    .iter()
+                    .all(|arg| matches!(arg, GenericArgument::Lifetime(_))) =>
+        {
+            Ok(())
+        }
+        _ => Err("VectorValues requires lifetime-only type arguments".to_string()),
     }
 }
 

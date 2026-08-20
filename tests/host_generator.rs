@@ -324,7 +324,167 @@ edition = "2021"
         r#"pub struct OpaqueResult {
     pub optional: Option<String>,
 }
+"#,
+    )
+    .expect("fixture lib should be written");
+    append_generator_correctness_fixture(&crate_dir);
+}
 
+fn write_zova_adapter_fixture_crate(project_dir: &Path) {
+    let crate_dir = project_dir.join("zova");
+    fs::create_dir_all(crate_dir.join("src")).expect("zova fixture src should be created");
+    fs::write(
+        crate_dir.join("Cargo.toml"),
+        r#"[package]
+name = "zova"
+version = "0.26.1"
+edition = "2021"
+"#,
+    )
+    .expect("zova fixture manifest should be written");
+    fs::write(
+        crate_dir.join("src/lib.rs"),
+        r#"#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    Busy,
+}
+
+impl Status {
+    pub fn name(self) -> String {
+        match self {
+            Self::Busy => "ZOVA_BUSY".to_string(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Error {
+    status: Status,
+}
+
+impl Error {
+    pub fn status(&self) -> Option<Status> {
+        Some(self.status)
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ZOVA_BUSY: fixture is busy")
+    }
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorMetric {
+    Cosine,
+    L2,
+    Dot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorElementType {
+    F32,
+    F16,
+    I8,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct VectorCollectionOptions {
+    pub dimensions: u32,
+    pub metric: VectorMetric,
+    pub element_type: VectorElementType,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum VectorValues<'a> {
+    F32(&'a [f32]),
+    F16(&'a [u16]),
+    I8(&'a [i8]),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum VectorValuesOwned {
+    F32(Vec<f32>),
+    F16(Vec<u16>),
+    I8(Vec<i8>),
+}
+
+pub struct Vector {
+    pub id: String,
+    pub values: VectorValuesOwned,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ObjectId(u64);
+
+pub fn object_id(value: u64) -> ObjectId {
+    ObjectId(value)
+}
+
+pub fn sample_vector() -> Vector {
+    Vector {
+        id: "sample".to_string(),
+        values: VectorValuesOwned::F32(vec![1.5, 2.5]),
+    }
+}
+
+pub struct SharedDatabase;
+
+impl SharedDatabase {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn metric_name(&self, options: VectorCollectionOptions) -> String {
+        match options.metric {
+            VectorMetric::Cosine => "cosine",
+            VectorMetric::L2 => "l2",
+            VectorMetric::Dot => "dot",
+        }
+        .to_string()
+    }
+
+    pub fn put_vector(&self, values: VectorValues<'_>) -> Result<()> {
+        let populated = match values {
+            VectorValues::F32(values) => !values.is_empty(),
+            VectorValues::F16(values) => !values.is_empty(),
+            VectorValues::I8(values) => !values.is_empty(),
+        };
+        if populated {
+            Ok(())
+        } else {
+            Err(Error { status: Status::Busy })
+        }
+    }
+
+    pub fn read_object_range(
+        &self,
+        id: ObjectId,
+        offset: u64,
+        buffer: &mut [u8],
+    ) -> Result<usize> {
+        let source = [id.0 as u8, offset as u8, 30, 40];
+        let copied = source.len().min(buffer.len());
+        buffer[..copied].copy_from_slice(&source[..copied]);
+        Ok(copied)
+    }
+
+    pub fn fail_busy(&self) -> Result<()> {
+        Err(Error { status: Status::Busy })
+    }
+}
+"#,
+    )
+    .expect("zova fixture source should be written");
+}
+
+fn append_generator_correctness_fixture(crate_dir: &Path) {
+    let mut source = fs::read_to_string(crate_dir.join("src/lib.rs"))
+        .expect("fixture source prefix should exist");
+    source.push_str(
+        r#"
 pub fn opaque_result() -> OpaqueResult {
     OpaqueResult { optional: None }
 }
@@ -461,8 +621,8 @@ impl SharedWriter {
     pub fn cancel(self) {}
 }
 "#,
-    )
-    .expect("fixture lib should be written");
+    );
+    fs::write(crate_dir.join("src/lib.rs"), source).expect("fixture lib should be written");
 }
 
 fn run_kiro(args: &[&str], current_dir: &Path) -> std::process::Output {
@@ -1610,5 +1770,169 @@ kiro_fixture_crate = { path = "fixture_crate" }
         !kiro.contains("hidden_result"),
         "private one-argument Result alias should not be exposed:\n{}",
         kiro
+    );
+}
+
+#[test]
+fn host_gen_adapts_zova_value_enums_vectors_output_buffers_and_errors() {
+    let dir = temp_project("zova_adapters");
+    link_runtime_and_macros(&dir);
+    write_zova_adapter_fixture_crate(&dir);
+    fs::write(
+        dir.join("kiro.toml"),
+        r#"[package]
+name = "demo"
+entry = "main.kiro"
+
+[dependencies]
+zova = "0.26.1"
+"#,
+    )
+    .expect("manifest should be written");
+    fs::write(
+        dir.join("Cargo.toml"),
+        r#"[package]
+name = "demo_host_gen_zova_adapters"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zova = { path = "zova" }
+kiro_macros = { path = "kiro_macros" }
+kiro_runtime = { path = "kiro_runtime" }
+"#,
+    )
+    .expect("metadata manifest should be written");
+    fs::create_dir_all(dir.join("src")).expect("project src should be created");
+    fs::write(dir.join("src/lib.rs"), "").expect("project lib should be written");
+
+    let output = run_kiro(&["host", "gen", "zova"], &dir);
+    assert!(
+        output.status.success(),
+        "host gen should support the agreed Zova adapters\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let kiro = fs::read_to_string(dir.join("zova.kiro")).expect("zova.kiro should exist");
+    assert!(
+        kiro.contains("struct VectorValues {\n    element_type: str\n    values: list num\n}"),
+        "numeric vector values should have one Kiro-facing shape:\n{kiro}"
+    );
+    assert!(
+        kiro.contains("metric: str") && kiro.contains("element_type: str"),
+        "simple Rust enums in records should map to strings:\n{kiro}"
+    );
+    assert!(
+        kiro.contains("rust fn shared_database_put_vector(shared_database: SharedDatabase, values: VectorValues) -> void!"),
+        "borrowed vector representation should become VectorValues:\n{kiro}"
+    );
+    assert!(
+        kiro.contains("rust fn shared_database_read_object_range(shared_database: SharedDatabase, id: ObjectId, offset: num, length: num) -> bytes!"),
+        "mutable output buffers should become a length input and bytes output:\n{kiro}"
+    );
+
+    let rust = fs::read_to_string(dir.join("zova.rs")).expect("zova.rs should exist");
+    assert!(
+        rust.contains("InvalidVectorMetric") && rust.contains("zova::VectorMetric::Cosine"),
+        "simple enum strings should be validated by generated glue:\n{rust}"
+    );
+    assert!(
+        rust.contains("zova::VectorValues::F32") && rust.contains("zova::VectorValues::I8"),
+        "numeric vector values should select a concrete Rust representation:\n{rust}"
+    );
+    assert!(
+        rust.contains("buffer.truncate(copied)") && rust.contains("RuntimeVal::bytes(buffer)"),
+        "output buffers should return only the bytes written:\n{rust}"
+    );
+    assert!(
+        rust.contains("__kiro_zova_error") && rust.contains("ZovaBusy"),
+        "Zova statuses should become ordinary named Kiro errors:\n{rust}"
+    );
+
+    fs::write(
+        dir.join("src/main.rs"),
+        r#"use std::future::Future;
+use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
+
+use kiro_runtime::{HostResult, KiroError, RuntimeVal};
+
+include!(concat!(env!("CARGO_MANIFEST_DIR"), "/zova.rs"));
+
+struct NoopWake;
+impl Wake for NoopWake { fn wake(self: Arc<Self>) {} }
+
+fn block_on<F: Future>(future: F) -> F::Output {
+    let waker = Waker::from(Arc::new(NoopWake));
+    let mut context = Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        if let Poll::Ready(value) = future.as_mut().poll(&mut context) {
+            return value;
+        }
+    }
+}
+
+fn main() {
+    let database = block_on(shared_database_new(vec![])).expect("database handle");
+    let id = block_on(object_id(vec![RuntimeVal::from(7.0)])).expect("object id handle");
+    let bytes = block_on(shared_database_read_object_range(vec![
+        database.clone(), id, RuntimeVal::from(1.0), RuntimeVal::from(3.0),
+    ])).expect("range read");
+    assert_eq!(bytes.as_bytes().expect("bytes"), &[7, 1, 30]);
+
+    let options = RuntimeVal::structure("VectorCollectionOptions", [
+        ("dimensions".to_string(), RuntimeVal::from(3.0)),
+        ("metric".to_string(), RuntimeVal::from("cosine")),
+        ("element_type".to_string(), RuntimeVal::from("f32")),
+    ].into_iter().collect());
+    let metric = block_on(shared_database_metric_name(vec![database.clone(), options]))
+        .expect("valid enum strings");
+    assert_eq!(metric, RuntimeVal::from("cosine"));
+
+    let invalid_options = RuntimeVal::structure("VectorCollectionOptions", [
+        ("dimensions".to_string(), RuntimeVal::from(3.0)),
+        ("metric".to_string(), RuntimeVal::from("angular")),
+        ("element_type".to_string(), RuntimeVal::from("f32")),
+    ].into_iter().collect());
+    let enum_error = block_on(shared_database_metric_name(vec![database.clone(), invalid_options]))
+        .expect_err("unknown enum string");
+    assert_eq!(enum_error.name, "InvalidVectorMetric");
+
+    let vector = RuntimeVal::structure("VectorValues", [
+        ("element_type".to_string(), RuntimeVal::from("f32")),
+        ("values".to_string(), RuntimeVal::List(vec![RuntimeVal::from(1.0), RuntimeVal::from(2.0)])),
+    ].into_iter().collect());
+    block_on(shared_database_put_vector(vec![database.clone(), vector])).expect("numeric vector");
+
+    let error = block_on(shared_database_fail_busy(vec![database])).expect_err("busy error");
+    assert_eq!(error.name, "ZovaBusy");
+
+    let vector = block_on(sample_vector(vec![])).expect("owned vector");
+    let RuntimeVal::Struct { fields, .. } = vector else { panic!("vector struct"); };
+    assert!(matches!(fields.get("values"), Some(RuntimeVal::Struct { type_name, .. }) if type_name == "VectorValues"));
+}
+"#,
+    )
+    .expect("runtime check source should be written");
+
+    let check = run_kiro(&["check", "zova.kiro"], &dir);
+    assert!(
+        check.status.success(),
+        "generated Kiro should check\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+    let glue_run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(dir.join("Cargo.toml"))
+        .output()
+        .expect("generated Zova adapter glue should run");
+    assert!(
+        glue_run.status.success(),
+        "generated Zova adapter glue should compile and run\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&glue_run.stdout),
+        String::from_utf8_lossy(&glue_run.stderr)
     );
 }
